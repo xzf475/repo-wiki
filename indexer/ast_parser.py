@@ -14,6 +14,8 @@ class ASTNode:
     docstring: Optional[str]
     imports: list[str] = field(default_factory=list)
     calls: list[str] = field(default_factory=list)
+    # called_by is intentionally empty at parse time;
+    # populated in a later cross-reference pass by cli.py
     called_by: list[str] = field(default_factory=list)
 
 def _rel(path: Path, repo_root: Path) -> str:
@@ -59,7 +61,7 @@ def parse_file(path: Path, repo_root: Path) -> list[ASTNode]:
     try:
         source = path.read_text(encoding="utf-8", errors="replace")
         tree = ast.parse(source)
-    except SyntaxError:
+    except (SyntaxError, OSError):
         return []
 
     rel_path = _rel(path, repo_root)
@@ -116,8 +118,11 @@ def load_cached_nodes(repo_root: Path, file_hash: str) -> Optional[list[ASTNode]
     p = repo_root / ".indexer" / "cache" / f"{file_hash}.json"
     if not p.exists():
         return None
-    data = json.loads(p.read_text())
-    return [ASTNode(**n) for n in data]
+    try:
+        data = json.loads(p.read_text())
+        return [ASTNode(**n) for n in data]
+    except (json.JSONDecodeError, TypeError, KeyError):
+        return None  # corrupted cache — caller will re-parse
 
 
 def save_cached_nodes(repo_root: Path, file_hash: str, nodes: list[ASTNode]) -> None:
