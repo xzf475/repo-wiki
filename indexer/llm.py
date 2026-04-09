@@ -47,7 +47,9 @@ def describe_nodes(nodes: list[ASTNode], cfg: Config) -> dict[str, str]:
         result = json.loads(raw)
         # Ensure all node IDs are present in result (fill missing with "")
         return {n.id: result.get(n.id, "") for n in nodes}
-    except Exception:
+    except Exception as e:
+        if isinstance(e, (TypeError, AttributeError, ImportError, NameError)):
+            raise
         return {n.id: "" for n in nodes}
 
 
@@ -81,5 +83,7 @@ def synthesize_commit_message(changed_files: list[str], descriptions: dict[str, 
             ],
         )
         return response.choices[0].message.content.strip()[:72]
-    except Exception:
+    except Exception as e:
+        if isinstance(e, (TypeError, AttributeError, ImportError, NameError)):
+            raise
         return ""
