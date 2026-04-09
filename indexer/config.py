@@ -19,6 +19,7 @@ class Config:
     merge_threshold: int = 2
     pre_commit: bool = True
     synthesize_commit_message: bool = True
+    deep_hook: bool = True
 
 def load_config(repo_root: Path) -> Config:
     path = repo_root / FILENAME
@@ -39,13 +40,14 @@ def load_config(repo_root: Path) -> Config:
         merge_threshold=idx.get("merge_threshold", defaults.merge_threshold),
         pre_commit=hooks.get("pre_commit", defaults.pre_commit),
         synthesize_commit_message=hooks.get("synthesize_commit_message", defaults.synthesize_commit_message),
+        deep_hook=hooks.get("deep", defaults.deep_hook),
     )
 
 def save_config(repo_root: Path, cfg: Config) -> None:
     data = {
         "llm": {"provider": cfg.provider, "api_key_env": cfg.api_key_env},
         "indexer": {"wiki_dir": cfg.wiki_dir, "ignore": cfg.ignore, "max_tokens_per_batch": cfg.max_tokens_per_batch, "merge_threshold": cfg.merge_threshold},
-        "hooks": {"pre_commit": cfg.pre_commit, "synthesize_commit_message": cfg.synthesize_commit_message},
+        "hooks": {"pre_commit": cfg.pre_commit, "synthesize_commit_message": cfg.synthesize_commit_message, "deep": cfg.deep_hook},
     }
     with open(repo_root / FILENAME, "wb") as f:
         tomli_w.dump(data, f)

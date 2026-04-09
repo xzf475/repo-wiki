@@ -1,5 +1,10 @@
 # kiwiskil
 
+[![PyPI version](https://img.shields.io/pypi/v/kiwiskil.svg)](https://pypi.org/project/kiwiskil/)
+[![Python versions](https://img.shields.io/pypi/pyversions/kiwiskil.svg)](https://pypi.org/project/kiwiskil/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![PyPI downloads](https://img.shields.io/pypi/dm/kiwiskil.svg)](https://pypi.org/project/kiwiskil/)
+
 > Chat with your codebase using any LLM.
 
 kiwiskil generates a checked-in structural wiki and skill files from any codebase. It enables LLM agents to navigate code without reading source files — using a knowledge graph built from your repo and checked into git.
@@ -42,7 +47,8 @@ On every subsequent commit, the pre-commit hook runs `kiwiskil run --staged` aut
 
 ```bash
 kiwiskil init              # set up config, hook, and CLAUDE.md
-kiwiskil run               # smart: incremental if indexed before, full if not
+kiwiskil run               # smart incremental + deep enrichment (default)
+kiwiskil run --skip-deep   # skip narrative/flows/constraints (faster)
 kiwiskil run --force       # force full re-index
 kiwiskil run --staged      # incremental on staged files only (used by hook)
 kiwiskil status            # show last indexed commit, stale files, stats
@@ -92,6 +98,7 @@ max_tokens_per_batch = 8000
 [hooks]
 pre_commit = true
 synthesize_commit_message = true
+deep = true           # set false to run --skip-deep on commits (faster, structural only)
 ```
 
 Any LiteLLM-compatible provider works: OpenAI, Anthropic, Gemini, Ollama, local models.

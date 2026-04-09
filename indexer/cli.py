@@ -45,8 +45,9 @@ def init():
     _ensure_cache_gitignore(root, verbose=True)
 
     if is_git_repo(root) and cfg.pre_commit:
-        install_hook(root)
-        click.echo("Installed pre-commit hook.")
+        install_hook(root, skip_deep=not cfg.deep_hook)
+        mode = "--staged --skip-deep" if not cfg.deep_hook else "--staged"
+        click.echo(f"Installed pre-commit hook  (kiwiskil run {mode})")
 
     claude_md = root / "CLAUDE.md"
     if claude_md.exists():
@@ -62,8 +63,8 @@ def init():
 @main.command()
 @click.option("--staged", is_flag=True, help="Incremental: only staged files (used by hook)")
 @click.option("--force", is_flag=True, help="Force full re-index regardless of manifest")
-@click.option("--deep", is_flag=True, help="Generate narrative, data flows, and design constraints (slower, more tokens)")
-def run(staged: bool, force: bool, deep: bool):
+@click.option("--skip-deep", is_flag=True, help="Skip narrative, data flows, and design constraints (faster, fewer tokens)")
+def run(staged: bool, force: bool, skip_deep: bool):
     """Index the codebase and generate wiki pages."""
     root = Path.cwd()
     cfg = load_config(root)
@@ -172,9 +173,9 @@ def run(staged: bool, force: bool, deep: bool):
     wiki_dir = root / cfg.wiki_dir
     index_entries = []
 
-    # ── Phase 5a: Deep enrichment per page (--deep only) ─────────────────────
+    # ── Phase 5a: Deep enrichment (skipped only with --skip-deep) ────────────
     page_enrichments: dict[str, dict] = {}
-    if deep:
+    if not skip_deep:
         click.echo(f"\n  Deep enrichment  ({len(group_nodes)} page{'s' if len(group_nodes) != 1 else ''})  —  narrative + flows + constraints")
         for group_label, nodes in group_nodes.items():
             click.echo(f"    {group_label}  ...", nl=False)
@@ -221,7 +222,7 @@ def run(staged: bool, force: bool, deep: bool):
 
     index_overview = ""
     index_flows: list[str] = []
-    if deep:
+    if not skip_deep:
         click.echo("\n  Deep enrichment  (INDEX overview)  ...", nl=False)
         skill_pages_for_deep = [
             {"label": e.path.split("/")[-1].replace(".md", ""), "covers": e.covers, "entry_points": e.entry_points}
@@ -342,8 +343,10 @@ def hook():
 def hook_install():
     """Install the pre-commit hook in the current repo."""
     root = Path.cwd()
-    install_hook(root)
-    click.echo("Pre-commit hook installed.")
+    cfg = load_config(root)
+    install_hook(root, skip_deep=not cfg.deep_hook)
+    mode = "--staged --skip-deep" if not cfg.deep_hook else "--staged"
+    click.echo(f"Pre-commit hook installed  (kiwiskil run {mode})")
 
 
 @hook.command("remove")

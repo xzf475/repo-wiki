@@ -3,52 +3,51 @@ from __future__ import annotations
 from pathlib import Path
 
 HOOK_MARKER = "# managed by kiwiskil"
-HOOK_CONTENT = "kiwiskil run --staged"
-
-# Used for fresh install (no existing hook)
-HOOK_SCRIPT_FRESH = f"""\
-#!/bin/sh
-{HOOK_MARKER}
-{HOOK_CONTENT}
-"""
-
-# Used when appending to existing hook (no shebang)
-HOOK_SCRIPT_APPEND = f"""
-{HOOK_MARKER}
-{HOOK_CONTENT}
-"""
 
 
-def install_hook(repo_root: Path) -> None:
-    """Install the pre-commit hook in repo_root/.git/hooks/pre-commit.
+def _hook_command(skip_deep: bool = False) -> str:
+    return "kiwiskil run --staged --skip-deep" if skip_deep else "kiwiskil run --staged"
 
-    If a pre-commit hook already exists and is not managed by kiwiskil,
-    append our script to it rather than overwriting.
-    If already installed, do nothing.
+
+def _hook_script_fresh(skip_deep: bool = False) -> str:
+    return f"#!/bin/sh\n{HOOK_MARKER}\n{_hook_command(skip_deep)}\n"
+
+
+def _hook_script_append(skip_deep: bool = False) -> str:
+    return f"\n{HOOK_MARKER}\n{_hook_command(skip_deep)}\n"
+
+
+def install_hook(repo_root: Path, skip_deep: bool = False) -> None:
+    """Install or update the pre-commit hook.
+
+    - Fresh install: writes a new hook script
+    - Existing kiwiskil hook: updates the command in-place (e.g. adds/removes --skip-deep)
+    - Existing non-kiwiskil hook: appends our block
     """
     hook_path = repo_root / ".git" / "hooks" / "pre-commit"
+    cmd = _hook_command(skip_deep)
 
     if hook_path.exists():
         existing = hook_path.read_text()
         if HOOK_MARKER in existing:
-            return  # already installed, nothing to do
-        # Append to existing hook (use HOOK_SCRIPT_APPEND without shebang)
-        updated = existing.rstrip() + "\n\n" + HOOK_SCRIPT_APPEND
-        hook_path.write_text(updated)
+            # Update existing kiwiskil line in-place
+            lines = existing.splitlines()
+            updated = [
+                cmd if (i > 0 and lines[i - 1].strip() == HOOK_MARKER) else line
+                for i, line in enumerate(lines)
+            ]
+            hook_path.write_text("\n".join(updated) + "\n")
+        else:
+            hook_path.write_text(existing.rstrip() + _hook_script_append(skip_deep))
     else:
         hook_path.parent.mkdir(parents=True, exist_ok=True)
-        hook_path.write_text(HOOK_SCRIPT_FRESH)
+        hook_path.write_text(_hook_script_fresh(skip_deep))
 
     hook_path.chmod(0o755)
 
 
 def remove_hook(repo_root: Path) -> None:
-    """Remove the kiwiskil-managed portion of the pre-commit hook.
-
-    If the hook consists entirely of our script, delete the file.
-    If our script was appended to an existing hook, remove only our lines.
-    If not installed, do nothing.
-    """
+    """Remove the kiwiskil-managed portion of the pre-commit hook."""
     hook_path = repo_root / ".git" / "hooks" / "pre-commit"
 
     if not hook_path.exists():
@@ -56,16 +55,21 @@ def remove_hook(repo_root: Path) -> None:
 
     content = hook_path.read_text()
     if HOOK_MARKER not in content:
-        return  # not managed by us
+        return
 
-    # Remove lines added by kiwiskil
     lines = content.splitlines()
-    cleaned = [
-        line for line in lines
-        if HOOK_MARKER not in line and HOOK_CONTENT not in line
-    ]
+    cleaned = []
+    skip_next = False
+    for line in lines:
+        if skip_next:
+            skip_next = False
+            continue
+        if HOOK_MARKER in line:
+            skip_next = True  # skip the command line that follows
+            continue
+        cleaned.append(line)
 
-    # Collapse multiple consecutive blank lines into one
+    # Collapse consecutive blank lines
     result_lines = []
     prev_blank = False
     for line in cleaned:
