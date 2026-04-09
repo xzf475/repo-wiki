@@ -42,13 +42,7 @@ def init():
     save_config(root, cfg)
     click.echo(f"Created {root / '.indexer.toml'}")
 
-    # Write .indexer/.gitignore to exclude cache but keep manifest + skills
-    indexer_dir = root / ".indexer"
-    indexer_dir.mkdir(exist_ok=True)
-    gitignore = indexer_dir / ".gitignore"
-    if not gitignore.exists():
-        gitignore.write_text("cache/\n")
-        click.echo(f"Created {gitignore.relative_to(root)}")
+    _ensure_cache_gitignore(root, verbose=True)
 
     if is_git_repo(root) and cfg.pre_commit:
         install_hook(root)
@@ -286,7 +280,7 @@ def run(staged: bool, force: bool, deep: bool):
              cfg.wiki_dir,
              ".indexer/manifest.json",
              ".indexer/skills/codebase.md",
-             ".indexer/.gitignore"],
+             ".gitignore"],
             cwd=root,
         )
         click.echo(f"\n  Staged wiki + manifest + skill file")
@@ -345,12 +339,24 @@ def hook_remove():
     click.echo("Pre-commit hook removed.")
 
 
-def _ensure_cache_gitignore(root: Path) -> None:
-    """Write .indexer/.gitignore to exclude cache/ if it doesn't exist yet."""
-    gitignore = root / ".indexer" / ".gitignore"
-    if not gitignore.exists():
-        gitignore.parent.mkdir(exist_ok=True)
-        gitignore.write_text("cache/\n")
+CACHE_GITIGNORE_ENTRY = ".indexer/cache/"
+
+
+def _ensure_cache_gitignore(root: Path, verbose: bool = False) -> None:
+    """Add .indexer/cache/ to the root .gitignore, creating it if needed."""
+    gitignore = root / ".gitignore"
+    if gitignore.exists():
+        content = gitignore.read_text()
+        if CACHE_GITIGNORE_ENTRY in content:
+            return  # already present
+        updated = content.rstrip() + "\n\n# kiwiskil\n" + CACHE_GITIGNORE_ENTRY + "\n"
+        gitignore.write_text(updated)
+        if verbose:
+            click.echo(f"Added {CACHE_GITIGNORE_ENTRY} to .gitignore")
+    else:
+        gitignore.write_text(f"# kiwiskil\n{CACHE_GITIGNORE_ENTRY}\n")
+        if verbose:
+            click.echo(f"Created .gitignore with {CACHE_GITIGNORE_ENTRY}")
 
 
 def _is_indexable(path: str, cfg: Config) -> bool:
