@@ -1,4 +1,16 @@
 # Codebase Index
+{% if overview %}
+
+## System Overview
+
+{{ overview }}
+{% endif %}
+{% if flows %}
+## Key Flows
+{% for flow in flows -%}
+- {{ flow }}
+{% endfor %}
+{% endif %}
 
 ## Structure
 | Wiki Page | Covers | Entry Points |

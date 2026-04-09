@@ -163,6 +163,141 @@ def describe_files(file_nodes: dict[str, list[ASTNode]], cfg: Config) -> dict[st
         return {f: "" for f in file_nodes}
 
 
+def deep_enrich_page(
+    group_label: str,
+    files: list[str],
+    nodes: list[ASTNode],
+    descriptions: dict[str, str],
+    cfg: Config,
+) -> dict:
+    """
+    Deep enrichment for a wiki page group. Returns a dict with:
+      - narrative: 3-5 sentence paragraph explaining why this module exists
+      - data_flows: list of short flow strings (e.g. "POST /retain → memory_retain → HindsightProvider.retain → Supabase")
+      - constraints: list of non-obvious design facts (e.g. "PersonalToken is 1-per-user; creating revokes the old one")
+
+    Falls back to empty values on any error.
+    """
+    api_key = _resolve_api_key(cfg)
+    use_sdk = _is_anthropic(cfg) and api_key is None
+
+    symbol_summary = [
+        {"id": n.id, "type": n.type, "desc": descriptions.get(n.id, ""), "calls": n.calls[:8]}
+        for n in nodes
+        if n.type in ("class", "function") or not n.called_by
+    ][:30]
+
+    system = (
+        "You are a senior engineer writing internal wiki documentation for an AI agent to navigate this codebase. "
+        "Be specific, dense, and token-efficient — the reader is an LLM, not a human. "
+        "Avoid padding, fluff, or generic statements. Every sentence must carry unique information."
+    )
+    user = json.dumps({
+        "group": group_label,
+        "files": files,
+        "symbols": symbol_summary,
+        "task": (
+            "Return a JSON object with exactly three keys:\n"
+            "1. 'narrative': A 3-5 sentence paragraph explaining WHY this module exists, "
+            "what system-level problem it solves, and how it fits the broader architecture. "
+            "Name the key classes and their roles. Be concrete.\n"
+            "2. 'data_flows': A list of 2-4 short strings, each describing one end-to-end flow "
+            "through this module (e.g. 'client calls X → Y validates → Z writes to DB'). "
+            "Only include flows that go through THIS group's code.\n"
+            "3. 'constraints': A list of 3-6 non-obvious design facts, edge cases, or invariants "
+            "that an engineer MUST know to use this module correctly "
+            "(e.g. '1-per-user limit enforced at creation', 'returns None not raises on miss'). "
+            "Do NOT state things obvious from the symbol names."
+        ),
+    })
+
+    empty = {"narrative": "", "data_flows": [], "constraints": []}
+
+    try:
+        if use_sdk:
+            raw = _anthropic_completion(cfg.provider, system, user, api_key)
+        else:
+            import litellm
+            response = litellm.completion(
+                model=cfg.provider,
+                api_key=api_key,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+            )
+            raw = response.choices[0].message.content
+
+        raw = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        result = json.loads(raw)
+        return {
+            "narrative": result.get("narrative", ""),
+            "data_flows": result.get("data_flows", []),
+            "constraints": result.get("constraints", []),
+        }
+    except Exception as e:
+        if isinstance(e, (TypeError, AttributeError, ImportError, NameError)):
+            raise
+        return empty
+
+
+def deep_enrich_index(
+    pages: list[dict],
+    cfg: Config,
+) -> dict:
+    """
+    Generate a system-level overview paragraph and key cross-cutting flows for INDEX.md.
+    pages: list of {"label": str, "covers": str, "entry_points": list[str]}
+    Returns {"overview": str, "flows": list[str]}
+    """
+    api_key = _resolve_api_key(cfg)
+    use_sdk = _is_anthropic(cfg) and api_key is None
+
+    system = (
+        "You are a senior engineer writing a codebase overview for an AI agent. "
+        "Be dense and specific. No fluff."
+    )
+    user = json.dumps({
+        "wiki_pages": pages,
+        "task": (
+            "Return a JSON object with two keys:\n"
+            "1. 'overview': 3-4 sentences describing the overall system architecture — "
+            "what it does, the main components, and how they connect. Name modules specifically.\n"
+            "2. 'flows': A list of 3-5 strings, each a key cross-cutting request flow "
+            "spanning multiple modules (e.g. 'Auth0 JWT → TokenValidator → require_auth0_user → route handler'). "
+            "These should be the flows an agent most often needs to trace."
+        ),
+    })
+
+    empty = {"overview": "", "flows": []}
+
+    try:
+        if use_sdk:
+            raw = _anthropic_completion(cfg.provider, system, user, api_key)
+        else:
+            import litellm
+            response = litellm.completion(
+                model=cfg.provider,
+                api_key=api_key,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+            )
+            raw = response.choices[0].message.content
+
+        raw = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        result = json.loads(raw)
+        return {
+            "overview": result.get("overview", ""),
+            "flows": result.get("flows", []),
+        }
+    except Exception as e:
+        if isinstance(e, (TypeError, AttributeError, ImportError, NameError)):
+            raise
+        return empty
+
+
 def synthesize_commit_message(changed_files: list[str], descriptions: dict[str, str], cfg: Config) -> str:
     """
     Generate a one-line commit message from changed files and symbol descriptions.

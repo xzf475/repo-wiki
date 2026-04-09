@@ -14,6 +14,10 @@ class PageContext:
     nodes: list  # list[ASTNode]
     descriptions: dict[str, str]
     file_descriptions: dict[str, str] = field(default_factory=dict)
+    # deep enrichment fields (populated only with --deep)
+    narrative: str = ""
+    data_flows: list[str] = field(default_factory=list)
+    constraints: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -21,6 +25,9 @@ class IndexEntry:
     path: str
     covers: str
     entry_points: list[str]
+    # deep enrichment fields (populated only with --deep)
+    overview: str = ""
+    flows: list[str] = field(default_factory=list)
 
 
 def _jinja_env() -> Environment:
@@ -62,13 +69,16 @@ def build_page(ctx: PageContext) -> str:
         all_called_by=all_called_by,
         all_imports=all_imports,
         entry_points=entry_points,
+        narrative=ctx.narrative,
+        data_flows=ctx.data_flows,
+        constraints=ctx.constraints,
     )
 
 
-def build_index(entries: list[IndexEntry], last_commit: str, indexed_date: str) -> str:
+def build_index(entries: list[IndexEntry], last_commit: str, indexed_date: str, overview: str = "", flows: list[str] = []) -> str:
     env = _jinja_env()
     tmpl = env.get_template("index.md.j2")
-    return tmpl.render(pages=entries, last_commit=last_commit, indexed_date=indexed_date)
+    return tmpl.render(pages=entries, last_commit=last_commit, indexed_date=indexed_date, overview=overview, flows=flows)
 
 
 def write_page(wiki_dir: Path, group_label: str, content: str) -> Path:

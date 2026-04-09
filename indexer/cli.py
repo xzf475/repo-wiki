@@ -13,7 +13,7 @@ from indexer.git import (
     changed_files_since, is_git_repo
 )
 from indexer.ast_parser import parse_file, load_cached_nodes, save_cached_nodes, compute_hash_short
-from indexer.llm import describe_nodes, describe_files, synthesize_commit_message
+from indexer.llm import describe_nodes, describe_files, deep_enrich_page, deep_enrich_index, synthesize_commit_message
 from indexer.grouper import density_group
 from indexer.wiki import build_page, build_index, write_page, write_index, PageContext, IndexEntry, TEMPLATES_DIR
 from indexer.hooks import install_hook, remove_hook
@@ -68,7 +68,8 @@ def init():
 @main.command()
 @click.option("--staged", is_flag=True, help="Incremental: only staged files (used by hook)")
 @click.option("--force", is_flag=True, help="Force full re-index regardless of manifest")
-def run(staged: bool, force: bool):
+@click.option("--deep", is_flag=True, help="Generate narrative, data flows, and design constraints (slower, more tokens)")
+def run(staged: bool, force: bool, deep: bool):
     """Index the codebase and generate wiki pages."""
     root = Path.cwd()
     cfg = load_config(root)
@@ -176,13 +177,39 @@ def run(staged: bool, force: bool):
 
     wiki_dir = root / cfg.wiki_dir
     index_entries = []
+
+    # ── Phase 5a: Deep enrichment per page (--deep only) ─────────────────────
+    page_enrichments: dict[str, dict] = {}
+    if deep:
+        click.echo(f"\n  Deep enrichment  ({len(group_nodes)} page{'s' if len(group_nodes) != 1 else ''})  —  narrative + flows + constraints")
+        for group_label, nodes in group_nodes.items():
+            click.echo(f"    {group_label}  ...", nl=False)
+            enrichment = deep_enrich_page(
+                group_label=group_label,
+                files=list({n.file for n in nodes}),
+                nodes=nodes,
+                descriptions=descriptions,
+                cfg=cfg,
+            )
+            page_enrichments[group_label] = enrichment
+            parts = []
+            if enrichment["narrative"]: parts.append("narrative")
+            if enrichment["data_flows"]: parts.append(f"{len(enrichment['data_flows'])} flows")
+            if enrichment["constraints"]: parts.append(f"{len(enrichment['constraints'])} constraints")
+            click.echo(f"  {', '.join(parts) or 'empty'}")
+        click.echo()
+
     for group_label, nodes in group_nodes.items():
+        enrichment = page_enrichments.get(group_label, {})
         ctx = PageContext(
             group_label=group_label,
             files=list({n.file for n in nodes}),
             nodes=nodes,
             descriptions=descriptions,
             file_descriptions=file_descriptions,
+            narrative=enrichment.get("narrative", ""),
+            data_flows=enrichment.get("data_flows", []),
+            constraints=enrichment.get("constraints", []),
         )
         content = build_page(ctx)
         page_path = write_page(wiki_dir, group_label, content)
@@ -192,13 +219,26 @@ def run(staged: bool, force: bool):
             covers=", ".join(sorted({n.file for n in nodes})),
             entry_points=entry_points,
         ))
-        file_list = ", ".join(sorted({n.file for n in nodes}))
         click.echo(f"    ✓  {page_path.relative_to(root)}  ({len(nodes)} symbols)")
 
     # ── Phase 6: INDEX + skill ────────────────────────────────────────────────
     commit = current_commit(root) or "unknown"
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    index_content = build_index(index_entries, commit, today)
+
+    index_overview = ""
+    index_flows: list[str] = []
+    if deep:
+        click.echo("\n  Deep enrichment  (INDEX overview)  ...", nl=False)
+        skill_pages_for_deep = [
+            {"label": e.path.split("/")[-1].replace(".md", ""), "covers": e.covers, "entry_points": e.entry_points}
+            for e in index_entries
+        ]
+        idx_enrichment = deep_enrich_index(skill_pages_for_deep, cfg)
+        index_overview = idx_enrichment.get("overview", "")
+        index_flows = idx_enrichment.get("flows", [])
+        click.echo(f"  {'overview + ' + str(len(index_flows)) + ' flows' if index_overview else 'empty'}\n")
+
+    index_content = build_index(index_entries, commit, today, overview=index_overview, flows=index_flows)
     write_index(wiki_dir, index_content)
     click.echo(f"    ✓  {cfg.wiki_dir}/INDEX.md")
 
@@ -237,18 +277,28 @@ def run(staged: bool, force: bool):
 
     save_manifest(root, manifest)
 
+    # ── Auto-stage ALL generated files (pre-commit hook) ──────────────────────
+    # Must happen before commit message synthesis so output is clean,
+    # and before git finalises the commit object.
+    if staged and is_git_repo(root):
+        subprocess.run(
+            ["git", "add",
+             cfg.wiki_dir,
+             ".indexer/manifest.json",
+             ".indexer/skills/codebase.md",
+             ".indexer/.gitignore"],
+            cwd=root,
+        )
+        click.echo(f"\n  Staged wiki + manifest + skill file")
+
     # ── Commit message synthesis ───────────────────────────────────────────────
     if cfg.synthesize_commit_message and staged:
-        click.echo("\n  Synthesizing commit message  ...", nl=False)
+        click.echo("  Synthesizing commit message  ...", nl=False)
         msg = synthesize_commit_message(candidates, descriptions, cfg)
         if msg:
             click.echo(f"\n\n  Suggested commit message:\n    {msg}\n")
         else:
             click.echo("  (skipped)\n")
-
-    # Auto-stage wiki + manifest when running as pre-commit hook
-    if staged and is_git_repo(root):
-        subprocess.run(["git", "add", cfg.wiki_dir, ".indexer/manifest.json"], cwd=root)
 
     click.echo(f"\n  Done  —  {len(index_entries)} wiki page(s)  —  {total_symbols} symbols indexed\n")
 

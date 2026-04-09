@@ -1,4 +1,10 @@
 # {{ group_label }}/
+{% if narrative %}
+
+## Overview
+
+{{ narrative }}
+{% endif %}
 
 ## Modules
 | File | Purpose |
@@ -12,6 +18,18 @@
 {% for node in nodes -%}
 | `{{ node.id }}` | {{ node.type }} | {{ descriptions.get(node.id, "") }} |
 {% endfor %}
+{% if data_flows %}
+## Data Flows
+{% for flow in data_flows -%}
+- {{ flow }}
+{% endfor %}
+{% endif %}
+{% if constraints %}
+## Design Constraints
+{% for c in constraints -%}
+- {{ c }}
+{% endfor %}
+{% endif %}
 ## Relationships
 {% if all_calls %}- **Calls:** {{ all_calls | join(", ") }}
 {% endif %}{% if all_called_by %}- **Called by:** {{ all_called_by | join(", ") }}
