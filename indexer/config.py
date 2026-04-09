@@ -16,6 +16,7 @@ class Config:
         "node_modules", ".venv", "dist", "build", "__pycache__", "*.test.*"
     ])
     max_tokens_per_batch: int = 8000
+    merge_threshold: int = 2
     pre_commit: bool = True
     synthesize_commit_message: bool = True
 
@@ -35,6 +36,7 @@ def load_config(repo_root: Path) -> Config:
         wiki_dir=idx.get("wiki_dir", defaults.wiki_dir),
         ignore=list(idx.get("ignore", defaults.ignore)),
         max_tokens_per_batch=idx.get("max_tokens_per_batch", defaults.max_tokens_per_batch),
+        merge_threshold=idx.get("merge_threshold", defaults.merge_threshold),
         pre_commit=hooks.get("pre_commit", defaults.pre_commit),
         synthesize_commit_message=hooks.get("synthesize_commit_message", defaults.synthesize_commit_message),
     )
@@ -42,7 +44,7 @@ def load_config(repo_root: Path) -> Config:
 def save_config(repo_root: Path, cfg: Config) -> None:
     data = {
         "llm": {"provider": cfg.provider, "api_key_env": cfg.api_key_env},
-        "indexer": {"wiki_dir": cfg.wiki_dir, "ignore": cfg.ignore, "max_tokens_per_batch": cfg.max_tokens_per_batch},
+        "indexer": {"wiki_dir": cfg.wiki_dir, "ignore": cfg.ignore, "max_tokens_per_batch": cfg.max_tokens_per_batch, "merge_threshold": cfg.merge_threshold},
         "hooks": {"pre_commit": cfg.pre_commit, "synthesize_commit_message": cfg.synthesize_commit_message},
     }
     with open(repo_root / FILENAME, "wb") as f:

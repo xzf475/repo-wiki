@@ -128,7 +128,7 @@ def run(staged: bool, force: bool):
         descriptions.update(describe_nodes(batch, cfg))
 
     # Group files → wiki page labels
-    groups = density_group(candidates)
+    groups = density_group(candidates, merge_threshold=cfg.merge_threshold)
     group_nodes: dict[str, list] = {}
     for node in all_nodes:
         group = groups.get(node.file, node.file)
