@@ -16,10 +16,15 @@ def _resolve_api_key(cfg: Config) -> str | None:
     api_key_env can be either:
     - an env var name (e.g. "GROQ_API_KEY") -> look it up from environment
     - an actual key value (e.g. "gsk_...") -> use it directly
-    - empty string "" -> no key (use Claude Code session auth)
+    - empty string "" -> auto-detect from well-known env vars
     """
     value = cfg.api_key_env
     if not value:
+        # Auto-detect from common env vars based on provider
+        for env_var in ("ANTHROPIC_API_KEY", "GROQ_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"):
+            key = os.environ.get(env_var)
+            if key:
+                return key
         return None
     # If it looks like an actual key (has lowercase/mixed case), use directly
     if " " not in value and not value.isupper() and not value.replace("_", "").isupper():
@@ -27,17 +32,12 @@ def _resolve_api_key(cfg: Config) -> str | None:
     return os.environ.get(value)
 
 
-def _anthropic_completion(model: str, system: str, user: str) -> str:
-    """
-    Call Anthropic SDK directly — picks up Claude Code session auth automatically.
-    No API key needed when running inside Claude Code.
-    """
+def _anthropic_completion(model: str, system: str, user: str, api_key: str) -> str:
+    """Call Anthropic SDK directly with the provided API key."""
     import anthropic
 
-    # Strip "anthropic/" prefix if present — SDK uses bare model names
     bare_model = model.removeprefix("anthropic/")
-
-    client = anthropic.Anthropic()
+    client = anthropic.Anthropic(api_key=api_key)
     response = client.messages.create(
         model=bare_model,
         max_tokens=1024,
@@ -81,7 +81,7 @@ def describe_nodes(nodes: list[ASTNode], cfg: Config) -> dict[str, str]:
 
     try:
         if use_sdk:
-            raw = _anthropic_completion(cfg.provider, system, user)
+            raw = _anthropic_completion(cfg.provider, system, user, api_key)
         else:
             import litellm
             response = litellm.completion(
@@ -119,7 +119,7 @@ def synthesize_commit_message(changed_files: list[str], descriptions: dict[str, 
 
     try:
         if use_sdk:
-            raw = _anthropic_completion(cfg.provider, system, user)
+            raw = _anthropic_completion(cfg.provider, system, user, api_key)
         else:
             import litellm
             response = litellm.completion(
