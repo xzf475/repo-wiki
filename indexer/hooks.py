@@ -4,8 +4,16 @@ from pathlib import Path
 
 HOOK_MARKER = "# managed by codeindexer"
 HOOK_CONTENT = "indexer run --staged"
-HOOK_SCRIPT = f"""\
+
+# Used for fresh install (no existing hook)
+HOOK_SCRIPT_FRESH = f"""\
 #!/bin/sh
+{HOOK_MARKER}
+{HOOK_CONTENT}
+"""
+
+# Used when appending to existing hook (no shebang)
+HOOK_SCRIPT_APPEND = f"""
 {HOOK_MARKER}
 {HOOK_CONTENT}
 """
@@ -24,12 +32,12 @@ def install_hook(repo_root: Path) -> None:
         existing = hook_path.read_text()
         if HOOK_MARKER in existing:
             return  # already installed, nothing to do
-        # Append to existing hook
-        updated = existing.rstrip() + "\n\n" + HOOK_SCRIPT
+        # Append to existing hook (use HOOK_SCRIPT_APPEND without shebang)
+        updated = existing.rstrip() + "\n\n" + HOOK_SCRIPT_APPEND
         hook_path.write_text(updated)
     else:
         hook_path.parent.mkdir(parents=True, exist_ok=True)
-        hook_path.write_text(HOOK_SCRIPT)
+        hook_path.write_text(HOOK_SCRIPT_FRESH)
 
     hook_path.chmod(0o755)
 
@@ -56,7 +64,18 @@ def remove_hook(repo_root: Path) -> None:
         line for line in lines
         if HOOK_MARKER not in line and HOOK_CONTENT not in line
     ]
-    result = "\n".join(cleaned).strip()
+
+    # Collapse multiple consecutive blank lines into one
+    result_lines = []
+    prev_blank = False
+    for line in cleaned:
+        is_blank = line.strip() == ""
+        if is_blank and prev_blank:
+            continue
+        result_lines.append(line)
+        prev_blank = is_blank
+
+    result = "\n".join(result_lines).strip()
 
     if result and result != "#!/bin/sh":
         hook_path.write_text(result + "\n")
