@@ -40,3 +40,16 @@ def test_returns_all_files():
     files = ["a/b/foo.py", "a/c/bar.py", "main.py"]
     groups = density_group(files, merge_threshold=5)
     assert set(groups.keys()) == set(files)
+
+
+def test_root_files_count_correctly():
+    # 3 root files with threshold=6 — should NOT meet threshold
+    # so they get grouped to "." (the only prefix available)
+    # but they should NOT be incorrectly counted as 6
+    files = ["a.py", "b.py", "c.py"]
+    groups = density_group(files, merge_threshold=6)
+    # All 3 should resolve to "." (shallowest = only prefix)
+    assert all(g == "." for g in groups.values())
+    # And with threshold=3 they should also get "." since it's the only prefix
+    groups2 = density_group(files, merge_threshold=3)
+    assert all(g == "." for g in groups2.values())

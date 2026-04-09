@@ -36,8 +36,6 @@ def density_group(files: list[str], merge_threshold: int = 6) -> dict[str, str]:
         folder = folder_of(f)
         for prefix in prefixes(folder):
             prefix_count[prefix] += 1
-        if folder == ".":
-            prefix_count["."] += 1
 
     def resolve_group(f: str) -> str:
         folder = folder_of(f)
