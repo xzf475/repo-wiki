@@ -2,8 +2,8 @@
 from __future__ import annotations
 from pathlib import Path
 
-HOOK_MARKER = "# managed by codeindexer"
-HOOK_CONTENT = "indexer run --staged"
+HOOK_MARKER = "# managed by kiwiskil"
+HOOK_CONTENT = "kiwiskil run --staged"
 
 # Used for fresh install (no existing hook)
 HOOK_SCRIPT_FRESH = f"""\
@@ -22,7 +22,7 @@ HOOK_SCRIPT_APPEND = f"""
 def install_hook(repo_root: Path) -> None:
     """Install the pre-commit hook in repo_root/.git/hooks/pre-commit.
 
-    If a pre-commit hook already exists and is not managed by codeindexer,
+    If a pre-commit hook already exists and is not managed by kiwiskil,
     append our script to it rather than overwriting.
     If already installed, do nothing.
     """
@@ -43,7 +43,7 @@ def install_hook(repo_root: Path) -> None:
 
 
 def remove_hook(repo_root: Path) -> None:
-    """Remove the codeindexer-managed portion of the pre-commit hook.
+    """Remove the kiwiskil-managed portion of the pre-commit hook.
 
     If the hook consists entirely of our script, delete the file.
     If our script was appended to an existing hook, remove only our lines.
@@ -58,7 +58,7 @@ def remove_hook(repo_root: Path) -> None:
     if HOOK_MARKER not in content:
         return  # not managed by us
 
-    # Remove lines added by codeindexer
+    # Remove lines added by kiwiskil
     lines = content.splitlines()
     cleaned = [
         line for line in lines

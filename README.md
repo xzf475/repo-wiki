@@ -21,7 +21,7 @@ The wiki is plain markdown checked into your repo. No cloud service, no search i
 ## Install
 
 ```bash
-pip install codeindexer
+pip install kiwiskil
 ```
 
 ---
@@ -30,24 +30,24 @@ pip install codeindexer
 
 ```bash
 # In any git repo
-indexer init       # creates .indexer.toml, installs pre-commit hook, appends CLAUDE.md
-indexer run        # generates wiki/ and .indexer/skills/codebase.md
+kiwiskil init       # creates .indexer.toml, installs pre-commit hook, appends CLAUDE.md
+kiwiskil run        # generates wiki/ and .indexer/skills/codebase.md
 ```
 
-On every subsequent commit, the pre-commit hook runs `indexer run --staged` automatically — only changed files are re-indexed.
+On every subsequent commit, the pre-commit hook runs `kiwiskil run --staged` automatically — only changed files are re-indexed.
 
 ---
 
 ## CLI
 
 ```bash
-indexer init              # set up config, hook, and CLAUDE.md
-indexer run               # smart: incremental if indexed before, full if not
-indexer run --force       # force full re-index
-indexer run --staged      # incremental on staged files only (used by hook)
-indexer status            # show last indexed commit, stale files, stats
-indexer hook install      # manually install pre-commit hook
-indexer hook remove       # remove pre-commit hook
+kiwiskil init              # set up config, hook, and CLAUDE.md
+kiwiskil run               # smart: incremental if indexed before, full if not
+kiwiskil run --force       # force full re-index
+kiwiskil run --staged      # incremental on staged files only (used by hook)
+kiwiskil status            # show last indexed commit, stale files, stats
+kiwiskil hook install      # manually install pre-commit hook
+kiwiskil hook remove       # remove pre-commit hook
 ```
 
 ---
@@ -77,7 +77,7 @@ A skill file compatible with Claude Code, Cursor, Copilot, and other LLM agents.
 
 ## Configuration
 
-`.indexer.toml` is created by `indexer init` and checked into your repo:
+`.indexer.toml` is created by `kiwiskil init` and checked into the repo:
 
 ```toml
 [llm]
