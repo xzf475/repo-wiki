@@ -48,20 +48,30 @@ On every subsequent commit, the pre-commit hook runs `kiwiskil run --staged` aut
 ```bash
 kiwiskil init              # set up config, hook, and CLAUDE.md
 kiwiskil run               # smart incremental + deep enrichment (default)
-kiwiskil run --skip-deep   # skip narrative/flows/constraints (faster)
-kiwiskil run --force       # force full re-index
+kiwiskil run --skip-deep   # skip narrative/flows/constraints enrichment (faster)
+kiwiskil run --force       # force full re-index of all files
 kiwiskil run --staged      # incremental on staged files only (used by hook)
 kiwiskil status            # show last indexed commit, stale files, stats
 kiwiskil hook install      # manually install pre-commit hook
 kiwiskil hook remove       # remove pre-commit hook
 ```
 
+### Deep mode
+
+By default, `kiwiskil run` performs a **deep enrichment** pass after structural indexing. This uses your configured LLM to generate:
+
+- **System narrative** — a plain-English overview of what the codebase does
+- **Key request flows** — end-to-end data flows across modules
+- **Design constraints** — per-module gotchas, invariants, and non-obvious rules
+
+These appear in `wiki/INDEX.md` and in the skill file, giving agents richer context without reading source. Use `--skip-deep` to run structural-only indexing when speed matters.
+
 ---
 
 ## Output
 
 ### `wiki/INDEX.md`
-Top-level map of the entire codebase — which wiki page covers which files, and the entry points for each.
+Top-level map of the entire codebase — which wiki page covers which files, entry points for each group, system overview, and key request flows (when deep mode is enabled).
 
 ### `wiki/<group>.md`
 One page per logical folder cluster. Each page contains:
@@ -69,15 +79,28 @@ One page per logical folder cluster. Each page contains:
 - **Key Symbols** — functions, classes, methods with one-line descriptions
 - **Relationships** — what this group calls, what calls it, what it imports
 - **Entry Points** — symbols with no callers (architectural roots)
+- **Data Flows** — end-to-end flows through this module *(deep mode)*
+- **Design Constraints** — invariants and non-obvious rules to respect *(deep mode)*
 
 ### `.indexer/skills/codebase.md`
-A skill file compatible with Claude Code, Cursor, Copilot, and other LLM agents. Drop it into your agent's skill directory to unlock:
+A skill file compatible with Claude Code, Cursor, Copilot, and other LLM agents. Drop it into your agent's skill directory to unlock structured codebase navigation. The skill file includes:
 
-- `find_module(query)` — search wiki pages by keyword
-- `get_symbol(id)` — look up any symbol by component ID (`file::Class.method`)
-- `trace_callers(symbol_id)` — find what calls a given symbol
-- `what_changed(since_commit)` — list changed files with their wiki pages
-- `entry_points()` — list all architectural entry points
+- Codebase stats (symbol count, file count, index date, commit)
+- System overview and key request flows
+- Wiki page index with entry points
+- Critical constraints extracted per module
+- Step-by-step navigation guide for agents
+- Component ID format reference and manifest lookup instructions
+
+**Navigation tools exposed to agents:**
+
+| Tool | Description |
+|------|-------------|
+| `find_module(query)` | Search wiki pages by keyword |
+| `get_symbol(id)` | Look up any symbol by component ID (`file::Class.method`) |
+| `trace_callers(symbol_id)` | Find what calls a given symbol |
+| `what_changed(since_commit)` | List changed files with their wiki pages |
+| `entry_points()` | List all architectural entry points |
 
 ---
 
@@ -98,7 +121,7 @@ max_tokens_per_batch = 8000
 [hooks]
 pre_commit = true
 synthesize_commit_message = true
-deep = true           # set false to run --skip-deep on commits (faster, structural only)
+deep = true           # set false to skip --deep on commits (faster, structural only)
 ```
 
 Any LiteLLM-compatible provider works: OpenAI, Anthropic, Gemini, Ollama, local models.
@@ -122,7 +145,12 @@ When running as a pre-commit hook, kiwiskil synthesises a commit message from th
 
 ## Supported languages
 
-Python (stdlib `ast`). JS, TS, Go, Rust, Java, Ruby support planned via tree-sitter.
+| Language | Status | Parser |
+|----------|--------|--------|
+| Python | Supported | stdlib `ast` |
+| JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`) | Supported | tree-sitter |
+| TypeScript (`.ts`, `.tsx`) | Supported | tree-sitter |
+| Go, Rust, Java, Ruby | Planned | tree-sitter |
 
 ---
 
