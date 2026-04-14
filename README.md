@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <a href="#install">Install</a> · <a href="#quick-start">Quick start</a> · <a href="#cli">CLI</a> · <a href="#loading-the-skill">Loading the skill</a> · <a href="#configuration">Configuration</a> · <a href="CONTRIBUTING.md">Contributing</a>
+  <a href="#install">Install</a> · <a href="#quick-start">Quick start</a> · <a href="#claudemd-snippet">CLAUDE.md snippet</a> · <a href="#cli">CLI</a> · <a href="#loading-the-skill">Loading the skill</a> · <a href="#configuration">Configuration</a> · <a href="CONTRIBUTING.md">Contributing</a>
 </p>
 
 ---
@@ -59,6 +59,33 @@ kiwiskil run        # generates wiki/ and .indexer/skills/codebase.md
 ```
 
 On every subsequent commit, the pre-commit hook runs `kiwiskil run --staged` automatically — only changed files are re-indexed.
+
+---
+
+## CLAUDE.md snippet
+
+`kiwiskil init` appends this to your `CLAUDE.md` automatically. If you prefer to add it manually, paste it into any `CLAUDE.md` in your repo root:
+
+```markdown
+## Codebase Navigation
+
+This repo is indexed with kiwiskil. Before reading any source file or answering any code question:
+
+1. Load `.indexer/skills/codebase.md` as a skill — it contains the full navigation workflow.
+2. Read `wiki/INDEX.md` for the system overview and module map.
+3. Match the question to a wiki page, look up symbols there, and only read source when you know the exact file and line range.
+
+Do not read source files speculatively. The wiki gives you structure and relationships in a fraction of the tokens.
+
+- Wiki pages: `wiki/` — grouped by logical density, not directory structure
+- Manifest: `.indexer/manifest.json` — maps every file to its wiki page and component IDs
+- Component IDs: `relative/path.py::ClassName.method_name`
+```
+
+The snippet does three things:
+- Tells Claude to load the skill **before** doing anything — this is what makes the navigation workflow kick in
+- Points to `wiki/INDEX.md` as the first read, not random source files
+- Sets the rule: wiki first, source only when you know exactly where to look
 
 ---
 
@@ -121,10 +148,12 @@ The skill file lives at `.indexer/skills/codebase.md` after you run `kiwiskil ru
 
 ```bash
 # Global — available in every project
-cp .indexer/skills/codebase.md ~/.claude/skills/codebase.md
+mkdir -p ~/.claude/skills/codebase
+cp .indexer/skills/codebase.md ~/.claude/skills/codebase/SKILL.md
 
 # Project-local — available in this repo only
-cp .indexer/skills/codebase.md .claude/skills/codebase.md
+mkdir -p .claude/skills/codebase
+cp .indexer/skills/codebase.md .claude/skills/codebase/SKILL.md
 ```
 
 Or reference it directly in `CLAUDE.md` (already done by `kiwiskil init`):
@@ -184,13 +213,13 @@ The skill file is plain markdown. Load it into your agent's context however it s
 
 ### Keeping the skill in sync
 
-The pre-commit hook regenerates `.indexer/skills/codebase.md` on every commit. If you copy the file to a global location (e.g. `~/.claude/skills/`), re-copy it after each index run:
+The pre-commit hook regenerates `.indexer/skills/codebase.md` on every commit. If you copy the file to a global location, re-copy it after each index run:
 
 ```bash
-kiwiskil run && cp .indexer/skills/codebase.md ~/.claude/skills/codebase.md
+kiwiskil run && cp .indexer/skills/codebase.md ~/.claude/skills/codebase/SKILL.md
 ```
 
-For project-local paths (`.claude/skills/`, `.cursor/rules/`, `.windsurfrules`), the file updates in-place automatically — no extra step needed.
+For project-local paths (`.claude/skills/codebase/SKILL.md`, `.cursor/rules/`, `.windsurfrules`), the file updates in-place automatically — no extra step needed.
 
 ---
 
