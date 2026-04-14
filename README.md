@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <a href="#install">Install</a> · <a href="#quick-start">Quick start</a> · <a href="#cli">CLI</a> · <a href="#configuration">Configuration</a> · <a href="CONTRIBUTING.md">Contributing</a>
+  <a href="#install">Install</a> · <a href="#quick-start">Quick start</a> · <a href="#cli">CLI</a> · <a href="#loading-the-skill">Loading the skill</a> · <a href="#configuration">Configuration</a> · <a href="CONTRIBUTING.md">Contributing</a>
 </p>
 
 ---
@@ -102,24 +102,95 @@ One page per logical folder cluster. Each page contains:
 - **Design Constraints** — invariants and non-obvious rules to respect *(deep mode)*
 
 ### `.indexer/skills/codebase.md`
-A skill file compatible with Claude Code, Cursor, Copilot, and other LLM agents. Drop it into your agent's skill directory to unlock structured codebase navigation. The skill file includes:
+A skill file that teaches any LLM agent how to navigate your codebase. The skill file includes:
 
 - Codebase stats (symbol count, file count, index date, commit)
 - System overview and key request flows
 - Wiki page index with entry points
 - Critical constraints extracted per module
-- Step-by-step navigation guide for agents
+- Step-by-step navigation workflow for agents
 - Component ID format reference and manifest lookup instructions
 
-**Navigation tools exposed to agents:**
+---
 
-| Tool | Description |
-|------|-------------|
-| `find_module(query)` | Search wiki pages by keyword |
-| `get_symbol(id)` | Look up any symbol by component ID (`file::Class.method`) |
-| `trace_callers(symbol_id)` | Find what calls a given symbol |
-| `what_changed(since_commit)` | List changed files with their wiki pages |
-| `entry_points()` | List all architectural entry points |
+## Loading the skill
+
+The skill file lives at `.indexer/skills/codebase.md` after you run `kiwiskil run`. Load it into your agent once — it activates automatically on any codebase question.
+
+### Claude Code
+
+```bash
+# Global — available in every project
+cp .indexer/skills/codebase.md ~/.claude/skills/codebase.md
+
+# Project-local — available in this repo only
+cp .indexer/skills/codebase.md .claude/skills/codebase.md
+```
+
+Or reference it directly in `CLAUDE.md` (already done by `kiwiskil init`):
+
+```markdown
+## Codebase Navigation
+Load `.indexer/skills/codebase.md` as a skill before reading source files.
+```
+
+### Cursor
+
+Add the skill content to your `.cursor/rules` file or a `*.mdc` rule file:
+
+```bash
+# Append the skill as a project rule
+cat .indexer/skills/codebase.md >> .cursor/rules/codebase.mdc
+```
+
+Or in Cursor Settings → Rules → Project Rules, paste the contents of `.indexer/skills/codebase.md`.
+
+### Windsurf
+
+Add the skill to your project's Windsurf rules file:
+
+```bash
+# Append to existing rules, or create the file
+cat .indexer/skills/codebase.md >> .windsurfrules
+```
+
+Windsurf loads `.windsurfrules` automatically for every conversation in the project.
+
+### GitHub Copilot (VS Code)
+
+Add the skill as a custom instruction file:
+
+```bash
+mkdir -p .github
+cat .indexer/skills/codebase.md >> .github/copilot-instructions.md
+```
+
+Copilot picks up `.github/copilot-instructions.md` automatically for workspace-scoped chat.
+
+### Zed
+
+Paste the skill content into your project's `.zed/assistant_instructions.md`:
+
+```bash
+mkdir -p .zed
+cat .indexer/skills/codebase.md >> .zed/assistant_instructions.md
+```
+
+### Any other agent / MCP client
+
+The skill file is plain markdown. Load it into your agent's context however it supports custom instructions — system prompt, context file, instruction file, or rules file. The skill activates on any codebase navigation question automatically.
+
+---
+
+### Keeping the skill in sync
+
+The pre-commit hook regenerates `.indexer/skills/codebase.md` on every commit. If you copy the file to a global location (e.g. `~/.claude/skills/`), re-copy it after each index run:
+
+```bash
+kiwiskil run && cp .indexer/skills/codebase.md ~/.claude/skills/codebase.md
+```
+
+For project-local paths (`.claude/skills/`, `.cursor/rules/`, `.windsurfrules`), the file updates in-place automatically — no extra step needed.
 
 ---
 
