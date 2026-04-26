@@ -1,5 +1,6 @@
 # indexer/wiki.py
 from __future__ import annotations
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from jinja2 import Environment, FileSystemLoader
@@ -75,15 +76,20 @@ def build_page(ctx: PageContext) -> str:
     )
 
 
-def build_index(entries: list[IndexEntry], last_commit: str, indexed_date: str, overview: str = "", flows: list[str] = []) -> str:
+def build_index(entries: list[IndexEntry], last_commit: str, indexed_date: str, overview: str = "", flows: list[str] | None = None) -> str:
     env = _jinja_env()
     tmpl = env.get_template("index.md.j2")
-    return tmpl.render(pages=entries, last_commit=last_commit, indexed_date=indexed_date, overview=overview, flows=flows)
+    return tmpl.render(pages=entries, last_commit=last_commit, indexed_date=indexed_date, overview=overview, flows=flows or [])
 
+
+def sanitize_group_label(group_label: str) -> str:
+    s = group_label.replace("/", "_")
+    s = re.sub(r'[:*?<>|"\s]', '_', s)
+    s = s.strip("_").strip(".")
+    return s or "root"
 
 def write_page(wiki_dir: Path, group_label: str, content: str) -> Path:
-    # Sanitise group_label for use as filename: replace "/" with "_"
-    safe_name = group_label.replace("/", "_").strip("_").strip(".") or "root"
+    safe_name = sanitize_group_label(group_label)
     page_path = wiki_dir / f"{safe_name}.md"
     page_path.parent.mkdir(parents=True, exist_ok=True)
     page_path.write_text(content)

@@ -2,16 +2,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 from indexer.ast_parser import ASTNode
-
-def _rel(path: Path, repo_root: Path) -> str:
-    try:
-        return str(path.relative_to(repo_root))
-    except ValueError:
-        return str(path)
+from indexer.utils import _rel, _node_text
 
 
 def _get_language(suffix: str):
-    """Return the tree-sitter Language object for the given file suffix."""
     if suffix in {".js", ".jsx", ".mjs", ".cjs"}:
         import tree_sitter_javascript as tjs
         from tree_sitter import Language
@@ -25,17 +19,11 @@ def _get_language(suffix: str):
     return None
 
 
-def _node_text(node, source: bytes) -> str:
-    return source[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
-
-
 def _extract_jsdoc(node, source: bytes) -> Optional[str]:
-    """Look for a JSDoc comment immediately before this node."""
     prev = node.prev_named_sibling
     if prev and prev.type == "comment":
         text = _node_text(prev, source).strip()
         if text.startswith("/**"):
-            # Strip /** ... */ and leading * from each line
             lines = text[3:-2].splitlines()
             cleaned = []
             for line in lines:
@@ -61,7 +49,6 @@ def _extract_imports(tree, source: bytes) -> list[str]:
 
 
 def _extract_calls(node, source: bytes) -> list[str]:
-    """Recursively extract all function call names from a node."""
     calls = set()
 
     def visit(n):
@@ -82,7 +69,6 @@ def _extract_calls(node, source: bytes) -> list[str]:
 
 
 def _get_name(node, source: bytes) -> Optional[str]:
-    """Extract name from a function/class/method node."""
     name_node = node.child_by_field_name("name")
     if name_node:
         return _node_text(name_node, source)
@@ -90,7 +76,6 @@ def _get_name(node, source: bytes) -> Optional[str]:
 
 
 def parse_js_file(path: Path, repo_root: Path) -> list[ASTNode]:
-    """Parse a JS/TS file using tree-sitter and return ASTNode list."""
     try:
         from tree_sitter import Parser
     except ImportError as e:
@@ -117,7 +102,6 @@ def parse_js_file(path: Path, repo_root: Path) -> list[ASTNode]:
     nodes: list[ASTNode] = []
 
     def visit(node, class_name: Optional[str] = None):
-        # ── Class declaration ──────────────────────────────────────────────
         if node.type in ("class_declaration", "class"):
             name = _get_name(node, source)
             if name:
@@ -131,14 +115,12 @@ def parse_js_file(path: Path, repo_root: Path) -> list[ASTNode]:
                     imports=list(file_imports),
                     calls=[],
                 ))
-                # Visit class body with class_name context
                 body = node.child_by_field_name("body")
                 if body:
                     for child in body.children:
                         visit(child, class_name=name)
-                return  # Don't double-visit body below
+                return
 
-        # ── Method definition (inside class) ──────────────────────────────
         elif node.type == "method_definition" and class_name:
             name = _get_name(node, source)
             if name:
@@ -156,7 +138,6 @@ def parse_js_file(path: Path, repo_root: Path) -> list[ASTNode]:
                 ))
             return
 
-        # ── Function declaration ───────────────────────────────────────────
         elif node.type == "function_declaration" and not class_name:
             name = _get_name(node, source)
             if name:
@@ -174,7 +155,6 @@ def parse_js_file(path: Path, repo_root: Path) -> list[ASTNode]:
                 ))
             return
 
-        # ── const/let/var = arrow function or function expression ──────────
         elif node.type in ("lexical_declaration", "variable_declaration") and not class_name:
             for declarator in node.children:
                 if declarator.type == "variable_declarator":
@@ -197,7 +177,6 @@ def parse_js_file(path: Path, repo_root: Path) -> list[ASTNode]:
                         ))
             return
 
-        # ── Recurse into children ──────────────────────────────────────────
         for child in node.children:
             visit(child, class_name=class_name)
 

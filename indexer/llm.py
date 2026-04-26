@@ -1,8 +1,12 @@
-# indexer/llm.py
 from __future__ import annotations
-import json, os, time
+import json, os, time, logging
 from indexer.ast_parser import ASTNode
 from indexer.config import Config
+
+logger = logging.getLogger(__name__)
+
+_RETRY_ATTEMPTS = 3
+_RETRY_BASE_DELAY = 2.0
 
 _ANTHROPIC_MODELS = {"claude", "anthropic"}
 
@@ -12,53 +16,84 @@ def _is_anthropic(cfg: Config) -> bool:
 
 
 def _resolve_api_key(cfg: Config) -> str | None:
-    """
-    api_key_env can be either:
-    - an env var name (e.g. "GROQ_API_KEY") -> look it up from environment
-    - an actual key value (e.g. "gsk_...") -> use it directly
-    - empty string "" -> auto-detect from well-known env vars
-    """
     value = cfg.api_key_env
     if not value:
-        # Auto-detect from common env vars based on provider
-        for env_var in ("ANTHROPIC_API_KEY", "GROQ_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"):
+        for env_var in ("ANTHROPIC_API_KEY", "DASHSCOPE_API_KEY", "GROQ_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"):
             key = os.environ.get(env_var)
             if key:
                 return key
         return None
-    # If it looks like an actual key (has lowercase/mixed case), use directly
     if " " not in value and not value.isupper() and not value.replace("_", "").isupper():
         return value
     return os.environ.get(value)
 
 
+def _litellm_kwargs(cfg: Config, api_key: str | None) -> dict:
+    kwargs = {
+        "model": cfg.provider,
+        "api_key": api_key,
+    }
+    if cfg.base_url:
+        kwargs["api_base"] = cfg.base_url
+    return kwargs
+
+
+def _litellm_completion(cfg: Config, api_key: str | None, messages: list[dict], max_tokens: int = 1024) -> str:
+    import litellm
+
+    for attempt in range(_RETRY_ATTEMPTS):
+        try:
+            response = litellm.completion(
+                **_litellm_kwargs(cfg, api_key),
+                messages=messages,
+                max_tokens=max_tokens,
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            if attempt < _RETRY_ATTEMPTS - 1 and not isinstance(e, (TypeError, AttributeError, ImportError)):
+                delay = _RETRY_BASE_DELAY * (2 ** attempt)
+                logger.warning("litellm call failed (attempt %d/%d), retrying in %.1fs: %s", attempt + 1, _RETRY_ATTEMPTS, delay, e)
+                time.sleep(delay)
+            else:
+                raise
+
+
 def _anthropic_completion(model: str, system: str, user: str, api_key: str) -> str:
-    """Call Anthropic SDK directly with the provided API key."""
     import anthropic
 
     bare_model = model.removeprefix("anthropic/")
     client = anthropic.Anthropic(api_key=api_key)
-    response = client.messages.create(
-        model=bare_model,
-        max_tokens=1024,
-        system=system,
-        messages=[{"role": "user", "content": user}],
-    )
-    return response.content[0].text
+
+    for attempt in range(_RETRY_ATTEMPTS):
+        try:
+            response = client.messages.create(
+                model=bare_model,
+                max_tokens=1024,
+                system=system,
+                messages=[{"role": "user", "content": user}],
+            )
+            if not response.content:
+                raise ValueError("Empty response from Anthropic")
+            text_blocks = [b for b in response.content if getattr(b, "type", None) == "text"]
+            if not text_blocks:
+                raise ValueError("No text block in Anthropic response")
+            return text_blocks[0].text
+        except Exception as e:
+            if attempt < _RETRY_ATTEMPTS - 1 and not isinstance(e, (TypeError, AttributeError, ValueError)):
+                delay = _RETRY_BASE_DELAY * (2 ** attempt)
+                logger.warning("Anthropic API call failed (attempt %d/%d), retrying in %.1fs: %s", attempt + 1, _RETRY_ATTEMPTS, delay, e)
+                time.sleep(delay)
+            else:
+                raise
 
 
-def describe_nodes(nodes: list[ASTNode], cfg: Config) -> dict[str, str]:
-    """
-    Describe a batch of ASTNodes via LLM.
-    Returns dict mapping node.id -> one-line description (max 15 words).
-    Falls back to empty strings on any error.
+def _should_use_anthropic_sdk(cfg: Config, api_key: str | None) -> bool:
+    return _is_anthropic(cfg) and api_key is not None
 
-    Uses Anthropic SDK directly (Claude Code session auth) when:
-    - provider starts with "anthropic/" or "claude"
-    - api_key_env is empty
-    """
+
+def describe_nodes_batch(nodes: list[ASTNode], cfg: Config) -> dict[str, str]:
     api_key = _resolve_api_key(cfg)
-    use_sdk = _is_anthropic(cfg) and api_key is None
+    use_sdk = _should_use_anthropic_sdk(cfg, api_key)
 
     prompt_items = [
         {
@@ -85,24 +120,14 @@ def describe_nodes(nodes: list[ASTNode], cfg: Config) -> dict[str, str]:
     user = json.dumps(prompt_items)
 
     try:
-        # time.sleep(2)
         if use_sdk:
             raw = _anthropic_completion(cfg.provider, system, user, api_key)
         else:
-            import litellm
-            response = litellm.completion(
-                model=cfg.provider,
-                api_key=api_key,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-            )
-            raw = response.choices[0].message.content
+            raw = _litellm_completion(cfg, api_key, [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ])
 
-        # raw = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-        # result = json.loads(raw)
-        # return {n.id: result.get(n.id, "") for n in nodes}
         raw = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
         result = json.loads(raw)
         if isinstance(result, list):
@@ -116,14 +141,29 @@ def describe_nodes(nodes: list[ASTNode], cfg: Config) -> dict[str, str]:
         return {n.id: "" for n in nodes}
 
 
+def describe_nodes(batches: list[list[ASTNode]], cfg: Config, max_workers: int = 4) -> dict[str, str]:
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    descriptions: dict[str, str] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(describe_nodes_batch, batch, cfg): batch for batch in batches}
+        for future in as_completed(futures):
+            batch = futures[future]
+            try:
+                result = future.result()
+                descriptions.update(result)
+            except Exception as e:
+                import warnings
+                warnings.warn(f"Batch description failed: {e}")
+                for n in batch:
+                    descriptions[n.id] = ""
+
+    return descriptions
+
+
 def describe_files(file_nodes: dict[str, list[ASTNode]], cfg: Config) -> dict[str, str]:
-    """
-    Describe each file at the module level.
-    file_nodes: dict mapping rel_path -> list of ASTNodes in that file.
-    Returns dict mapping rel_path -> one-line purpose string.
-    """
     api_key = _resolve_api_key(cfg)
-    use_sdk = _is_anthropic(cfg) and api_key is None
+    use_sdk = _should_use_anthropic_sdk(cfg, api_key)
 
     prompt_items = [
         {
@@ -151,16 +191,10 @@ def describe_files(file_nodes: dict[str, list[ASTNode]], cfg: Config) -> dict[st
         if use_sdk:
             raw = _anthropic_completion(cfg.provider, system, user, api_key)
         else:
-            import litellm
-            response = litellm.completion(
-                model=cfg.provider,
-                api_key=api_key,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-            )
-            raw = response.choices[0].message.content
+            raw = _litellm_completion(cfg, api_key, [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ])
 
         raw = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
         result = json.loads(raw)
@@ -180,16 +214,8 @@ def deep_enrich_page(
     descriptions: dict[str, str],
     cfg: Config,
 ) -> dict:
-    """
-    Deep enrichment for a wiki page group. Returns a dict with:
-      - narrative: 3-5 sentence paragraph explaining why this module exists
-      - data_flows: list of short flow strings (e.g. "POST /retain → memory_retain → HindsightProvider.retain → Supabase")
-      - constraints: list of non-obvious design facts (e.g. "PersonalToken is 1-per-user; creating revokes the old one")
-
-    Falls back to empty values on any error.
-    """
     api_key = _resolve_api_key(cfg)
-    use_sdk = _is_anthropic(cfg) and api_key is None
+    use_sdk = _should_use_anthropic_sdk(cfg, api_key)
 
     symbol_summary = [
         {"id": n.id, "type": n.type, "desc": descriptions.get(n.id, ""), "calls": n.calls[:8]}
@@ -227,16 +253,10 @@ def deep_enrich_page(
         if use_sdk:
             raw = _anthropic_completion(cfg.provider, system, user, api_key)
         else:
-            import litellm
-            response = litellm.completion(
-                model=cfg.provider,
-                api_key=api_key,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-            )
-            raw = response.choices[0].message.content
+            raw = _litellm_completion(cfg, api_key, [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ])
 
         raw = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
         result = json.loads(raw)
@@ -253,17 +273,31 @@ def deep_enrich_page(
         return empty
 
 
+def deep_enrich_pages(pages_args: list[tuple], cfg: Config, max_workers: int = 3) -> dict[str, dict]:
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    page_enrichments: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {}
+        for args in pages_args:
+            group_label, files, nodes, descriptions = args
+            futures[pool.submit(deep_enrich_page, group_label, files, nodes, descriptions, cfg)] = group_label
+        for future in as_completed(futures):
+            group_label = futures[future]
+            try:
+                page_enrichments[group_label] = future.result()
+            except Exception:
+                page_enrichments[group_label] = {"narrative": "", "data_flows": [], "constraints": []}
+
+    return page_enrichments
+
+
 def deep_enrich_index(
     pages: list[dict],
     cfg: Config,
 ) -> dict:
-    """
-    Generate a system-level overview paragraph and key cross-cutting flows for INDEX.md.
-    pages: list of {"label": str, "covers": str, "entry_points": list[str]}
-    Returns {"overview": str, "flows": list[str]}
-    """
     api_key = _resolve_api_key(cfg)
-    use_sdk = _is_anthropic(cfg) and api_key is None
+    use_sdk = _should_use_anthropic_sdk(cfg, api_key)
 
     system = (
         "You are a senior engineer writing a codebase overview for an AI agent. "
@@ -287,16 +321,10 @@ def deep_enrich_index(
         if use_sdk:
             raw = _anthropic_completion(cfg.provider, system, user, api_key)
         else:
-            import litellm
-            response = litellm.completion(
-                model=cfg.provider,
-                api_key=api_key,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-            )
-            raw = response.choices[0].message.content
+            raw = _litellm_completion(cfg, api_key, [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ])
 
         raw = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
         result = json.loads(raw)
@@ -312,13 +340,47 @@ def deep_enrich_index(
         return empty
 
 
-def synthesize_commit_message(changed_files: list[str], descriptions: dict[str, str], cfg: Config) -> str:
-    """
-    Generate a one-line commit message from changed files and symbol descriptions.
-    Returns empty string on any error.
-    """
+def rewrite_query(query: str, cfg: Config) -> list[str]:
     api_key = _resolve_api_key(cfg)
-    use_sdk = _is_anthropic(cfg) and api_key is None
+    if not api_key:
+        return [query]
+
+    system = (
+        "You are a code search query rewriter. "
+        "Given a user's natural language query about a codebase, produce 3-5 alternative search phrases "
+        "that would match relevant code symbols, class names, function names, or module descriptions. "
+        "Think about: what classes/functions would implement this? What technical terms would the code use? "
+        "What related concepts might be relevant? "
+        "Return a JSON array of strings only. No markdown fences. No explanation. "
+        "Include the original query intent in at least one phrase. "
+        "Each phrase should be 2-8 words, focused and specific."
+    )
+    user = json.dumps({"query": query})
+
+    try:
+        use_sdk = _should_use_anthropic_sdk(cfg, api_key)
+        if use_sdk:
+            raw = _anthropic_completion(cfg.provider, system, user, api_key)
+        else:
+            raw = _litellm_completion(cfg, api_key, [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ], max_tokens=256)
+
+        raw = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        result = json.loads(raw)
+        if isinstance(result, list) and all(isinstance(s, str) for s in result):
+            return [query] + [s for s in result if s != query]
+        return [query]
+    except Exception as e:
+        import warnings
+        warnings.warn(f"Query rewrite failed: {e}")
+        return [query]
+
+
+def synthesize_commit_message(changed_files: list[str], descriptions: dict[str, str], cfg: Config) -> str:
+    api_key = _resolve_api_key(cfg)
+    use_sdk = _should_use_anthropic_sdk(cfg, api_key)
 
     system = (
         "Write a single git commit message (max 72 chars) summarising the code changes. "
@@ -330,16 +392,10 @@ def synthesize_commit_message(changed_files: list[str], descriptions: dict[str, 
         if use_sdk:
             raw = _anthropic_completion(cfg.provider, system, user, api_key)
         else:
-            import litellm
-            response = litellm.completion(
-                model=cfg.provider,
-                api_key=api_key,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-            )
-            raw = response.choices[0].message.content
+            raw = _litellm_completion(cfg, api_key, [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ])
 
         return raw.strip()[:72]
     except Exception as e:

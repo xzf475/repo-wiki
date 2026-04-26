@@ -6,3 +6,9 @@ dist/
 build/
 .venv/
 *.env
+.indexer/cache/
+.indexer/vector_db/
+indexer/__pycache__/__init__.cpython-312.pyc
+indexer/__pycache__/config.cpython-312.pyc
+indexer/.DS_Store
+.DS_Store

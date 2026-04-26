@@ -2,11 +2,11 @@
 from __future__ import annotations
 from pathlib import Path
 
-HOOK_MARKER = "# managed by kiwiskil"
+HOOK_MARKER = "# managed by repo-wiki"
 
 
 def _hook_command(skip_deep: bool = False) -> str:
-    return "kiwiskil run --staged --skip-deep" if skip_deep else "kiwiskil run --staged"
+    return "repo-wiki run --staged --skip-deep" if skip_deep else "repo-wiki run --staged"
 
 
 def _hook_script_fresh(skip_deep: bool = False) -> str:
@@ -21,8 +21,8 @@ def install_hook(repo_root: Path, skip_deep: bool = False) -> None:
     """Install or update the pre-commit hook.
 
     - Fresh install: writes a new hook script
-    - Existing kiwiskil hook: updates the command in-place (e.g. adds/removes --skip-deep)
-    - Existing non-kiwiskil hook: appends our block
+    - Existing repo-wiki hook: updates the command in-place (e.g. adds/removes --skip-deep)
+    - Existing non-repo-wiki hook: appends our block
     """
     hook_path = repo_root / ".git" / "hooks" / "pre-commit"
     cmd = _hook_command(skip_deep)
@@ -30,7 +30,7 @@ def install_hook(repo_root: Path, skip_deep: bool = False) -> None:
     if hook_path.exists():
         existing = hook_path.read_text()
         if HOOK_MARKER in existing:
-            # Update existing kiwiskil line in-place
+            # Update existing repo-wiki line in-place
             lines = existing.splitlines()
             updated = [
                 cmd if (i > 0 and lines[i - 1].strip() == HOOK_MARKER) else line
@@ -47,7 +47,7 @@ def install_hook(repo_root: Path, skip_deep: bool = False) -> None:
 
 
 def remove_hook(repo_root: Path) -> None:
-    """Remove the kiwiskil-managed portion of the pre-commit hook."""
+    """Remove the repo-wiki-managed portion of the pre-commit hook."""
     hook_path = repo_root / ".git" / "hooks" / "pre-commit"
 
     if not hook_path.exists():

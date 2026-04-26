@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>repo-wiki</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0a0c0f;
+  --surface:#12151a;
+  --surface2:#1a1e24;
+  --border:#2a2f38;
+  --border-h:#3a404a;
+  --text:#e8e6e1;
+  --text2:#9a9890;
+  --text3:#5c5a54;
+  --accent:#4ade80;
+  --accent2:#22c55e;
+  --accent-dim:#1a3a2a;
+  --amber:#f59e0b;
+  --amber-dim:#3a2a1a;
+  --red:#ef4444;
+  --radius:6px;
+  --mono:'DM Mono',monospace;
+  --serif:'Instrument Serif',Georgia,serif;
+}
+html{background:var(--bg);color:var(--text);font-family:var(--mono);font-size:14px;-webkit-font-smoothing:antialiased}
+body{min-height:100vh;display:flex;flex-direction:column}
+a{color:var(--accent);text-decoration:none;transition:color .2s}
+a:hover{color:#86efac}
+button{font-family:var(--mono);font-size:13px;cursor:pointer;border:1px solid var(--border);background:var(--surface2);color:var(--text);padding:8px 16px;border-radius:var(--radius);transition:all .15s}
+button:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-dim)}
+button.primary{border-color:var(--accent2);color:var(--accent2);background:var(--accent-dim)}
+button.primary:hover{background:var(--accent2);color:#0a0c0f}
+input,textarea{font-family:var(--mono);font-size:13px;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:var(--radius);outline:none;transition:border .15s}
+input:focus,textarea:focus{border-color:var(--accent)}
+textarea{resize:vertical}
+
+header{border-bottom:1px solid var(--border);padding:20px 32px;display:flex;align-items:center;gap:16px;position:sticky;top:0;background:var(--bg);z-index:100}
+header .logo{font-family:var(--serif);font-size:28px;font-weight:400;color:var(--accent);letter-spacing:-0.02em}
+header .logo em{font-style:italic;color:var(--text2)}
+header .tag{font-size:11px;color:var(--text3);border:1px solid var(--border);padding:3px 8px;border-radius:3px;margin-left:8px}
+
+.container{max-width:1200px;margin:0 auto;padding:32px;width:100%}
+
+.repos-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:16px}
+.repo-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:20px;cursor:pointer;transition:all .2s;position:relative;overflow:hidden}
+.repo-card:hover{border-color:var(--accent);transform:translateY(-2px);box-shadow:0 8px 24px rgba(74,222,128,.08)}
+.repo-card .name{font-family:var(--serif);font-size:22px;color:var(--text);margin-bottom:6px}
+.repo-card .path{font-size:12px;color:var(--text3);margin-bottom:12px;word-break:break-all}
+.repo-card .stats{display:flex;gap:12px}
+.repo-card .stat{font-size:12px;color:var(--text2)}
+.repo-card .stat .val{color:var(--accent);font-weight:500}
+.repo-card .status-dot{position:absolute;top:16px;right:16px;width:8px;height:8px;border-radius:50%}
+.repo-card .status-dot.ready{background:var(--accent2)}
+.repo-card .status-dot.empty{background:var(--text3)}
+
+.view{animation:fadeIn .3s ease}
+@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+
+.repo-header{display:flex;align-items:center;gap:16px;margin-bottom:24px;flex-wrap:wrap}
+.repo-header h1{font-family:var(--serif);font-size:32px;flex:1}
+.repo-header .meta{font-size:12px;color:var(--text3)}
+
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--border);margin-bottom:20px}
+.tab{padding:10px 20px;font-size:13px;color:var(--text2);cursor:pointer;border-bottom:2px solid transparent;transition:all .15s}
+.tab:hover{color:var(--text)}
+.tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+
+.tab-content{min-height:200px}
+
+.wiki-list{display:flex;flex-direction:column;gap:8px}
+.wiki-item{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px 18px;cursor:pointer;transition:all .15s}
+.wiki-item:hover{border-color:var(--border-h)}
+.wiki-item.active{border-color:var(--accent);background:var(--accent-dim)}
+.wiki-item .title{font-size:14px;color:var(--text)}
+.wiki-item .hint{font-size:11px;color:var(--text3);margin-top:4px}
+
+.markdown-view{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;line-height:1.7;white-space:pre-wrap;font-size:13px;max-height:600px;overflow-y:auto}
+.markdown-view h1,.markdown-view h2,.markdown-view h3{font-family:var(--serif);color:var(--text);margin:16px 0 8px}
+.markdown-view table{width:100%;border-collapse:collapse;margin:12px 0}
+.markdown-view th,.markdown-view td{border:1px solid var(--border);padding:6px 12px;font-size:12px;text-align:left}
+.markdown-view th{background:var(--surface2);color:var(--text2)}
+.markdown-view code{background:var(--surface2);padding:2px 6px;border-radius:3px;font-size:12px;color:var(--amber)}
+.markdown-view a{color:var(--accent)}
+
+.manifest-table{width:100%;border-collapse:collapse;font-size:12px}
+.manifest-table th{background:var(--surface2);border:1px solid var(--border);padding:8px;color:var(--text2);text-align:left;position:sticky;top:0}
+.manifest-table td{border:1px solid var(--border);padding:8px;color:var(--text2)}
+.manifest-table td:first-child{color:var(--text);font-weight:500}
+.manifest-table td .cid{font-size:11px;color:var(--text3);display:block;margin-top:2px}
+
+.search-section{margin-bottom:24px}
+.search-section .row{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap}
+.search-result{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:8px;transition:all .15s}
+.search-result:hover{border-color:var(--border-h)}
+.search-result .id{font-size:14px;color:var(--accent);font-weight:500}
+.search-result .doc{font-size:12px;color:var(--text2);margin-top:4px}
+.search-result .meta-row{display:flex;gap:12px;margin-top:6px;font-size:11px;color:var(--text3)}
+
+.register-form{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:24px;max-width:600px}
+.register-form .field{margin-bottom:14px}
+.register-form .field label{font-size:11px;color:var(--text3);display:block;margin-bottom:4px}
+.register-form .field input{width:100%}
+
+.toast{position:fixed;top:20px;right:20px;padding:12px 20px;border-radius:var(--radius);font-size:13px;z-index:999;animation:slideIn .3s ease;max-width:360px}
+.toast.success{background:var(--accent-dim);border:1px solid var(--accent2);color:var(--accent2)}
+.toast.error{background:#2a1a1a;border:1px solid var(--red);color:var(--red)}
+.toast.warning{background:var(--amber-dim);border:1px solid var(--amber);color:var(--amber)}
+@keyframes slideIn{from{opacity:0;transform:translateX(20px)}to{opacity:1;transform:none}}
+
+.empty-state{text-align:center;padding:60px 20px;color:var(--text3)}
+.empty-state .icon{font-size:48px;margin-bottom:12px;color:var(--text3)}
+.empty-state p{font-size:14px;margin-bottom:8px}
+
+.spinner{display:inline-block;width:16px;height:16px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .6s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+footer{border-top:1px solid var(--border);padding:16px 32px;text-align:center;font-size:11px;color:var(--text3);margin-top:auto}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">repo-wiki<em>.rag</em></div>
+  <span class="tag">REST API</span>
+  <div style="flex:1"></div>
+  <button onclick="showRegister()">+ Register Repo</button>
+  <button onclick="loadRepos()" class="primary">&#8635; Refresh</button>
+</header>
+
+<div class="container" id="app">
+  <div id="repos-view" class="view">
+    <div id="repos-grid" class="repos-grid"></div>
+    <div id="repos-empty" class="empty-state" style="display:none">
+      <div class="icon">&#128466;</div>
+      <p>No repositories registered yet</p>
+      <p style="font-size:12px">Use the Register button or POST /register to add repos</p>
+    </div>
+  </div>
+
+  <div id="repo-detail-view" class="view" style="display:none">
+    <div class="repo-header">
+      <h1 id="detail-name"></h1>
+      <span class="meta" id="detail-meta"></span>
+      <button onclick="backToRepos()">&#8592; Back</button>
+    </div>
+    <div class="tabs" id="detail-tabs">
+      <div class="tab active" data-tab="wiki" onclick="switchTab('wiki')">Wiki Pages</div>
+      <div class="tab" data-tab="manifest" onclick="switchTab('manifest')">Manifest</div>
+      <div class="tab" data-tab="search" onclick="switchTab('search')">Search</div>
+    </div>
+    <div id="tab-wiki" class="tab-content">
+      <div class="wiki-list" id="wiki-list"></div>
+      <div class="markdown-view" id="wiki-content" style="display:none"></div>
+    </div>
+    <div id="tab-manifest" class="tab-content" style="display:none">
+      <div style="overflow-x:auto;max-height:500px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--radius)">
+        <table class="manifest-table" id="manifest-table"></table>
+      </div>
+    </div>
+    <div id="tab-search" class="tab-content" style="display:none">
+      <div class="search-section">
+        <div class="row">
+          <input type="text" id="search-query" placeholder="Search symbols (e.g. JWT validation error)" style="flex:1" onkeydown="if(event.key==='Enter')doSearch()">
+          <button onclick="doSearch()" class="primary">Search</button>
+        </div>
+        <div id="search-results"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="register-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.6);z-index:200;display:none;align-items:center;justify-content:center">
+  <div class="register-form" style="position:relative">
+    <h3 style="font-family:var(--serif);font-size:20px;margin-bottom:16px;color:var(--text)">Register Repository</h3>
+    <div class="field"><label>URL</label><input type="text" id="reg-url" placeholder="https://github.com/org/repo.git"></div>
+    <div class="field"><label>Name (optional)</label><input type="text" id="reg-name" placeholder="Auto-detected from URL"></div>
+    <div class="field"><label>Branch (optional)</label><input type="text" id="reg-branch" placeholder="Default branch"></div>
+    <div class="field"><label>Token (GitHub PAT, GitLab token)</label><input type="password" id="reg-token" placeholder="ghp_xxx or glpat-xxx"></div>
+    <div class="field"><label>Username</label><input type="text" id="reg-username" placeholder="For password auth"></div>
+    <div class="field"><label>Password</label><input type="password" id="reg-password" placeholder="For password auth"></div>
+    <div style="display:flex;gap:8px;margin-top:16px">
+      <button onclick="doRegister()" class="primary" id="reg-btn">Register & Index</button>
+      <button onclick="hideRegister()">Cancel</button>
+    </div>
+    <div id="reg-status" style="margin-top:12px;font-size:12px;color:var(--text3)"></div>
+  </div>
+</div>
+
+<div id="rebuild-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.6);z-index:200;display:none;align-items:center;justify-content:center">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:24px;max-width:400px;position:relative">
+    <h3 style="font-family:var(--serif);font-size:20px;margin-bottom:8px;color:var(--red)">&#9888; Rebuild Repository</h3>
+    <p style="font-size:13px;color:var(--text2);margin-bottom:16px">This will delete all wiki pages, vector database, and index data for <strong id="rebuild-repo-name" style="color:var(--text)"></strong>, then rebuild from scratch.</p>
+    <div class="field"><label>Type the repo name to confirm</label><input type="text" id="rebuild-confirm" placeholder="" style="border-color:var(--red)"></div>
+    <div style="display:flex;gap:8px;margin-top:16px">
+      <button onclick="doRebuild()" style="border-color:var(--red);color:var(--red);background:#2a1a1a" id="rebuild-btn">&#9888; Rebuild</button>
+      <button onclick="hideRebuild()">Cancel</button>
+    </div>
+    <div id="rebuild-status" style="margin-top:12px;font-size:12px;color:var(--text3)"></div>
+  </div>
+</div>
+
+<footer>repo-wiki &mdash; Your codebase, understood by any LLM.</footer>
+
+<script>
+function esc(s){if(!s)return'';const d=document.createElement('div');d.textContent=String(s);return d.innerHTML;}
+let currentRepo=null;
+let currentTab='wiki';
+let currentWikiPage=null;
+
+function toast(msg,type='success'){
+  const t=document.createElement('div');
+  t.className='toast '+type;
+  t.textContent=msg;
+  document.body.appendChild(t);
+  setTimeout(()=>t.remove(),4000);
+}
+
+async function api(path,method='GET',body=null){
+  const opts={method,headers:{'Content-Type':'application/json'}};
+  if(body)opts.body=JSON.stringify(body);
+  const r=await fetch(path,opts);
+  return r.json();
+}
+
+async function loadRepos(){
+  const data=await api('/repos');
+  const grid=document.getElementById('repos-grid');
+  const empty=document.getElementById('repos-empty');
+  if(!data.repos||data.repos.length===0){
+    grid.innerHTML='';
+    empty.style.display='block';
+    return;
+  }
+  empty.style.display='none';
+  grid.innerHTML=data.repos.map(r=>`
+    <div class="repo-card">
+      <div class="status-dot ${r.has_vector_db?'ready':'empty'}"></div>
+      <div class="name" onclick="openRepo('${esc(r.name)}')">${esc(r.name)}</div>
+      <div class="path">${esc(r.path)}</div>
+      <div class="stats">
+        <span class="stat">&#9654; <span class="val">${r.symbol_count||0}</span> symbols</span>
+        <span class="stat">${r.has_vector_db?'&#10003; Vector DB':'&#10005; No vectors'}</span>
+      </div>
+      <div style="display:flex;gap:6px;margin-top:10px">
+        <button onclick="doSync('${esc(r.name)}')" style="font-size:12px;padding:5px 12px">&#8635; Sync</button>
+        <button onclick="showRebuild('${esc(r.name)}')" style="font-size:12px;padding:5px 12px">&#9881; Rebuild</button>
+        <button onclick="doValidate('${esc(r.name)}')" style="font-size:12px;padding:5px 12px">&#9745; Check</button>
+        <button onclick="doUnregister('${esc(r.name)}')" style="font-size:12px;padding:5px 12px;border-color:var(--red);color:var(--red)">&#10005; Remove</button>
+      </div>
+      <div id="sync-status-${r.name}" style="font-size:11px;color:var(--text3);margin-top:4px"></div>
+    </div>
+  `).join('');
+}
+
+async function openRepo(name){
+  currentRepo=name;
+  currentWikiPage=null;
+  currentTab='wiki';
+  const data=await api('/api/repo/'+encodeURIComponent(name));
+  document.getElementById('repos-view').style.display='none';
+  document.getElementById('repo-detail-view').style.display='block';
+  document.getElementById('detail-name').textContent=data.name;
+  document.getElementById('detail-meta').textContent=data.path+' | '+data.wiki_pages.length+' wiki pages | '+Object.keys(data.manifest.files||{}).length+' tracked files';
+  renderWiki(data.wiki_pages);
+  renderManifest(data.manifest);
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  document.querySelector('.tab[data-tab="wiki"]').classList.add('active');
+  showTab('wiki');
+}
+
+function backToRepos(){
+  currentRepo=null;
+  document.getElementById('repos-view').style.display='block';
+  document.getElementById('repo-detail-view').style.display='none';
+  loadRepos();
+}
+
+function switchTab(tab){
+  currentTab=tab;
+  document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.tab===tab));
+  showTab(tab);
+}
+
+function showTab(tab){
+  document.getElementById('tab-wiki').style.display=tab==='wiki'?'block':'none';
+  document.getElementById('tab-manifest').style.display=tab==='manifest'?'block':'none';
+  document.getElementById('tab-search').style.display=tab==='search'?'block':'none';
+}
+
+function renderWiki(pages){
+  const list=document.getElementById('wiki-list');
+  const content=document.getElementById('wiki-content');
+  if(!pages||pages.length===0){
+    list.innerHTML='<div class="empty-state"><p>No wiki pages generated yet</p></div>';
+    content.style.display='none';
+    return;
+  }
+  list.innerHTML=pages.map(p=>`
+    <div class="wiki-item${currentWikiPage===p.name?' active':''}" onclick="showWikiPage('${p.name}')">
+      <div class="title">${p.name}</div>
+      <div class="hint">${p.path}</div>
+    </div>
+  `).join('');
+  if(!currentWikiPage)showWikiPage(pages[0].name);
+}
+
+function showWikiPage(name){
+  currentWikiPage=name;
+  const data=window._repoData;
+  if(!data)return;
+  const page=data.wiki_pages.find(p=>p.name===name);
+  if(!page)return;
+  document.querySelectorAll('.wiki-item').forEach(i=>i.classList.toggle('active',i.querySelector('.title').textContent===name));
+  const content=document.getElementById('wiki-content');
+  content.style.display='block';
+  content.textContent=page.content;
+}
+
+function renderManifest(manifest){
+  const table=document.getElementById('manifest-table');
+  if(!manifest||!manifest.files){
+    table.innerHTML='<tr><td colspan="3" style="text-align:center;color:var(--text3)">No manifest data</td></tr>';
+    return;
+  }
+  const files=Object.entries(manifest.files);
+  table.innerHTML=`<thead><tr><th>File</th><th>Wiki Page</th><th>Component IDs</th></tr></thead><tbody>${files.map(([f,v])=>`<tr><td>${esc(f)}</td><td>${esc(v.wiki_page)}</td><td>${(v.component_ids||[]).map(c=>`<span class="cid">${esc(c)}</span>`).join('')}</td></tr>`).join('')}</tbody>`;
+}
+
+async function doSearch(){
+  const q=document.getElementById('search-query').value;
+  if(!q)return;
+  const data=await api('/search','POST',{query:q,repo:currentRepo,top_k:10});
+  const div=document.getElementById('search-results');
+  if(!data.results||data.results.length===0){
+    div.innerHTML='<div class="empty-state"><p>No results found</p></div>';
+    return;
+  }
+  div.innerHTML=data.results.map(r=>{
+    const m=r.metadata||{};
+    return `<div class="search-result">
+      <div class="id">${r.id}</div>
+      <div class="doc">${r.document||''}</div>
+      <div class="meta-row">
+        <span>distance: ${(r.distance||0).toFixed(4)}</span>
+        <span>type: ${m.type||'?'}</span>
+        <span>file: ${m.file||'?'}</span>
+        <span>lines: ${m.line_start||'?'}-${m.line_end||'?'}</span>
+        ${r.repo?`<span>repo: ${r.repo}</span>`:''}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function showRegister(){
+  document.getElementById('register-modal').style.display='flex';
+}
+function hideRegister(){
+  document.getElementById('register-modal').style.display='none';
+  document.getElementById('reg-status').textContent='';
+}
+
+let rebuildRepoName='';
+function showRebuild(repoName){
+  rebuildRepoName=repoName;
+  document.getElementById('rebuild-repo-name').textContent=repoName;
+  document.getElementById('rebuild-confirm').value='';
+  document.getElementById('rebuild-confirm').placeholder=repoName;
+  document.getElementById('rebuild-status').textContent='';
+  document.getElementById('rebuild-btn').disabled=false;
+  document.getElementById('rebuild-modal').style.display='flex';
+}
+function hideRebuild(){
+  document.getElementById('rebuild-modal').style.display='none';
+  rebuildRepoName='';
+}
+
+async function doRebuild(){
+  const confirm=document.getElementById('rebuild-confirm').value;
+  if(confirm!==rebuildRepoName){toast(`Confirmation failed: type "${rebuildRepoName}" exactly`,'error');return;}
+  document.getElementById('rebuild-btn').disabled=true;
+  const repoName=rebuildRepoName;
+  hideRebuild();
+  const statusEl=document.getElementById('sync-status-'+repoName);
+  if(!statusEl){toast('Rebuilding...');return;}
+  statusEl.innerHTML='<span class="spinner"></span> Submitting rebuild...';
+  const data=await api('/rebuild','POST',{name:repoName,confirm:confirm,skip_deep:true});
+  if(data.error){toast(data.error,'error');statusEl.innerHTML='&#10005; '+data.error;return;}
+  const taskId=data.task_id;
+  const stepNames={queued:'Queued',cleaning:'Cleaning old data',rebuild_init:'Re-initializing',detecting_files:'Detecting files',parsing:'Parsing files',cross_ref:'Cross-referencing',describing_symbols:'Describing symbols',describing_modules:'Describing modules',writing_wiki:'Writing wiki',deep_enrichment:'Deep enrichment',embedding:'Generating embeddings',upserting:'Storing vectors',complete:'Complete'};
+  const poll=async()=>{
+    const task=await api('/api/task/'+taskId);
+    if(statusEl){
+      let text=stepNames[task.step]||task.step;
+      if(task.detail) text+=' — '+task.detail;
+      statusEl.innerHTML='<span class="spinner"></span> &#9881; '+text+' <span style="color:var(--amber)">'+task.progress+'%</span>';
+    }
+    if(task.status==='done'){
+      toast(`"${repoName}" rebuilt — ${task.result?.symbol_count||'?'} symbols`);
+      if(statusEl) statusEl.innerHTML='&#10003; Rebuild complete';
+      loadRepos();
+      return;
+    }
+    if(task.status==='failed'){
+      toast('Rebuild failed: '+task.error,'error');
+      if(statusEl) statusEl.innerHTML='&#10005; Failed: '+task.error;
+      return;
+    }
+    setTimeout(poll,5000);
+  };
+  poll();
+}
+
+async function doSync(repoName){
+  const data=await api('/sync','POST',{name:repoName,skip_deep:true});
+  if(data.error){toast(data.error,'error');return;}
+  const taskId=data.task_id;
+  const statusEl=document.getElementById('sync-status-'+repoName);
+  const stepNames={queued:'Queued',git_pull:'Pulling updates',detecting_files:'Detecting changes',parsing:'Parsing files',cross_ref:'Cross-referencing',describing_symbols:'Describing symbols',describing_modules:'Describing modules',writing_wiki:'Writing wiki',deep_enrichment:'Deep enrichment',embedding:'Generating embeddings',upserting:'Storing vectors',complete:'Complete',already_indexed:'Already up to date'};
+  const poll=async()=>{
+    const task=await api('/api/task/'+taskId);
+    if(statusEl){
+      let text=stepNames[task.step]||task.step;
+      if(task.detail) text+=' — '+task.detail;
+      statusEl.innerHTML='<span class="spinner"></span> '+text+' <span style="color:var(--accent)">'+task.progress+'%</span>';
+    }
+    if(task.status==='done'){
+      const repaired=task.result?.repaired;
+      toast(`"${repoName}" synced — ${task.result?.symbol_count||'?'} symbols`+(repaired?' (repaired)':''));
+      if(statusEl) statusEl.innerHTML=repaired?'&#10003; Synced & repaired':'&#10003; Complete';
+      loadRepos();
+      return;
+    }
+    if(task.status==='failed'){
+      toast('Sync failed: '+task.error,'error');
+      if(statusEl) statusEl.innerHTML='&#10005; Failed';
+      return;
+    }
+    setTimeout(poll,5000);
+  };
+  poll();
+}
+
+async function doUnregister(repoName){
+  const data=await api('/unregister','POST',{name:repoName});
+  if(data.error){toast(data.error,'error');return;}
+  toast(`Removed "${repoName}"`);
+  loadRepos();
+}
+
+async function doValidate(repoName){
+  const statusEl=document.getElementById('sync-status-'+repoName);
+  if(statusEl) statusEl.innerHTML='<span class="spinner"></span> Checking...';
+  const data=await api('/api/validate/'+repoName);
+  if(data.error){toast(data.error,'error');return;}
+  if(data.healthy){
+    if(statusEl) statusEl.innerHTML='&#9745; Healthy — '+data.total_symbols+' symbols, '+data.tracked_files+' files';
+    toast(`"${repoName}" is healthy`);
+  }else{
+    const issues=[];
+    if(!data.config_file) issues.push('Missing .indexer.toml');
+    if(!data.manifest_file) issues.push('Missing manifest.json');
+    if(!data.last_indexed_commit) issues.push('Never fully indexed');
+    if(!data.wiki_index) issues.push('Missing wiki/INDEX.md');
+    if(!data.skill_file) issues.push('Missing codebase.md skill');
+    if(!data.vector_db) issues.push('Missing vector DB');
+    if(data.missing_wiki_count>0) issues.push(data.missing_wiki_count+' missing wiki pages');
+    if(data.stale_count>0) issues.push(data.stale_count+' stale files need re-index');
+    const text=issues.join(', ');
+    if(statusEl) statusEl.innerHTML='&#9745; Issues: '+text;
+    toast(`"${repoName}" has issues: ${text}`,'warning');
+  }
+}
+
+async function doRegister(){
+  const url=document.getElementById('reg-url').value;
+  if(!url){toast('URL is required','error');return;}
+  const body={
+    url:url,
+    name:document.getElementById('reg-name').value||undefined,
+    branch:document.getElementById('reg-branch').value||undefined,
+    token:document.getElementById('reg-token').value||undefined,
+    username:document.getElementById('reg-username').value||undefined,
+    password:document.getElementById('reg-password').value||undefined,
+    skip_deep:true,
+  };
+  document.getElementById('reg-btn').disabled=true;
+  const statusEl=document.getElementById('reg-status');
+  try{
+    const data=await api('/register','POST',body);
+    if(data.error){
+      toast(data.error,'error');
+      statusEl.textContent='Failed: '+data.error;
+      document.getElementById('reg-btn').disabled=false;
+      return;
+    }
+    const taskId=data.task_id;
+    const repoName=data.name;
+    statusEl.innerHTML='<span class="spinner"></span> <span id="reg-step">Queued</span> <span id="reg-progress">0%</span>';
+    const poll=async()=>{
+      const task=await api('/api/task/'+taskId);
+      const stepNames={queued:'Queued',git_clone:'Cloning repository',git_pull:'Updating repository',init:'Initializing config',parsing:'Parsing files',cross_ref:'Cross-referencing calls',describing_symbols:'Describing symbols',describing_modules:'Describing modules',writing_wiki:'Writing wiki',deep_enrichment:'Deep enrichment',embedding:'Generating embeddings',upserting:'Storing vectors',complete:'Complete',indexing:'Indexing'};
+      document.getElementById('reg-step').textContent=stepNames[task.step]||task.step;
+      document.getElementById('reg-progress').textContent=task.progress+'%';
+      if(task.detail){
+        document.getElementById('reg-progress').textContent=task.progress+'% — '+task.detail;
+      }
+      if(task.status==='done'){
+        toast(`"${repoName}" registered with ${task.result.symbol_count} symbols`);
+        hideRegister();
+        if(currentRepo)await openRepo(currentRepo);
+        else loadRepos();
+        document.getElementById('reg-btn').disabled=false;
+        return;
+      }
+      if(task.status==='failed'){
+        toast('Failed: '+task.error,'error');
+        statusEl.textContent='Failed: '+task.error;
+        document.getElementById('reg-btn').disabled=false;
+        return;
+      }
+      setTimeout(poll,5000);
+    };
+    poll();
+  }catch(e){
+    toast('Network error: '+e.message,'error');
+    statusEl.textContent='Error';
+    document.getElementById('reg-btn').disabled=false;
+  }
+}
+
+const origOpenRepo=openRepo;
+openRepo=async function(name){
+  const data=await api('/api/repo/'+encodeURIComponent(name));
+  window._repoData=data;
+  origOpenRepo(name);
+};
+
+loadRepos();
+</script>
+</body>
+</html>

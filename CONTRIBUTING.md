@@ -1,4 +1,4 @@
-# Contributing to kiwiskil
+# Contributing to repo-wiki
 
 Thanks for your interest in contributing. This document covers how to set up a dev environment, submit changes, and what we look for in PRs.
 
@@ -7,14 +7,14 @@ Thanks for your interest in contributing. This document covers how to set up a d
 ## Dev setup
 
 ```bash
-git clone https://github.com/ximihoque/kiwiskil.git
-cd kiwiskil
+git clone https://github.com/xzf475/repo-wiki.git
+cd repo-wiki
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-No test runner is configured yet — if you're adding a feature, a quick manual smoke test with `kiwiskil run` on a real repo is the baseline.
+No test runner is configured yet — if you're adding a feature, a quick manual smoke test with `repo-wiki run` on a real repo is the baseline.
 
 ---
 
@@ -23,7 +23,7 @@ No test runner is configured yet — if you're adding a feature, a quick manual 
 1. **Open an issue first** for anything beyond a small bug fix — alignment before code saves everyone time
 2. Fork the repo and create a branch: `git checkout -b feat/your-feature`
 3. Make your changes
-4. Run a manual smoke test: `cd /some/repo && kiwiskil run --force`
+4. Run a manual smoke test: `cd /some/repo && repo-wiki run --force`
 5. Open a PR against `main` with a clear description of what and why
 
 ---

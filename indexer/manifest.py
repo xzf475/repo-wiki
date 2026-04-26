@@ -30,9 +30,21 @@ class Manifest:
                 stale.append(rel_path)
         return stale
 
+    def removed_files(self, repo_root: Path, current_tracked: list[str]) -> list[str]:
+        tracked_set = set(current_tracked)
+        removed = []
+        for rel_path in list(self.files.keys()):
+            abs_path = repo_root / rel_path
+            if not abs_path.exists() or rel_path not in tracked_set:
+                removed.append(rel_path)
+        return removed
+
 def compute_hash(path: Path) -> str:
-    h = hashlib.sha256(path.read_bytes()).hexdigest()
-    return f"sha256:{h}"
+    try:
+        h = hashlib.sha256(path.read_bytes()).hexdigest()
+        return f"sha256:{h}"
+    except OSError:
+        return ""
 
 def load_manifest(repo_root: Path) -> Manifest:
     path = repo_root / MANIFEST_PATH

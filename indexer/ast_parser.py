@@ -4,25 +4,19 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
 
+from indexer.utils import _rel
+
 @dataclass
 class ASTNode:
-    id: str                          # "rel/path.py::Class.method"
-    type: str                        # "function" | "method" | "class"
-    file: str                        # repo-relative path
+    id: str
+    type: str
+    file: str
     line_start: int
     line_end: int
     docstring: Optional[str]
     imports: list[str] = field(default_factory=list)
     calls: list[str] = field(default_factory=list)
-    # called_by is intentionally empty at parse time;
-    # populated in a later cross-reference pass by cli.py
     called_by: list[str] = field(default_factory=list)
-
-def _rel(path: Path, repo_root: Path) -> str:
-    try:
-        return str(path.relative_to(repo_root))
-    except ValueError:
-        return str(path)
 
 def _extract_imports(tree: ast.Module) -> list[str]:
     imports = []
@@ -47,7 +41,6 @@ def _extract_calls(func_node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[st
     return list(set(calls))
 
 def _get_class_method_ids(tree: ast.Module) -> set[int]:
-    """Return AST node ids of functions that are direct children of a class body."""
     ids = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.ClassDef):
@@ -57,12 +50,15 @@ def _get_class_method_ids(tree: ast.Module) -> set[int]:
     return ids
 
 def parse_file(path: Path, repo_root: Path) -> list[ASTNode]:
-    """Parse a Python file and return ASTNode list. Returns [] on syntax error."""
     suffix = path.suffix.lower()
     
     if suffix in {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}:
         from indexer.js_parser import parse_js_file
         return parse_js_file(path, repo_root)
+    
+    if suffix == ".go":
+        from indexer.go_parser import parse_go_file
+        return parse_go_file(path, repo_root)
     
     try:
         source = path.read_text(encoding="utf-8", errors="replace")
@@ -116,7 +112,6 @@ def parse_file(path: Path, repo_root: Path) -> list[ASTNode]:
 
 
 def compute_hash_short(path: Path) -> str:
-    """Returns first 16 chars of sha256 hex digest — used for cache filenames only."""
     return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
 
 
@@ -128,7 +123,7 @@ def load_cached_nodes(repo_root: Path, file_hash: str) -> Optional[list[ASTNode]
         data = json.loads(p.read_text())
         return [ASTNode(**n) for n in data]
     except (json.JSONDecodeError, TypeError, KeyError):
-        return None  # corrupted cache — caller will re-parse
+        return None
 
 
 def save_cached_nodes(repo_root: Path, file_hash: str, nodes: list[ASTNode]) -> None:

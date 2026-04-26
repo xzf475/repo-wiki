@@ -1,14 +1,20 @@
-# indexer/git.py
 from __future__ import annotations
+import logging
 import subprocess
 from pathlib import Path
 from typing import Optional
 
+logger = logging.getLogger(__name__)
+
+
 def _run(cmd: list[str], cwd: Path) -> str:
     try:
         result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+        if result.returncode != 0:
+            logger.warning("git command failed (rc=%d): %s\nstderr: %s", result.returncode, " ".join(cmd), result.stderr.strip())
         return result.stdout.strip()
-    except (FileNotFoundError, OSError):
+    except (FileNotFoundError, OSError) as e:
+        logger.warning("git command error: %s", e)
         return ""
 
 def current_commit(repo_root: Path) -> Optional[str]:
