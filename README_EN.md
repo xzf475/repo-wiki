@@ -92,6 +92,26 @@ curl -X POST http://localhost:7654/search \
 open http://localhost:7654
 ```
 
+### Docker Deployment
+
+```bash
+# Build and start
+docker compose up -d
+
+# View logs
+docker compose logs -f
+
+# Stop
+docker compose down
+
+# Register a repo
+curl -X POST http://localhost:7654/register \
+  -H 'Content-Type: application/json' \
+  -d '{"url": "https://github.com/org/repo.git", "token": "ghp_xxx"}'
+```
+
+Place `.env` in the project root — `docker-compose.yml` mounts it automatically. All data is persisted in Docker volumes.
+
 ### MCP Mode (LLM Agent Integration)
 
 ```bash
@@ -267,6 +287,11 @@ repo-wiki hook install       # manually install pre-commit hook
 repo-wiki hook remove        # remove pre-commit hook
 repo-wiki serve              # start MCP server
 repo-wiki serve-api          # start REST API server with web dashboard
+
+# Docker
+docker compose up -d         # build and start in background
+docker compose logs -f       # follow logs
+docker compose down          # stop and remove containers
 ```
 
 ### Deep Mode

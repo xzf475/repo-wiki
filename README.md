@@ -92,6 +92,26 @@ curl -X POST http://localhost:7654/search \
 open http://localhost:7654
 ```
 
+### Docker 部署
+
+```bash
+# 构建并启动
+docker compose up -d
+
+# 查看日志
+docker compose logs -f
+
+# 停止
+docker compose down
+
+# 注册仓库
+curl -X POST http://localhost:7654/register \
+  -H 'Content-Type: application/json' \
+  -d '{"url": "https://github.com/org/repo.git", "token": "ghp_xxx"}'
+```
+
+将 `.env` 文件放在项目根目录，`docker-compose.yml` 会自动挂载。所有数据持久化在 Docker volume 中。
+
 ### MCP 模式（LLM Agent 集成）
 
 ```bash
@@ -265,8 +285,13 @@ repo-wiki run --staged      # 仅对暂存文件增量索引（hook 使用）
 repo-wiki status            # 显示上次索引提交、过期文件、统计
 repo-wiki hook install      # 手动安装 pre-commit hook
 repo-wiki hook remove       # 移除 pre-commit hook
-repo-wiki serve             # 启动 MCP 服务器
-repo-wiki serve-api         # 启动 REST API 服务和 Web 仪表盘
+repo-wiki serve              # 启动 MCP 服务器
+repo-wiki serve-api          # 启动 REST API 服务和 Web 仪表盘
+
+# Docker
+docker compose up -d         # 构建并后台启动
+docker compose logs -f       # 查看实时日志
+docker compose down          # 停止并清理容器
 ```
 
 ### 深度模式
