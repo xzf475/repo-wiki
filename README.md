@@ -282,9 +282,9 @@ ChromaDB 向量存储，包含每个索引符号的嵌入。REST API 和 MCP 服
 | `/webhook/{name}` | POST | **推荐**——按仓库名自动触发同步 |
 | `/webhook` | POST | 通用端点，解析 payload 匹配仓库 |
 
-注册仓库后返回独立 webhook URL：`https://your-server.com/webhook/{name}`。直接在 GitHub/GitLab/Gitee 仓库设置中配置该 URL，后续每次 push 自动触发 wiki 更新。
+注册仓库后返回独立 webhook URL：`https://your-server.com/webhook/{name}?sign=...`。直接在 GitHub/GitLab/Gitee 仓库设置中配置该 URL，后续每次 push 自动触发 wiki 更新。
 
-通过 `WEBHOOK_SECRET` 环境变量启用签名验证——GitHub 使用 HMAC-SHA256，GitLab 使用 Token 头。
+通过 `WEBHOOK_SECRET` 环境变量启用签名验证。`sign` 通过 `HMAC-SHA256(WEBHOOK_SECRET, 仓库名)` 生成，每个仓库独立签名，webhook 端点仅校验 `?sign` 参数。
 
 ### 查询改写搜索
 

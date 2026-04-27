@@ -235,6 +235,10 @@ function fmtTime(iso){
     return d.toLocaleDateString();
   }catch(e){return iso;}
 }
+function copyToClipboard(text){
+  if(navigator.clipboard){navigator.clipboard.writeText(text).then(()=>toast('Copied: '+text,'info')).catch(()=>{});}
+  else{const ta=document.createElement('textarea');ta.value=text;document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta);toast('Copied: '+text,'info');}
+}
 let currentRepo=null;
 let currentTab='wiki';
 let currentWikiPage=null;
@@ -249,6 +253,7 @@ function toast(msg,type='success'){
 
 async function api(path,method='GET',body=null){
   const opts={method,headers:{'Content-Type':'application/json'}};
+  if(window._apiKey)opts.headers['Authorization']='Bearer '+window._apiKey;
   if(body)opts.body=JSON.stringify(body);
   const r=await fetch(path,opts);
   return r.json();
@@ -277,6 +282,12 @@ async function loadRepos(){
         ${(r.branches||[]).map(b=>'<span style="font-size:10px;padding:2px 8px;border:1px solid var(--accent);border-radius:3px;color:var(--accent)">'+esc(b)+'</span>').join('')}
         ${r.last_synced_at?'<span style="font-size:10px;color:var(--text3);margin-left:auto">&#9200; '+fmtTime(r.last_synced_at)+'</span>':''}
       </div>
+      ${r.webhook_url?`
+      <div style="margin-top:6px;display:flex;align-items:center;gap:4px">
+        <span style="font-size:10px;color:var(--text3);white-space:nowrap">Webhook:</span>
+        <code style="font-size:10px;color:var(--accent);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer" onclick="copyToClipboard('${esc(r.webhook_url)}')" title="Click to copy">${esc(r.webhook_url)}</code>
+        <span style="font-size:9px;color:var(--text3);cursor:pointer" onclick="copyToClipboard('${esc(r.webhook_url)}')">&#128203;</span>
+      </div>`:''}
       <div style="display:flex;gap:6px;margin-top:10px">
         <button onclick="doSync('${esc(r.name)}')" style="font-size:12px;padding:5px 12px">&#8635; Sync</button>
         <button onclick="showRebuild('${esc(r.name)}')" style="font-size:12px;padding:5px 12px">&#9881; Rebuild</button>

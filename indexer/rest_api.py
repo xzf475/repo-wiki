@@ -21,7 +21,7 @@ import urllib.parse
 from pathlib import Path
 from starlette.applications import Starlette
 from starlette.routing import Route
-from starlette.responses import JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse
 from starlette.requests import Request
 
 from indexer.config import Config, load_config, save_config, EmbeddingConfig, VectorStoreConfig
@@ -1110,11 +1110,13 @@ async def list_repos(request: Request) -> JSONResponse:
             except Exception:
                 pass
         branches = info.get("branches", [])
+        webhook_url = _get_webhook_url(name, request)
         result.append({
             "name": name,
             "path": str(root),
             "url": info.get("url", ""),
             "branches": branches,
+            "webhook_url": webhook_url,
             "has_vector_db": has_vectors,
             "symbol_count": symbol_count,
             "last_synced_at": last_synced_at,
@@ -1171,11 +1173,13 @@ async def repo_detail(request: Request) -> JSONResponse:
     if skill_path.exists():
         skill_content = skill_path.read_text(encoding="utf-8", errors="replace")
 
+    webhook_url = _get_webhook_url(repo_name, request)
     return JSONResponse({
         "name": repo_name,
         "path": str(root),
         "url": info.get("url", ""),
         "branches": info.get("branches", []),
+        "webhook_url": webhook_url,
         "wiki_pages": wiki_pages,
         "manifest": manifest_data,
         "skill": skill_content,
@@ -1305,24 +1309,38 @@ async def multi_repo_skill(request: Request) -> JSONResponse:
     })
 
 
-def _get_webhook_url(name: str) -> str:
+def _get_webhook_url(name: str, request: Request | None = None) -> str:
     domain = os.environ.get("PUBLIC_DOMAIN", "").rstrip("/")
-    if domain:
-        return f"{domain}/webhook/{name}"
-    return ""
+    if not domain and request is not None:
+        base = str(request.base_url).rstrip("/")
+        domain = base
+    if not domain:
+        host = os.environ.get("PUBLIC_HOST", "")
+        if host:
+            domain = f"https://{host}"
+    if not domain:
+        return ""
+    sign = _webhook_sign(name)
+    return f"{domain}/webhook/{name}?sign={sign}"
+
+
+def _webhook_sign(name: str) -> str:
+    secret = os.environ.get("WEBHOOK_SECRET", "")
+    if not secret:
+        return ""
+    import hashlib, hmac
+    return hmac.new(secret.encode(), name.encode(), hashlib.sha256).hexdigest()
+
+
+def _verify_webhook_sign(name: str, sign: str) -> bool:
+    expected = _webhook_sign(name)
+    if not expected:
+        return True
+    import hmac
+    return hmac.compare_digest(expected, sign)
 
 
 _WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
-
-
-def _verify_webhook(body: bytes, signature: str) -> bool:
-    if not _WEBHOOK_SECRET:
-        return True
-    import hashlib, hmac
-    expected = "sha256=" + hmac.new(
-        _WEBHOOK_SECRET.encode(), body, hashlib.sha256
-    ).hexdigest()
-    return hmac.compare_digest(expected, signature)
 
 
 def _extract_repo_url(payload: dict) -> str | None:
@@ -1348,16 +1366,10 @@ async def webhook_by_name(request: Request) -> JSONResponse:
 
     body = await request.body()
 
-    gh_signature = request.headers.get("X-Hub-Signature-256", "")
-    gitlab_token = request.headers.get("X-Gitlab-Token", "")
-
     if _WEBHOOK_SECRET:
-        if gh_signature:
-            if not _verify_webhook(body, gh_signature):
-                return JSONResponse({"error": "invalid signature"}, status_code=401)
-        elif gitlab_token:
-            if gitlab_token != _WEBHOOK_SECRET:
-                return JSONResponse({"error": "invalid token"}, status_code=401)
+        sign = request.query_params.get("sign", "")
+        if not sign or not _verify_webhook_sign(name, sign):
+            return JSONResponse({"error": "invalid sign"}, status_code=401)
 
     info = registry.get(name)
     repo_branches = info.get("branches", [])
@@ -1393,20 +1405,17 @@ async def webhook(request: Request) -> JSONResponse:
 
     body = await request.body()
 
-    gh_signature = request.headers.get("X-Hub-Signature-256", "")
-    gitlab_token = request.headers.get("X-Gitlab-Token", "")
-
     if _WEBHOOK_SECRET:
-        if gh_signature:
-            if not _verify_webhook(body, gh_signature):
-                return JSONResponse({"error": "invalid signature"}, status_code=401)
-        elif gitlab_token:
-            if gitlab_token != _WEBHOOK_SECRET:
-                return JSONResponse({"error": "invalid token"}, status_code=401)
-        else:
-            event = request.headers.get("X-GitHub-Event") or request.headers.get("X-Gitlab-Event", "")
-            if event:
-                return JSONResponse({"error": "missing signature"}, status_code=401)
+        sign = request.query_params.get("sign", "")
+        if not sign:
+            return JSONResponse({"error": "missing sign"}, status_code=401)
+        matched = False
+        for name in registry.list_names():
+            if _verify_webhook_sign(name, sign):
+                matched = True
+                break
+        if not matched:
+            return JSONResponse({"error": "invalid sign"}, status_code=401)
 
     try:
         payload = json.loads(body)
@@ -1470,7 +1479,7 @@ def create_app(repos: dict[str, Path] | None = None, repos_dir: Path | None = No
         class _AuthMiddleware(BaseHTTPMiddleware):
             async def dispatch(self, request, call_next):
                 path = request.url.path
-                if path in ("/health", "/webhook") or path.startswith("/webhook/"):
+                if path in ("/health", "/", "/webhook", "/static") or path.startswith(("/webhook/", "/static/")):
                     return await call_next(request)
                 token = request.headers.get("Authorization", "").removeprefix("Bearer ")
                 if token != api_key:
@@ -1498,11 +1507,24 @@ def create_app(repos: dict[str, Path] | None = None, repos_dir: Path | None = No
             Route("/api/validate/{name}", validate_repo),
             Route("/api/task/{task_id}", task_status),
             Route("/skill", multi_repo_skill),
+            Route("/", _index_page),
         ],
     )
     app.mount("/static", StaticFiles(directory=str(static_dir)))
-    app.mount("/", StaticFiles(directory=str(static_dir), html=True))
     return app
+
+
+def _index_page(request: Request):
+    static_dir = Path(__file__).parent / "static"
+    index_path = static_dir / "index.html"
+    if not index_path.exists():
+        return JSONResponse({"error": "index.html not found"}, status_code=404)
+    html = index_path.read_text(encoding="utf-8")
+    api_key = os.environ.get("REPO_WIKI_API_KEY", "")
+    if api_key:
+        script = f'<script>window._apiKey={json.dumps(api_key)};</script>'
+        html = html.replace("</head>", script + "</head>")
+    return HTMLResponse(html)
 
 
 def _inject_credentials(

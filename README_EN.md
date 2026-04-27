@@ -282,9 +282,9 @@ Each registered repo can track multiple branches. Specify `branches: ["main", "d
 | `/webhook/{name}` | POST | **Recommended** — triggers sync by repo name |
 | `/webhook` | POST | Generic — matches repo from payload |
 
-After registering a repo, you get a webhook URL: `https://your-server.com/webhook/{name}`. Add this URL to your repository's webhook settings (push events) — each push automatically triggers a wiki sync.
+After registering a repo, you get a webhook URL: `https://your-server.com/webhook/{name}?sign=...`. Add this URL to your repository's webhook settings (push events) — each push automatically triggers a wiki sync.
 
-Set `WEBHOOK_SECRET` env var for payload verification (HMAC-SHA256 for GitHub, Token header for GitLab).
+Set `WEBHOOK_SECRET` env var for signature verification. The `sign` is computed as `HMAC-SHA256(WEBHOOK_SECRET, repo_name)` — each repo has its own unique signature, and webhook endpoints only check the `?sign` parameter.
 
 ### Search with Query Rewriting
 
