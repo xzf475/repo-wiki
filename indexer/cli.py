@@ -402,7 +402,7 @@ def _ensure_cache_gitignore(root: Path, verbose: bool = False) -> None:
 def _is_indexable(path: str, cfg: Config) -> bool:
     from fnmatch import fnmatch
     p = Path(path)
-    if p.suffix not in {".py", ".js", ".ts", ".mjs", ".cjs", ".jsx", ".tsx", ".go"}:
+    if p.suffix not in {".py", ".js", ".ts", ".mjs", ".cjs", ".jsx", ".tsx", ".go", ".rs", ".java", ".rb"}:
         return False
     for pattern in cfg.ignore:
         if any(fnmatch(part, pattern) for part in p.parts):

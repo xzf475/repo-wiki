@@ -74,9 +74,9 @@ Wiki 是纯 Markdown，提交到你的仓库。无需云服务，无厂商锁定
 - **同步时自动修复**：缺失的 Wiki 页面、向量库、过期索引条目均可检测并修复
 - **清单路径修正**：自动修正 manifest 中 Wiki 页面路径与实际文件名不一致的问题
 
-### Go 语言支持
+### Go、Rust、Java、Ruby 语言支持
 
-通过 tree-sitter-go 实现 Go 语言的 AST 解析——提取函数、方法、类型、接口和调用关系。
+通过 tree-sitter 实现 Go、Rust、Java、Ruby 的 AST 解析——提取函数、方法、类、类型、接口（trait）、枚举和调用关系。
 
 ### 异步任务处理
 
@@ -322,7 +322,9 @@ VECTOR_COLLECTION_NAME=repo_wiki_code
 | JavaScript（`.js`、`.jsx`、`.mjs`、`.cjs`） | 已支持 | tree-sitter |
 | TypeScript（`.ts`、`.tsx`） | 已支持 | tree-sitter |
 | Go | 已支持 | tree-sitter-go |
-| Rust、Java、Ruby | 计划中 | tree-sitter |
+| Rust（`.rs`） | 已支持 | tree-sitter-rust |
+| Java（`.java`） | 已支持 | tree-sitter-java |
+| Ruby（`.rb`） | 已支持 | tree-sitter-ruby |
 
 ---
 

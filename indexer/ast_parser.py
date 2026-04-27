@@ -60,6 +60,18 @@ def parse_file(path: Path, repo_root: Path) -> list[ASTNode]:
         from indexer.go_parser import parse_go_file
         return parse_go_file(path, repo_root)
     
+    if suffix in {".rs"}:
+        from indexer.rust_parser import parse_rust_file
+        return parse_rust_file(path, repo_root)
+    
+    if suffix in {".java"}:
+        from indexer.java_parser import parse_java_file
+        return parse_java_file(path, repo_root)
+    
+    if suffix in {".rb"}:
+        from indexer.ruby_parser import parse_ruby_file
+        return parse_ruby_file(path, repo_root)
+    
     try:
         source = path.read_text(encoding="utf-8", errors="replace")
         tree = ast.parse(source)

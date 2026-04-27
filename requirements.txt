@@ -8,6 +8,9 @@ tree-sitter
 tree-sitter-javascript
 tree-sitter-typescript
 tree-sitter-go
+tree-sitter-rust
+tree-sitter-java
+tree-sitter-ruby
 chromadb>=0.5
 openai>=1.30
 mcp[cli]>=1.6

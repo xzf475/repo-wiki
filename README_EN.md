@@ -16,7 +16,7 @@ Generate a checked-in wiki, skill files, and vector search from any repo — no 
 
 repo-wiki generates a structural wiki, skill files, and a vector search index from any codebase. It enables LLM agents to navigate code without reading source files — using a knowledge graph built from your repo and checked into git.
 
-> **Forked from [kiwiskil](https://github.com/ximihoque/kiwiskil)** — repo-wiki extends the original with a REST API, vector search, query rewriting, repository health checks, and Go language support.
+> **Forked from [kiwiskil](https://github.com/ximihoque/kiwiskil)** — repo-wiki extends the original with a REST API, vector search, query rewriting, repository health checks, and Rust, Java, Ruby, Go support.
 
 ---
 
@@ -73,9 +73,9 @@ A full-featured REST API (`repo-wiki serve-api`) for remote repository managemen
 - **Auto-repair** on sync: missing wiki pages, missing vector DB, stale index entries are all detected and fixed
 - **Manifest path fixup**: corrects wiki page path inconsistencies between manifest and actual files
 
-### Go Language Support
+### Go, Rust, Java, Ruby Support
 
-AST parsing for Go via tree-sitter-go — extracts functions, methods, types, interfaces, and call relationships.
+AST parsing for Go, Rust, Java, and Ruby via tree-sitter — extracts functions, methods, classes, types, interfaces (traits), enums, and call relationships.
 
 ### Async Task Processing
 
@@ -321,7 +321,9 @@ VECTOR_COLLECTION_NAME=repo_wiki_code
 | JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`) | Supported | tree-sitter |
 | TypeScript (`.ts`, `.tsx`) | Supported | tree-sitter |
 | Go | Supported | tree-sitter-go |
-| Rust, Java, Ruby | Planned | tree-sitter |
+| Rust (`.rs`) | Supported | tree-sitter-rust |
+| Java (`.java`) | Supported | tree-sitter-java |
+| Ruby (`.rb`) | Supported | tree-sitter-ruby |
 
 ---
 
