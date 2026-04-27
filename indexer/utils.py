@@ -24,15 +24,20 @@ def load_env_file() -> None:
     with _env_lock:
         if _env_loaded:
             return
-        env_path = Path(__file__).resolve().parent.parent / ".env"
-        if env_path.exists():
-            for line in env_path.read_text().splitlines():
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, value = line.split("=", 1)
-                key = key.strip()
-                value = value.strip()
-                if key and key not in os.environ:
-                    os.environ[key] = value
+        candidates = [
+            Path(__file__).resolve().parent.parent / ".env",
+            Path.cwd() / ".env",
+        ]
+        for env_path in candidates:
+            if env_path.exists():
+                for line in env_path.read_text().splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, value = line.split("=", 1)
+                    key = key.strip()
+                    value = value.strip()
+                    if key and key not in os.environ:
+                        os.environ[key] = value
+                break
         _env_loaded = True

@@ -106,10 +106,11 @@ header .tag{font-size:11px;color:var(--text3);border:1px solid var(--border);pad
 .register-form .field label{font-size:11px;color:var(--text3);display:block;margin-bottom:4px}
 .register-form .field input{width:100%}
 
-.toast{position:fixed;top:20px;right:20px;padding:12px 20px;border-radius:var(--radius);font-size:13px;z-index:999;animation:slideIn .3s ease;max-width:360px}
+.toast{position:fixed;top:20px;right:20px;padding:12px 20px;border-radius:var(--radius);font-size:13px;z-index:9999;animation:slideIn .3s ease;max-width:360px;box-shadow:0 4px 16px rgba(0,0,0,.4)}
 .toast.success{background:var(--accent-dim);border:1px solid var(--accent2);color:var(--accent2)}
 .toast.error{background:#2a1a1a;border:1px solid var(--red);color:var(--red)}
 .toast.warning{background:var(--amber-dim);border:1px solid var(--amber);color:var(--amber)}
+.toast.info{background:var(--surface2);border:1px solid var(--accent);color:var(--accent)}
 @keyframes slideIn{from{opacity:0;transform:translateX(20px)}to{opacity:1;transform:none}}
 
 .empty-state{text-align:center;padding:60px 20px;color:var(--text3)}
@@ -208,6 +209,20 @@ footer{border-top:1px solid var(--border);padding:16px 32px;text-align:center;fo
 
 <script>
 function esc(s){if(!s)return'';const d=document.createElement('div');d.textContent=String(s);return d.innerHTML;}
+function fmtTime(iso){
+  if(!iso)return'';
+  try{
+    const d=new Date(iso);
+    if(isNaN(d.getTime()))return iso;
+    const now=new Date();
+    const diff=now-d;
+    if(diff<60000)return'just now';
+    if(diff<3600000)return Math.floor(diff/60000)+'m ago';
+    if(diff<86400000)return Math.floor(diff/3600000)+'h ago';
+    if(diff<604800000)return Math.floor(diff/86400000)+'d ago';
+    return d.toLocaleDateString();
+  }catch(e){return iso;}
+}
 let currentRepo=null;
 let currentTab='wiki';
 let currentWikiPage=null;
@@ -245,6 +260,10 @@ async function loadRepos(){
       <div class="stats">
         <span class="stat">&#9654; <span class="val">${r.symbol_count||0}</span> symbols</span>
         <span class="stat">${r.has_vector_db?'&#10003; Vector DB':'&#10005; No vectors'}</span>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:6px;align-items:center">
+        ${(r.branches||[]).map(b=>'<span style="font-size:10px;padding:2px 8px;border:1px solid var(--accent);border-radius:3px;color:var(--accent)">'+esc(b)+'</span>').join('')}
+        ${r.last_synced_at?'<span style="font-size:10px;color:var(--text3);margin-left:auto">&#9200; '+fmtTime(r.last_synced_at)+'</span>':''}
       </div>
       <div style="display:flex;gap:6px;margin-top:10px">
         <button onclick="doSync('${esc(r.name)}')" style="font-size:12px;padding:5px 12px">&#8635; Sync</button>
@@ -489,38 +508,28 @@ async function doRegister(){
     skip_deep:true,
   };
   document.getElementById('reg-btn').disabled=true;
-  const statusEl=document.getElementById('reg-status');
   try{
     const data=await api('/register','POST',body);
     if(data.error){
       toast(data.error,'error');
-      statusEl.textContent='Failed: '+data.error;
       document.getElementById('reg-btn').disabled=false;
       return;
     }
     const taskId=data.task_id;
     const repoName=data.name;
-    statusEl.innerHTML='<span class="spinner"></span> <span id="reg-step">Queued</span> <span id="reg-progress">0%</span>';
+    hideRegister();
+    toast(`"${repoName}" registration started`,'info');
+    document.getElementById('reg-btn').disabled=false;
     const poll=async()=>{
       const task=await api('/api/task/'+taskId);
-      const stepNames={queued:'Queued',git_clone:'Cloning repository',git_pull:'Updating repository',init:'Initializing config',parsing:'Parsing files',cross_ref:'Cross-referencing calls',describing_symbols:'Describing symbols',describing_modules:'Describing modules',writing_wiki:'Writing wiki',deep_enrichment:'Deep enrichment',embedding:'Generating embeddings',upserting:'Storing vectors',complete:'Complete',indexing:'Indexing'};
-      document.getElementById('reg-step').textContent=stepNames[task.step]||task.step;
-      document.getElementById('reg-progress').textContent=task.progress+'%';
-      if(task.detail){
-        document.getElementById('reg-progress').textContent=task.progress+'% — '+task.detail;
-      }
       if(task.status==='done'){
         toast(`"${repoName}" registered with ${task.result.symbol_count} symbols`);
-        hideRegister();
         if(currentRepo)await openRepo(currentRepo);
         else loadRepos();
-        document.getElementById('reg-btn').disabled=false;
         return;
       }
       if(task.status==='failed'){
-        toast('Failed: '+task.error,'error');
-        statusEl.textContent='Failed: '+task.error;
-        document.getElementById('reg-btn').disabled=false;
+        toast('Registration failed: '+task.error,'error');
         return;
       }
       setTimeout(poll,5000);
@@ -528,7 +537,6 @@ async function doRegister(){
     poll();
   }catch(e){
     toast('Network error: '+e.message,'error');
-    statusEl.textContent='Error';
     document.getElementById('reg-btn').disabled=false;
   }
 }

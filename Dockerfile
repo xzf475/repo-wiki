@@ -6,7 +6,7 @@ WORKDIR /build
 COPY pyproject.toml .
 COPY indexer/ indexer/
 
-RUN pip install --no-cache-dir build \
+RUN pip install --no-cache-dir build setuptools wheel \
     && python -m build --wheel --no-isolation
 
 FROM python:3.12-slim

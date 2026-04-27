@@ -40,6 +40,11 @@ def _litellm_kwargs(cfg: Config, api_key: str | None) -> dict:
 
 def _litellm_completion(cfg: Config, api_key: str | None, messages: list[dict], max_tokens: int = 1024) -> str:
     import litellm
+    import random
+
+    if not api_key:
+        logger.warning("LLM call skipped: no API key configured (provider=%s, api_key_env=%s)", cfg.provider, cfg.api_key_env)
+        return ""
 
     for attempt in range(_RETRY_ATTEMPTS):
         try:
@@ -50,16 +55,23 @@ def _litellm_completion(cfg: Config, api_key: str | None, messages: list[dict], 
             )
             return response.choices[0].message.content
         except Exception as e:
-            if attempt < _RETRY_ATTEMPTS - 1 and not isinstance(e, (TypeError, AttributeError, ImportError)):
-                delay = _RETRY_BASE_DELAY * (2 ** attempt)
-                logger.warning("litellm call failed (attempt %d/%d), retrying in %.1fs: %s", attempt + 1, _RETRY_ATTEMPTS, delay, e)
-                time.sleep(delay)
-            else:
+            is_rate_limit = isinstance(e, litellm.RateLimitError)
+            is_fatal = isinstance(e, (TypeError, AttributeError, ImportError))
+            last_attempt = attempt >= _RETRY_ATTEMPTS - 1
+            if last_attempt or is_fatal:
                 raise
+
+            if is_rate_limit:
+                delay = 5.0 * (5 ** attempt) + random.uniform(0, 2)
+            else:
+                delay = _RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
+            logger.warning("litellm call failed (attempt %d/%d), retrying in %.1fs: %s", attempt + 1, _RETRY_ATTEMPTS, delay, e)
+            time.sleep(delay)
 
 
 def _anthropic_completion(model: str, system: str, user: str, api_key: str) -> str:
     import anthropic
+    import random
 
     bare_model = model.removeprefix("anthropic/")
     client = anthropic.Anthropic(api_key=api_key)
@@ -78,17 +90,44 @@ def _anthropic_completion(model: str, system: str, user: str, api_key: str) -> s
             if not text_blocks:
                 raise ValueError("No text block in Anthropic response")
             return text_blocks[0].text
-        except Exception as e:
-            if attempt < _RETRY_ATTEMPTS - 1 and not isinstance(e, (TypeError, AttributeError, ValueError)):
-                delay = _RETRY_BASE_DELAY * (2 ** attempt)
-                logger.warning("Anthropic API call failed (attempt %d/%d), retrying in %.1fs: %s", attempt + 1, _RETRY_ATTEMPTS, delay, e)
-                time.sleep(delay)
-            else:
+        except anthropic.RateLimitError as e:
+            if attempt >= _RETRY_ATTEMPTS - 1:
                 raise
+            delay = 5.0 * (5 ** attempt) + random.uniform(0, 2)
+            logger.warning("Anthropic API rate limited (attempt %d/%d), retrying in %.1fs: %s", attempt + 1, _RETRY_ATTEMPTS, delay, e)
+            time.sleep(delay)
+        except Exception as e:
+            is_fatal = isinstance(e, (TypeError, AttributeError))
+            if attempt >= _RETRY_ATTEMPTS - 1 or is_fatal:
+                raise
+            delay = _RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
+            logger.warning("Anthropic API call failed (attempt %d/%d), retrying in %.1fs: %s", attempt + 1, _RETRY_ATTEMPTS, delay, e)
+            time.sleep(delay)
 
 
 def _should_use_anthropic_sdk(cfg: Config, api_key: str | None) -> bool:
     return _is_anthropic(cfg) and api_key is not None
+
+
+def _parse_llm_json(raw: str) -> dict | list | None:
+    """Parse LLM response as JSON, with recovery for truncation and malformed output."""
+    raw = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+    for marker in ("}", "]"):
+        pos = len(raw)
+        while pos > 0:
+            pos = raw.rfind(marker, 0, pos)
+            if pos < 0:
+                break
+            chunk = raw[:pos + 1].rstrip(",").rstrip(";")
+            try:
+                return json.loads(chunk)
+            except (json.JSONDecodeError, ValueError):
+                continue
+    return None
 
 
 def describe_nodes_batch(nodes: list[ASTNode], cfg: Config) -> dict[str, str]:
@@ -123,21 +162,27 @@ def describe_nodes_batch(nodes: list[ASTNode], cfg: Config) -> dict[str, str]:
         if use_sdk:
             raw = _anthropic_completion(cfg.provider, system, user, api_key)
         else:
+            max_tokens = max(512, len(nodes) * 50)
             raw = _litellm_completion(cfg, api_key, [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
-            ])
+            ], max_tokens=max_tokens)
 
-        raw = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-        result = json.loads(raw)
+        if not raw:
+            return {n.id: "" for n in nodes}
+
+        result = _parse_llm_json(raw)
+        if result is None:
+            logger.warning("LLM returned invalid JSON for batch of %d symbols (raw=%s...)", len(nodes), raw[:100])
+            return {n.id: "" for n in nodes}
+
         if isinstance(result, list):
             result = {item["id"]: item.get("description", item.get("desc", "")) for item in result if isinstance(item, dict) and "id" in item}
         return {n.id: result.get(n.id, "") for n in nodes}
     except Exception as e:
         if isinstance(e, (TypeError, AttributeError, ImportError, NameError)):
             raise
-        import warnings
-        warnings.warn(f"LLM description failed: {e}")
+        logger.warning("LLM description failed for batch of %d symbols: %s", len(nodes), e)
         return {n.id: "" for n in nodes}
 
 
@@ -153,8 +198,7 @@ def describe_nodes(batches: list[list[ASTNode]], cfg: Config, max_workers: int =
                 result = future.result()
                 descriptions.update(result)
             except Exception as e:
-                import warnings
-                warnings.warn(f"Batch description failed: {e}")
+                logger.warning("Batch description failed: %s", e)
                 for n in batch:
                     descriptions[n.id] = ""
 
@@ -191,19 +235,21 @@ def describe_files(file_nodes: dict[str, list[ASTNode]], cfg: Config) -> dict[st
         if use_sdk:
             raw = _anthropic_completion(cfg.provider, system, user, api_key)
         else:
+            max_tokens = max(512, len(file_nodes) * 40)
             raw = _litellm_completion(cfg, api_key, [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
-            ])
+            ], max_tokens=max_tokens)
 
-        raw = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-        result = json.loads(raw)
+        result = _parse_llm_json(raw)
+        if result is None:
+            logger.warning("LLM file description returned invalid JSON for %d files (raw=%s...)", len(file_nodes), raw[:100])
+            return {f: "" for f in file_nodes}
         return {f: result.get(f, "") for f in file_nodes}
     except Exception as e:
         if isinstance(e, (TypeError, AttributeError, ImportError, NameError)):
             raise
-        import warnings
-        warnings.warn(f"LLM file description failed: {e}")
+        logger.warning("LLM file description failed: %s", e)
         return {f: "" for f in file_nodes}
 
 
@@ -256,10 +302,12 @@ def deep_enrich_page(
             raw = _litellm_completion(cfg, api_key, [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
-            ])
+            ], max_tokens=2048)
 
-        raw = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-        result = json.loads(raw)
+        result = _parse_llm_json(raw)
+        if result is None:
+            logger.warning("LLM deep enrichment returned invalid JSON for %s", group_label)
+            return empty
         return {
             "narrative": result.get("narrative", ""),
             "data_flows": result.get("data_flows", []),
@@ -268,8 +316,7 @@ def deep_enrich_page(
     except Exception as e:
         if isinstance(e, (TypeError, AttributeError, ImportError, NameError)):
             raise
-        import warnings
-        warnings.warn(f"LLM deep enrichment failed: {e}")
+        logger.warning("LLM deep enrichment failed: %s", e)
         return empty
 
 
@@ -326,8 +373,10 @@ def deep_enrich_index(
                 {"role": "user", "content": user},
             ])
 
-        raw = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-        result = json.loads(raw)
+        result = _parse_llm_json(raw)
+        if result is None:
+            logger.warning("LLM index enrichment returned invalid JSON (raw=%s...)", raw[:100])
+            return empty
         return {
             "overview": result.get("overview", ""),
             "flows": result.get("flows", []),
@@ -335,8 +384,7 @@ def deep_enrich_index(
     except Exception as e:
         if isinstance(e, (TypeError, AttributeError, ImportError, NameError)):
             raise
-        import warnings
-        warnings.warn(f"LLM index enrichment failed: {e}")
+        logger.warning("LLM index enrichment failed: %s", e)
         return empty
 
 
@@ -373,8 +421,7 @@ def rewrite_query(query: str, cfg: Config) -> list[str]:
             return [query] + [s for s in result if s != query]
         return [query]
     except Exception as e:
-        import warnings
-        warnings.warn(f"Query rewrite failed: {e}")
+        logger.warning("Query rewrite failed: %s", e)
         return [query]
 
 
@@ -401,6 +448,5 @@ def synthesize_commit_message(changed_files: list[str], descriptions: dict[str, 
     except Exception as e:
         if isinstance(e, (TypeError, AttributeError, ImportError, NameError)):
             raise
-        import warnings
-        warnings.warn(f"LLM commit message synthesis failed: {e}")
+        logger.warning("LLM commit message synthesis failed: %s", e)
         return ""

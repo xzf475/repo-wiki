@@ -1080,15 +1080,35 @@ async def list_repos(request: Request) -> JSONResponse:
         has_vectors = (root / info["config"].vector_store.persist_dir).exists()
         manifest_path = root / ".indexer" / "manifest.json"
         symbol_count = 0
+        last_synced_at = ""
         if manifest_path.exists():
             from indexer.manifest import load_manifest
             manifest = load_manifest(root)
             symbol_count = sum(len(entry.component_ids) for entry in manifest.files.values())
+            last_synced_at = manifest.indexed_at or ""
+        if not last_synced_at:
+            try:
+                from indexer.git import current_commit
+                commit = current_commit(root)
+                if commit:
+                    import subprocess
+                    out = subprocess.run(
+                        ["git", "log", "-1", "--format=%cI", commit],
+                        cwd=root, capture_output=True, text=True, timeout=10,
+                    )
+                    if out.returncode == 0 and out.stdout.strip():
+                        last_synced_at = out.stdout.strip()
+            except Exception:
+                pass
+        branches = info.get("branches", [])
         result.append({
             "name": name,
             "path": str(root),
+            "url": info.get("url", ""),
+            "branches": branches,
             "has_vector_db": has_vectors,
             "symbol_count": symbol_count,
+            "last_synced_at": last_synced_at,
         })
     return JSONResponse({"repos": result})
 
@@ -1145,10 +1165,13 @@ async def repo_detail(request: Request) -> JSONResponse:
     return JSONResponse({
         "name": repo_name,
         "path": str(root),
+        "url": info.get("url", ""),
+        "branches": info.get("branches", []),
         "wiki_pages": wiki_pages,
         "manifest": manifest_data,
         "skill": skill_content,
         "has_vector_db": (root / cfg.vector_store.persist_dir).exists(),
+        "last_synced_at": manifest_data.get("indexed_at", "") if manifest_data else "",
     })
 
 
