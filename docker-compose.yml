@@ -1,0 +1,27 @@
+services:
+  repo-wiki:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "7654:7654"
+    volumes:
+      - repo_wiki_data:/app/.indexer
+      - repo_wiki_wiki:/app/wiki
+      - repo_wiki_repos:/tmp/repo_wiki_repos
+      - ./.env:/app/.env:ro
+    environment:
+      - REPO_WIKI_API_KEY=${REPO_WIKI_API_KEY:-}
+      - LLM_PROVIDER=${LLM_PROVIDER:-}
+      - LLM_BASE_URL=${LLM_BASE_URL:-}
+      - LLM_API_KEY_ENV=${LLM_API_KEY_ENV:-}
+      - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-}
+      - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL:-}
+      - EMBEDDING_API_KEY_ENV=${EMBEDDING_API_KEY_ENV:-}
+      - EMBEDDING_DIMENSIONS=${EMBEDDING_DIMENSIONS:-}
+    restart: unless-stopped
+
+volumes:
+  repo_wiki_data:
+  repo_wiki_wiki:
+  repo_wiki_repos:
