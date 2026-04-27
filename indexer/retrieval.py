@@ -13,9 +13,11 @@ def search_symbols(
     repo_root: Path,
     top_k: int = 10,
     expand_depth: int = 1,
+    branch: str = "",
 ) -> list[dict]:
     query_vector = embed_query(query, cfg.embedding)
-    hits = search(query_vector, cfg.vector_store, repo_root, top_k=top_k)
+    where_clause = {"branch": branch} if branch else None
+    hits = search(query_vector, cfg.vector_store, repo_root, top_k=top_k, where=where_clause)
 
     if expand_depth > 0:
         hits = _expand_with_call_graph(hits, cfg, repo_root, expand_depth)

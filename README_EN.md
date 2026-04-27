@@ -8,15 +8,13 @@ Generate a checked-in wiki, skill files, and vector search from any repo — no 
 [![Python >=3.11](https://img.shields.io/badge/python-%3E%3D3.11-blue)](https://pypi.org/project/repo-wiki/)
 [![Forked from kiwiskil](https://img.shields.io/badge/forked%20from-kiwiskil-6366f1)](https://github.com/ximihoque/kiwiskil)
 
-[Install](#install) · [Quick Start](#quick-start) · [REST API](#rest-api) · [CLI](#cli) · [Configuration](#configuration)
-
 [中文文档](README.md)
 
 ---
 
 repo-wiki generates a structural wiki, skill files, and a vector search index from any codebase. It enables LLM agents to navigate code without reading source files — using a knowledge graph built from your repo and checked into git.
 
-> **Forked from [kiwiskil](https://github.com/ximihoque/kiwiskil)** — repo-wiki extends the original with a REST API, vector search, query rewriting, repository health checks, and Rust, Java, Ruby, Go support.
+> **Forked from [kiwiskil](https://github.com/ximihoque/kiwiskil)** — repo-wiki extends the original with a REST API, vector search, query rewriting, health checks, webhook auto-sync, MCP server, and Rust/Java/Ruby/Go support.
 
 ---
 
@@ -44,42 +42,12 @@ The wiki is plain markdown checked into your repo. No cloud service, no lock-in.
 | Vector search (ChromaDB) | — | ✓ |
 | Query rewriting | — | ✓ |
 | Call graph tracing | — | ✓ |
-| Repository health checks | — | ✓ |
+| Health checks | — | ✓ |
 | Auto-repair on sync | — | ✓ |
-| Go language support | — | ✓ |
+| Webhook auto-sync | — | ✓ |
+| MCP server | — | ✓ |
+| Rust / Java / Ruby / Go | — | ✓ |
 | Async task processing | — | ✓ |
-
-### REST API with Web UI
-
-A full-featured REST API (`repo-wiki serve-api`) for remote repository management:
-
-- **Register repos** via URL with git clone support (GitHub PAT, GitLab token, password auth)
-- **Sync / Rebuild** repos with real-time progress tracking
-- **Semantic search** across all registered repos via vector similarity
-- **Call graph tracing** — follow calls up or down the dependency chain
-- **Source context** — fetch specific line ranges from any tracked file
-- **Web dashboard** — manage repos, browse wiki pages, search symbols from a browser
-
-### Vector Search (RAG-ready)
-
-- **ChromaDB** stores embeddings for every indexed symbol
-- **Semantic search** returns results ranked by vector distance, not just text match
-- **Query rewriting** — LLM expands natural language queries into multiple precise search phrases for better recall (e.g. `"how does auth work"` → `["authentication handler", "token verification", "login flow", ...]`)
-- **Call graph expansion** — automatically includes related symbols from the call chain
-
-### Repository Health Checks & Repair
-
-- **Validate** endpoint checks: config file, manifest, wiki pages, skill file, vector DB, stale files
-- **Auto-repair** on sync: missing wiki pages, missing vector DB, stale index entries are all detected and fixed
-- **Manifest path fixup**: corrects wiki page path inconsistencies between manifest and actual files
-
-### Go, Rust, Java, Ruby Support
-
-AST parsing for Go, Rust, Java, and Ruby via tree-sitter — extracts functions, methods, classes, types, interfaces (traits), enums, and call relationships.
-
-### Async Task Processing
-
-Repository registration, sync, and rebuild run as background tasks with real-time progress updates (step name + percentage). The API responds immediately with a task ID.
 
 ---
 
@@ -109,10 +77,11 @@ On every subsequent commit, the pre-commit hook runs `repo-wiki run --staged` au
 # Start the API server
 repo-wiki serve-api --port 7654
 
-# Register a repo (clones + indexes)
+# Register a remote repo (clones + indexes)
 curl -X POST http://localhost:7654/register \
   -H 'Content-Type: application/json' \
-  -d '{"url": "https://github.com/org/repo.git"}'
+  -d '{"url": "https://github.com/org/repo.git", "token": "ghp_xxx"}'
+# Response includes a webhook_url ready to configure in GitHub
 
 # Search across repos
 curl -X POST http://localhost:7654/search \
@@ -123,6 +92,18 @@ curl -X POST http://localhost:7654/search \
 open http://localhost:7654
 ```
 
+### MCP Mode (LLM Agent Integration)
+
+```bash
+# Single-repo mode — reads the local vector store directly
+repo-wiki serve
+
+# Multi-repo mode — connects to a REST API backend
+repo-wiki serve --api http://localhost:7654
+```
+
+See the [MCP Server](#mcp-server) section for details.
+
 ---
 
 ## REST API
@@ -132,13 +113,12 @@ open http://localhost:7654
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/repos` | GET | List all registered repos |
-| `/register` | POST | Register & index a repo from URL |
-| `/sync` | POST | Sync a repo (pull + re-index changes) |
-| `/rebuild` | POST | Full rebuild (delete + re-index) |
+| `/register` | POST | Register & index a repo from URL (returns webhook_url) |
+| `/sync` | POST | Sync a repo (git pull + incremental re-index) |
+| `/rebuild` | POST | Full rebuild |
 | `/unregister` | POST | Remove a repo |
 | `/api/validate/{name}` | GET | Health check a repo |
 | `/api/task/{task_id}` | GET | Poll async task progress |
-| `/webhook` | POST | Webhook endpoint (receives GitHub/GitLab/Gitee push events, triggers auto-sync) |
 
 ### Search & Navigation
 
@@ -147,7 +127,19 @@ open http://localhost:7654
 | `/search` | POST | Semantic search with query rewriting |
 | `/trace` | POST | Trace call graph (up/down) |
 | `/source` | POST | Get source context for a file range |
-| `/api/repo/{name}` | GET | Repo detail (wiki pages, manifest) |
+| `/api/repo/{name}` | GET | Repo detail |
+| `/skill` | GET | Multi-repo merged skill file |
+
+### Webhook Auto-Sync
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/webhook/{name}` | POST | **Recommended** — triggers sync by repo name |
+| `/webhook` | POST | Generic — matches repo from payload |
+
+After registering a repo, you get a webhook URL: `https://your-server.com/webhook/{name}`. Add this URL to your repository's webhook settings (push events) — each push automatically triggers a wiki sync.
+
+Set `WEBHOOK_SECRET` env var for payload verification (HMAC-SHA256 for GitHub, Token header for GitLab).
 
 ### Search with Query Rewriting
 
@@ -156,7 +148,6 @@ By default, search calls LLM to expand your query into multiple precise phrases 
 ```json
 {
   "query": "how does authentication work",
-  "repo": "my-project",
   "top_k": 10,
   "rewrite": true,
   "expand_depth": 1
@@ -173,21 +164,103 @@ Response includes `rewritten_queries` so you can see what was searched:
 }
 ```
 
+### API Authentication
+
+When `REPO_WIKI_API_KEY` is set, all endpoints (except `/health` and `/webhook`) require an `Authorization: Bearer <key>` header.
+
+---
+
+## MCP Server
+
+repo-wiki ships with a [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server, allowing any MCP-capable LLM client — Claude Code, Cursor, Windsurf, VS Code + Copilot, and others — to search your codebase directly.
+
+### Two Modes
+
+```
+repo-wiki serve              # Single-repo — reads local vector store
+repo-wiki serve --api <URL>  # Multi-repo — proxies to REST API backend
+```
+
+#### Single-Repo Mode
+
+Run directly inside an indexed repository. The MCP server reads the local `.indexer/vector_db` and configuration:
+
+```bash
+cd my-project
+repo-wiki run              # index first
+repo-wiki serve            # start MCP server (stdio transport)
+```
+
+Provides 3 tools:
+
+| Tool | Description |
+|------|-------------|
+| `search_symbols_tool` | Semantic search for code symbols |
+| `trace_call_tool` | Trace call graph (up/down) |
+| `get_source_context_tool` | Get source code context |
+
+#### Multi-Repo Mode
+
+Proxies through the REST API, giving access to all registered repositories:
+
+```bash
+repo-wiki serve-api &                  # start REST API first
+repo-wiki serve --api http://localhost:7654  # start MCP pointing at API
+```
+
+Adds a `list_repos` tool for discovering available repositories.
+
+### Integration with LLM Clients
+
+**Claude Code:**
+
+```json
+{
+  "mcpServers": {
+    "repo-wiki": {
+      "command": "repo-wiki",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+Pointing to a remote REST API:
+
+```json
+{
+  "mcpServers": {
+    "repo-wiki": {
+      "command": "repo-wiki",
+      "args": ["serve", "--api", "http://localhost:7654"]
+    }
+  }
+}
+```
+
+**Cursor / Windsurf / Copilot:**
+
+Similar configuration, point the command at `repo-wiki serve`. See your IDE's MCP configuration docs for details.
+
+### How It Works
+
+The MCP server wraps repo-wiki's retrieval capabilities into standard MCP tools. When the LLM needs to understand code, it calls these tools automatically — no manual source reading required. In multi-repo mode, the MCP server is a lightweight proxy; all retrieval logic runs on the REST API side.
+
 ---
 
 ## CLI
 
 ```bash
-repo-wiki init              # set up config, hook, and CLAUDE.md
-repo-wiki run               # smart incremental + deep enrichment (default)
-repo-wiki run --skip-deep   # skip narrative/flows/constraints enrichment (faster)
-repo-wiki run --force       # force full re-index of all files
-repo-wiki run --staged      # incremental on staged files only (used by hook)
-repo-wiki status            # show last indexed commit, stale files, stats
-repo-wiki hook install      # manually install pre-commit hook
-repo-wiki hook remove       # remove pre-commit hook
-repo-wiki serve-api         # start REST API server with web dashboard
-repo-wiki mcp               # start MCP server for semantic code search
+repo-wiki init               # set up config, hook, and CLAUDE.md
+repo-wiki run                # smart incremental + deep enrichment (default)
+repo-wiki run --skip-deep    # skip narrative/flows/constraints (faster)
+repo-wiki run --force        # force full re-index
+repo-wiki run --staged       # incremental on staged files only (hook)
+repo-wiki status             # show last indexed commit, stale files, stats
+repo-wiki hook install       # manually install pre-commit hook
+repo-wiki hook remove        # remove pre-commit hook
+repo-wiki serve              # start MCP server
+repo-wiki serve-api          # start REST API server with web dashboard
 ```
 
 ### Deep Mode
@@ -232,7 +305,7 @@ A skill file that teaches any LLM agent how to navigate your codebase:
 
 ### `.indexer/vector_db/`
 
-ChromaDB vector store containing embeddings for every indexed symbol. Used by the REST API for semantic search.
+ChromaDB vector store containing embeddings for every indexed symbol. Used by the REST API and MCP server for semantic search.
 
 ---
 
@@ -292,7 +365,7 @@ deep = true
 
 Any LiteLLM-compatible provider works: OpenAI, Anthropic, Gemini, Ollama, local models.
 
-### `.env` (server-level, for REST API mode)
+### `.env` (server-level, for REST API / MCP mode)
 
 ```bash
 # LLM
@@ -312,7 +385,8 @@ VECTOR_PERSIST_DIR=.indexer/vector_db
 VECTOR_COLLECTION_NAME=repo_wiki_code
 
 # REST API Service
-PUBLIC_DOMAIN=https://your-server.com   # Public domain for webhook URL generation
+REPO_WIKI_API_KEY=                       # API auth key (requires Bearer Token)
+PUBLIC_DOMAIN=https://your-server.com    # Public domain for webhook URL
 WEBHOOK_SECRET=your-webhook-secret       # Webhook signature verification key
 ```
 

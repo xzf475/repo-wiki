@@ -8,21 +8,19 @@
 [![Python >=3.11](https://img.shields.io/badge/python-%3E%3D3.11-blue)](https://pypi.org/project/repo-wiki/)
 [![Forked from kiwiskil](https://img.shields.io/badge/forked%20from-kiwiskil-6366f1)](https://github.com/ximihoque/kiwiskil)
 
-[安装](#安装) · [快速开始](#快速开始) · [REST API](#rest-api) · [CLI](#cli) · [配置](#配置)
-
 [English](README_EN.md)
 
 ---
 
 repo-wiki 从任意代码库生成可提交的结构化 Wiki、技能文件和向量检索索引。它让 LLM Agent 无需阅读源码即可导航代码——使用从你的仓库构建并提交到 Git 的知识图谱。
 
-> **Fork 自 [kiwiskil](https://github.com/ximihoque/kiwiskil)** — repo-wiki 在原版基础上增加了 REST API、向量检索、查询改写、仓库健康检查和 Go 语言支持。
+> **Fork 自 [kiwiskil](https://github.com/ximihoque/kiwiskil)** — repo-wiki 在原版基础上增加了 REST API、向量检索、查询改写、仓库健康检查、Webhook 自动同步以及 Rust/Java/Ruby/Go 语言支持。
 
 ---
 
 ## 工作原理
 
-1. **AST 解析** — 从源文件提取符号、导入和调用图（确定性，免费）
+1. **AST 解析** — 从源文件提取符号、导入和调用图
 2. **LLM 描述** — 通过 LiteLLM 使用任意模型为每个符号生成一行描述
 3. **密度分组** — 按逻辑密度（而非目录结构）将文件组织为 Wiki 页面
 4. **Embedding** — 为每个符号生成向量表示
@@ -46,41 +44,10 @@ Wiki 是纯 Markdown，提交到你的仓库。无需云服务，无厂商锁定
 | 调用链追踪 | — | ✓ |
 | 仓库健康检查 | — | ✓ |
 | 同步时自动修复 | — | ✓ |
-| Go 语言支持 | — | ✓ |
+| Webhook 自动同步 | — | ✓ |
+| MCP 服务器 | — | ✓ |
+| Rust / Java / Ruby / Go | — | ✓ |
 | 异步任务处理 | — | ✓ |
-
-### REST API + Web 管理界面
-
-通过 `repo-wiki serve-api` 启动完整的 REST API 服务，支持远程仓库管理：
-
-- **注册仓库** — 通过 URL 克隆并索引，支持 GitHub PAT、GitLab Token、密码认证
-- **同步 / 重建** — 带实时进度追踪的增量同步和全量重建
-- **语义搜索** — 跨仓库向量相似度检索
-- **调用链追踪** — 沿调用链向上或向下追踪
-- **源码上下文** — 获取任意文件的指定行范围
-- **Web 仪表盘** — 浏览器中管理仓库、浏览 Wiki、搜索符号
-
-### 向量检索（RAG 就绪）
-
-- **ChromaDB** 存储每个索引符号的向量嵌入
-- **语义搜索** — 按向量距离排序返回结果，而非文本匹配
-- **查询改写** — LLM 将自然语言查询扩展为多个精确检索词，提升召回率
-  - 例：`"认证怎么处理的"` → `["认证处理", "Authentication handler", "token verification", ...]`
-- **调用图扩展** — 自动包含调用链上的相关符号
-
-### 仓库健康检查与自动修复
-
-- **校验端点** 检查：配置文件、清单文件、Wiki 页面、技能文件、向量库、过期文件
-- **同步时自动修复**：缺失的 Wiki 页面、向量库、过期索引条目均可检测并修复
-- **清单路径修正**：自动修正 manifest 中 Wiki 页面路径与实际文件名不一致的问题
-
-### Go、Rust、Java、Ruby 语言支持
-
-通过 tree-sitter 实现 Go、Rust、Java、Ruby 的 AST 解析——提取函数、方法、类、类型、接口（trait）、枚举和调用关系。
-
-### 异步任务处理
-
-仓库注册、同步、重建均作为后台任务运行，实时进度更新（步骤名称 + 百分比）。API 立即返回任务 ID。
 
 ---
 
@@ -110,19 +77,32 @@ repo-wiki run        # 生成 wiki/ 和 .indexer/skills/codebase.md
 # 启动 API 服务
 repo-wiki serve-api --port 7654
 
-# 注册仓库（克隆 + 索引）
+# 注册远程仓库（克隆 + 索引）
 curl -X POST http://localhost:7654/register \
   -H 'Content-Type: application/json' \
-  -d '{"url": "https://github.com/org/repo.git"}'
+  -d '{"url": "https://github.com/org/repo.git", "token": "ghp_xxx"}'
+# 返回包含 webhook_url，可直接在 GitHub 中配置自动同步
 
-# 跨仓库搜索
+# 跨仓库语义搜索
 curl -X POST http://localhost:7654/search \
   -H 'Content-Type: application/json' \
   -d '{"query": "认证中间件", "top_k": 10}'
 
-# 打开 Web 仪表盘
+# Web 仪表盘
 open http://localhost:7654
 ```
+
+### MCP 模式（LLM Agent 集成）
+
+```bash
+# 单仓库模式——直接使用本地向量库
+repo-wiki serve
+
+# 多仓库模式——连接 REST API 后端
+repo-wiki serve --api http://localhost:7654
+```
+
+详见 [MCP 服务器](#mcp-服务器) 章节。
 
 ---
 
@@ -133,13 +113,12 @@ open http://localhost:7654
 | 端点 | 方法 | 说明 |
 |------|------|------|
 | `/repos` | GET | 列出所有已注册仓库 |
-| `/register` | POST | 通过 URL 注册并索引仓库 |
-| `/sync` | POST | 同步仓库（拉取 + 重新索引变更） |
-| `/rebuild` | POST | 全量重建（删除 + 重新索引） |
+| `/register` | POST | 通过 URL 注册并索引仓库（返回 webhook_url） |
+| `/sync` | POST | 同步仓库（git pull + 增量索引） |
+| `/rebuild` | POST | 全量重建 |
 | `/unregister` | POST | 移除仓库 |
 | `/api/validate/{name}` | GET | 仓库健康检查 |
 | `/api/task/{task_id}` | GET | 轮询异步任务进度 |
-| `/webhook` | POST | Webhook 端点（接收 GitHub/GitLab/Gitee push 事件，自动触发同步） |
 
 ### 搜索与导航
 
@@ -148,16 +127,27 @@ open http://localhost:7654
 | `/search` | POST | 语义搜索（含查询改写） |
 | `/trace` | POST | 追踪调用链（向上/向下） |
 | `/source` | POST | 获取文件指定行范围的源码 |
-| `/api/repo/{name}` | GET | 仓库详情（Wiki 页面、清单） |
+| `/api/repo/{name}` | GET | 仓库详情 |
+| `/skill` | GET | 多仓库合并技能文件 |
+
+### Webhook 自动同步
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/webhook/{name}` | POST | **推荐**——按仓库名自动触发同步 |
+| `/webhook` | POST | 通用端点，解析 payload 匹配仓库 |
+
+注册仓库后返回独立 webhook URL：`https://your-server.com/webhook/{name}`。直接在 GitHub/GitLab/Gitee 仓库设置中配置该 URL，后续每次 push 自动触发 wiki 更新。
+
+通过 `WEBHOOK_SECRET` 环境变量启用签名验证——GitHub 使用 HMAC-SHA256，GitLab 使用 Token 头。
 
 ### 查询改写搜索
 
-搜索默认调用 LLM 将查询扩展为多个精确检索词以提升召回率。可通过 `"rewrite": false` 关闭：
+搜索默认调用 LLM 将查询扩展为多个精确检索词。可通过 `"rewrite": false` 关闭：
 
 ```json
 {
   "query": "认证怎么处理的",
-  "repo": "my-project",
   "top_k": 10,
   "rewrite": true,
   "expand_depth": 1
@@ -174,6 +164,88 @@ open http://localhost:7654
 }
 ```
 
+### API 认证
+
+设置环境变量 `REPO_WIKI_API_KEY` 后，除 `/health` 和 `/webhook` 外的所有端点需要 `Authorization: Bearer <key>` 头。
+
+---
+
+## MCP 服务器
+
+repo-wiki 提供 [Model Context Protocol (MCP)](https://modelcontextprotocol.io) 服务器，让任何支持 MCP 的 LLM 客户端（Claude Code、Cursor、Windsurf、VS Code + Copilot 等）可以直接搜索你的代码库。
+
+### 两种运行模式
+
+```
+repo-wiki serve              # 单仓库模式——直接读取本地向量库
+repo-wiki serve --api <URL>  # 多仓库模式——连接 REST API 后端
+```
+
+#### 单仓库模式
+
+在已索引的仓库中直接运行，MCP 服务器读取本地的 `.indexer/vector_db` 和配置：
+
+```bash
+cd my-project
+repo-wiki run              # 先完成索引
+repo-wiki serve            # 启动 MCP 服务器（stdio 模式）
+```
+
+提供 3 个工具：
+
+| 工具 | 说明 |
+|------|------|
+| `search_symbols_tool` | 语义搜索代码符号 |
+| `trace_call_tool` | 追踪调用链 |
+| `get_source_context_tool` | 获取源码上下文 |
+
+#### 多仓库模式
+
+通过 MCP 代理访问 REST API，可以搜索所有已注册的仓库：
+
+```bash
+repo-wiki serve-api &                  # 先启动 REST API
+repo-wiki serve --api http://localhost:7654  # 启动 MCP 指向 API
+```
+
+额外提供 `list_repos` 工具用于发现可用仓库。
+
+### 集成到 LLM 客户端
+
+**Claude Code：**
+
+```json
+{
+  "mcpServers": {
+    "repo-wiki": {
+      "command": "repo-wiki",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+使用 `--api` 指向远程 REST API 时：
+
+```json
+{
+  "mcpServers": {
+    "repo-wiki": {
+      "command": "repo-wiki",
+      "args": ["serve", "--api", "http://localhost:7654"]
+    }
+  }
+}
+```
+
+**Cursor / Windsurf / Copilot：**
+
+类似配置，将命令指向 `repo-wiki serve`。详细集成步骤参见各 IDE 的 MCP 配置文档。
+
+### 工作原理
+
+MCP 服务器将 repo-wiki 的检索能力封装为标准 MCP 工具。当 LLM 需要理解代码时，自动调用这些工具——无需手动阅读源代码，Agent 通过搜索 + 追踪 + 源码获取即可完成任务。多仓库模式下进一步解耦，MCP 服务器作为轻量代理，检索逻辑在 REST API 端执行。
+
 ---
 
 ## CLI
@@ -187,8 +259,8 @@ repo-wiki run --staged      # 仅对暂存文件增量索引（hook 使用）
 repo-wiki status            # 显示上次索引提交、过期文件、统计
 repo-wiki hook install      # 手动安装 pre-commit hook
 repo-wiki hook remove       # 移除 pre-commit hook
+repo-wiki serve             # 启动 MCP 服务器
 repo-wiki serve-api         # 启动 REST API 服务和 Web 仪表盘
-repo-wiki mcp               # 启动 MCP 服务器用于语义代码搜索
 ```
 
 ### 深度模式
@@ -233,7 +305,7 @@ repo-wiki mcp               # 启动 MCP 服务器用于语义代码搜索
 
 ### `.indexer/vector_db/`
 
-ChromaDB 向量存储，包含每个索引符号的嵌入。REST API 用于语义搜索。
+ChromaDB 向量存储，包含每个索引符号的嵌入。REST API 和 MCP 服务器用于语义搜索。
 
 ---
 
@@ -293,7 +365,7 @@ deep = true
 
 支持任何 LiteLLM 兼容的提供商：OpenAI、Anthropic、Gemini、Ollama、本地模型。
 
-### `.env`（服务级，用于 REST API 模式）
+### `.env`（服务级，用于 REST API / MCP 模式）
 
 ```bash
 # LLM
@@ -313,8 +385,9 @@ VECTOR_PERSIST_DIR=.indexer/vector_db
 VECTOR_COLLECTION_NAME=repo_wiki_code
 
 # REST API 服务
-PUBLIC_DOMAIN=https://your-server.com   # 公开域名，用于生成 webhook URL
-WEBHOOK_SECRET=your-webhook-secret       # Webhook 签名验证密钥
+REPO_WIKI_API_KEY=                     # API 认证密钥（设置后需 Bearer Token）
+PUBLIC_DOMAIN=https://your-server.com  # 公开域名，用于 webhook URL 生成
+WEBHOOK_SECRET=your-webhook-secret     # Webhook 签名验证密钥
 ```
 
 ---

@@ -108,6 +108,7 @@ class RepoRegistry:
             name: {
                 "root": str(info["root"]),
                 "url": info.get("url", ""),
+                "branch": info.get("branch", ""),
             }
             for name, info in self.repos.items()
         }
@@ -122,22 +123,25 @@ class RepoRegistry:
                 if isinstance(entry, str):
                     path_str = entry
                     url = ""
+                    branch = ""
                 else:
                     path_str = entry.get("root", "")
                     url = entry.get("url", "")
+                    branch = entry.get("branch", "")
                 repo_root = Path(path_str)
                 if repo_root.exists():
                     cfg = load_config(repo_root)
-                    self.repos[name] = {"root": repo_root, "config": cfg, "url": url}
+                    self.repos[name] = {"root": repo_root, "config": cfg, "url": url, "branch": branch}
         except (json.JSONDecodeError, OSError) as e:
             logger.warning("Failed to load repo registry: %s", e)
 
-    def register(self, name: str, repo_root: Path, url: str = ""):
+    def register(self, name: str, repo_root: Path, url: str = "", branch: str = ""):
         cfg = load_config(repo_root)
         self.repos[name] = {
             "root": repo_root,
             "config": cfg,
             "url": url,
+            "branch": branch,
         }
         self._save()
         logger.info(f"Registered repo '{name}' at {repo_root}")
@@ -356,6 +360,7 @@ def _run_indexing_pipeline(
     candidates: list[str],
     cfg: Config,
     manifest,
+    branch: str = "",
 ) -> int:
     from indexer.git import all_tracked_files, is_git_repo
     total_files = len(candidates)
@@ -430,7 +435,7 @@ def _run_indexing_pipeline(
     update_manifest(root, cfg, manifest, candidates, all_nodes, groups)
 
     tasks.update(task_id, status="running", progress=85, step="embedding", detail=f"{total_symbols} symbols")
-    upsert_vectors(root, cfg, manifest, all_nodes, descriptions, removed_files=removed)
+    upsert_vectors(root, cfg, manifest, all_nodes, descriptions, removed_files=removed, branch=branch)
 
     return total_symbols
 
@@ -443,6 +448,7 @@ def _run_rebuild_task(task_id: str, name: str, root: Path, skip_deep: bool) -> N
     try:
         existing = registry.get(name)
         repo_url = existing.get("url", "") if existing else ""
+        repo_branch = existing.get("branch", "") if existing else ""
 
         import shutil
 
@@ -469,6 +475,12 @@ def _run_rebuild_task(task_id: str, name: str, root: Path, skip_deep: bool) -> N
         from indexer.cli import _is_indexable
         from indexer.grouper import density_group
 
+        if repo_branch and is_git_repo(root):
+            subprocess.run(
+                ["git", "checkout", repo_branch],
+                cwd=root, capture_output=True, text=True, timeout=30,
+            )
+
         cfg = load_config(root)
         save_config(root, cfg)
         if is_git_repo(root) and cfg.pre_commit:
@@ -483,14 +495,14 @@ def _run_rebuild_task(task_id: str, name: str, root: Path, skip_deep: bool) -> N
             return
 
         manifest = Manifest()
-        total_symbols = _run_indexing_pipeline(task_id, name, root, skip_deep, candidates, cfg, manifest)
+        total_symbols = _run_indexing_pipeline(task_id, name, root, skip_deep, candidates, cfg, manifest, branch=repo_branch)
 
         if total_symbols == 0:
             tasks.update(task_id, status="done", progress=100, step="complete", detail="No symbols found")
-            registry.register(name, root, url=repo_url)
+            registry.register(name, root, url=repo_url, branch=repo_branch)
             return
 
-        registry.register(name, root, url=repo_url)
+        registry.register(name, root, url=repo_url, branch=repo_branch)
         info = registry.get(name)
         manifest_data = load_manifest(root)
         symbol_count = sum(len(entry.component_ids) for entry in manifest_data.files.values())
@@ -516,11 +528,17 @@ def _run_sync_task(task_id: str, name: str, root: Path, skip_deep: bool) -> None
         return
     existing = registry.get(name)
     repo_url = existing.get("url", "") if existing else ""
+    repo_branch = existing.get("branch", "") if existing else ""
     git_env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
     git_cfg = ["-c", "http.followRedirects=true"]
 
     try:
         tasks.update(task_id, status="running", progress=10, step="git_pull")
+        if repo_branch and is_git_repo(root):
+            subprocess.run(
+                ["git"] + git_cfg + ["checkout", repo_branch],
+                cwd=root, capture_output=True, text=True, timeout=30, env=git_env,
+            )
         subprocess.run(
             ["git"] + git_cfg + ["fetch", "--all"],
             cwd=root, capture_output=True, text=True, timeout=60, env=git_env,
@@ -629,7 +647,7 @@ def _run_sync_task(task_id: str, name: str, root: Path, skip_deep: bool) -> None
             if skill_missing:
                 write_index_and_skill(root, cfg, index_entries, {}, "", [], 0, 0)
             webhook_url = _get_webhook_url(name)
-            registry.register(name, root, url=repo_url)
+            registry.register(name, root, url=repo_url, branch=repo_branch)
             tasks.update(task_id, status="done", progress=100, step="complete", result={
                 "name": name, "path": str(root),
                 "has_vector_db": (root / cfg.vector_store.persist_dir).exists(),
@@ -639,10 +657,10 @@ def _run_sync_task(task_id: str, name: str, root: Path, skip_deep: bool) -> None
             })
             return
 
-        total_symbols = _run_indexing_pipeline(task_id, name, root, skip_deep, candidates, cfg, manifest)
+        total_symbols = _run_indexing_pipeline(task_id, name, root, skip_deep, candidates, cfg, manifest, branch=repo_branch)
 
         webhook_url = _get_webhook_url(name)
-        registry.register(name, root, url=repo_url)
+        registry.register(name, root, url=repo_url, branch=repo_branch)
         info = registry.get(name)
         manifest_data = load_manifest(root)
         symbol_count = sum(len(entry.component_ids) for entry in manifest_data.files.values())
@@ -766,7 +784,7 @@ def _run_register_task_inner(
         if not candidates:
             tasks.update(task_id, status="running", progress=70, step="already_indexed", detail="Nothing to index")
             webhook_url = _get_webhook_url(name)
-            registry.register(name, clone_dir, url=url)
+            registry.register(name, clone_dir, url=url, branch=branch)
             info = registry.get(name)
             has_vectors = (clone_dir / info["config"].vector_store.persist_dir).exists()
             manifest_data = load_manifest(root)
@@ -778,10 +796,10 @@ def _run_register_task_inner(
             })
             return
 
-        total_symbols = _run_indexing_pipeline(task_id, name, root, skip_deep, candidates, cfg, manifest)
+        total_symbols = _run_indexing_pipeline(task_id, name, root, skip_deep, candidates, cfg, manifest, branch=branch)
 
         webhook_url = _get_webhook_url(name)
-        registry.register(name, clone_dir, url=url)
+        registry.register(name, clone_dir, url=url, branch=branch)
         info = registry.get(name)
         has_vectors = (clone_dir / info["config"].vector_store.persist_dir).exists()
         manifest_data = load_manifest(root)
@@ -859,8 +877,10 @@ async def search_symbols(request: Request) -> JSONResponse:
         for name, info in group:
             cfg = info["config"]
             root = info["root"]
+            repo_branch = info.get("branch", "")
+            where_clause = {"branch": repo_branch} if repo_branch else None
             for qv in all_query_vectors:
-                hits = search(qv, cfg.vector_store, root, top_k=top_k * 2)
+                hits = search(qv, cfg.vector_store, root, top_k=top_k * 2, where=where_clause)
                 for h in hits:
                     h["repo"] = name
                     if h["id"] not in seen_ids:

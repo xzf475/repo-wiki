@@ -23,10 +23,16 @@ def upsert_nodes(
     cfg: VectorStoreConfig,
     repo_root: Path,
     dim: int = 1024,
+    branch: str = "",
 ):
     persist_path = str(repo_root / cfg.persist_dir)
     client = _get_client(persist_path)
     collection = _get_or_create_collection(client, cfg.collection_name, dim=dim)
+
+    if branch:
+        existing = collection.get(where={"branch": branch}, include=["ids"])
+        if existing and existing["ids"]:
+            collection.delete(ids=existing["ids"])
 
     valid = [(n, vectors[n.id]) for n in nodes if n.id in vectors and vectors[n.id] is not None]
     if not valid:
@@ -35,7 +41,7 @@ def upsert_nodes(
     ids = [n.id for n, _ in valid]
     embeddings = [vec for _, vec in valid]
     documents = [_build_doc(n, descriptions) for n, _ in valid]
-    metadatas = [_build_meta(n) for n, _ in valid]
+    metadatas = [_build_meta(n, branch) for n, _ in valid]
 
     batch_size = 100
     for i in range(0, len(ids), batch_size):
@@ -108,6 +114,7 @@ def delete_by_files(
     removed_files: list[str],
     cfg: VectorStoreConfig,
     repo_root: Path,
+    branch: str = "",
 ) -> int:
     persist_path = str(repo_root / cfg.persist_dir)
     if not Path(persist_path).exists():
@@ -117,8 +124,11 @@ def delete_by_files(
 
     ids_to_delete = []
     for file_path in removed_files:
+        where_clause = {"file": file_path}
+        if branch:
+            where_clause = {"$and": [{"file": file_path}, {"branch": branch}]}
         results = collection.get(
-            where={"file": file_path},
+            where=where_clause,
             include=["ids"],
         )
         if results and results["ids"]:
@@ -139,13 +149,15 @@ def _build_doc(node, descriptions: dict[str, str]) -> str:
     return " | ".join(parts)
 
 
-def _build_meta(node) -> dict:
+def _build_meta(node, branch: str = "") -> dict:
     meta: dict = {
         "type": node.type,
         "file": node.file,
         "line_start": node.line_start,
         "line_end": node.line_end,
     }
+    if branch:
+        meta["branch"] = branch
     if node.calls:
         meta["calls"] = json_dumps_compact(node.calls)
     if node.called_by:

@@ -9,7 +9,7 @@ import click
 from indexer.config import Config, load_config, save_config
 from indexer.manifest import load_manifest, save_manifest, compute_hash, FileEntry
 from indexer.git import (
-    staged_files, all_tracked_files, current_commit,
+    staged_files, all_tracked_files, current_commit, current_branch,
     changed_files_since, is_git_repo
 )
 from indexer.ast_parser import parse_file, load_cached_nodes, save_cached_nodes, compute_hash_short
@@ -234,7 +234,8 @@ def run(staged: bool, force: bool, skip_deep: bool):
     # ── Phase 7: Vector store ────────────────────────────────────────────────
     click.echo("\n  Embedding + vector store")
     try:
-        upsert_vectors(root, cfg, manifest, all_nodes, descriptions, removed_files=removed)
+        branch = current_branch(root) or ""
+        upsert_vectors(root, cfg, manifest, all_nodes, descriptions, removed_files=removed, branch=branch)
         click.echo(f"    ✓  {total_symbols} vectors upserted")
     except Exception as e:
         import warnings

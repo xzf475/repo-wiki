@@ -210,6 +210,7 @@ def upsert_vectors(
     all_nodes: list[ASTNode],
     descriptions: dict[str, str],
     removed_files: list[str] | None = None,
+    branch: str = "",
 ) -> None:
     from indexer.embedding import embed_nodes
     from indexer.vector_store import upsert_nodes as vs_upsert, delete_by_files as vs_delete
@@ -217,7 +218,7 @@ def upsert_vectors(
     if removed_files is None:
         removed_files = manifest.removed_files(root, all_tracked_files(root) if is_git_repo(root) else [])
     if removed_files:
-        vs_delete(removed_files, cfg.vector_store, root)
+        vs_delete(removed_files, cfg.vector_store, root, branch=branch)
 
     vectors = embed_nodes(all_nodes, descriptions, cfg.embedding)
-    vs_upsert(all_nodes, vectors, descriptions, cfg.vector_store, root, dim=cfg.embedding.dimensions)
+    vs_upsert(all_nodes, vectors, descriptions, cfg.vector_store, root, dim=cfg.embedding.dimensions, branch=branch)

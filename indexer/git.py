@@ -21,6 +21,12 @@ def current_commit(repo_root: Path) -> Optional[str]:
     out = _run(["git", "rev-parse", "HEAD"], cwd=repo_root)
     return out if out else None
 
+def current_branch(repo_root: Path) -> Optional[str]:
+    out = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_root)
+    if out and out != "HEAD":
+        return out
+    return None
+
 def staged_files(repo_root: Path) -> list[str]:
     out = _run(["git", "diff", "--cached", "--name-only", "--diff-filter=ACM"], cwd=repo_root)
     return [line for line in out.splitlines() if line]
