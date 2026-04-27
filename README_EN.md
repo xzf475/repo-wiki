@@ -113,12 +113,18 @@ See the [MCP Server](#mcp-server) section for details.
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/repos` | GET | List all registered repos |
-| `/register` | POST | Register & index a repo from URL (returns webhook_url) |
-| `/sync` | POST | Sync a repo (git pull + incremental re-index) |
-| `/rebuild` | POST | Full rebuild |
+| `/register` | POST | Register & index a repo from URL. Accepts `branches` array or `branch` string, defaults to `["main"]` |
+| `/sync` | POST | Sync a specific branch (git pull + incremental re-index), optional `branch` param |
+| `/sync-all` | POST | Sync all registered branches (iterates checkout → pull → index) |
+| `/rebuild` | POST | Full rebuild of a specific branch, optional `branch` param |
+| `/rebuild-all` | POST | Full rebuild of all registered branches |
 | `/unregister` | POST | Remove a repo |
 | `/api/validate/{name}` | GET | Health check a repo |
 | `/api/task/{task_id}` | GET | Poll async task progress |
+
+Each registered repo can track multiple branches. Specify `branches: ["main", "develop"]` on register — `/sync-all` iterates all of them automatically.
+
+Vectors are isolated by `branch` metadata. Search returns results across all branches; the response includes a `branch` field to identify the source. Webhooks extract the branch from `ref` in push events, syncing only if it matches a registered branch.
 
 ### Search & Navigation
 

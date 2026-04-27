@@ -113,12 +113,18 @@ repo-wiki serve --api http://localhost:7654
 | 端点 | 方法 | 说明 |
 |------|------|------|
 | `/repos` | GET | 列出所有已注册仓库 |
-| `/register` | POST | 通过 URL 注册并索引仓库（返回 webhook_url） |
-| `/sync` | POST | 同步仓库（git pull + 增量索引） |
-| `/rebuild` | POST | 全量重建 |
+| `/register` | POST | 通过 URL 注册并索引仓库，支持 `branches` 数组或 `branch` 单字符串，默认 `["main"]` |
+| `/sync` | POST | 同步指定分支（git pull + 增量索引），可选 `branch` 参数 |
+| `/sync-all` | POST | 同步所有已注册分支（依次 checkout → pull → 索引） |
+| `/rebuild` | POST | 全量重建指定分支，可选 `branch` 参数 |
+| `/rebuild-all` | POST | 全量重建所有已注册分支 |
 | `/unregister` | POST | 移除仓库 |
 | `/api/validate/{name}` | GET | 仓库健康检查 |
 | `/api/task/{task_id}` | GET | 轮询异步任务进度 |
+
+每个注册仓库可追踪多个分支。注册时指定 `branches: ["main", "develop"]`，后续 `/sync-all` 自动遍历所有分支。
+
+向量索引按 `branch` 元数据隔离——搜索时跨分支返回结果，响应中包含 `branch` 字段可区分来源。webhook 自动从 push 事件的 `ref` 提取分支名，仅同步已注册的分支。
 
 ### 搜索与导航
 
