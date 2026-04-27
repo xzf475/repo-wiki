@@ -18,6 +18,33 @@ repo-wiki generates a structural wiki, skill files, and a vector search index fr
 
 ---
 
+## Table of Contents
+
+- [How It Works](#how-it-works)
+- [What's Different from kiwiskil](#whats-different-from-kiwiskil)
+- [Install](#install)
+- [Quick Start](#quick-start)
+- [CLI](#cli)
+- [Output](#output)
+- [REST API](#rest-api)
+  - [Repository Management](#repository-management)
+  - [Search & Navigation](#search--navigation)
+  - [Webhook Auto-Sync](#webhook-auto-sync)
+  - [Search with Query Rewriting](#search-with-query-rewriting)
+  - [API Authentication](#api-authentication)
+- [MCP Server](#mcp-server)
+  - [Modes](#modes)
+  - [Integration with LLM Clients](#integration-with-llm-clients)
+  - [Loading the Skill](#loading-the-skill)
+- [Configuration](#configuration)
+  - [.indexer.toml](#indextoml-per-repo-created-by-repo-wiki-init)
+  - [.env](#env-server-level-for-rest-api--mcp-mode)
+- [Supported Languages](#supported-languages)
+- [Design Principles](#design-principles)
+- [License](#license)
+
+---
+
 ## How It Works
 
 1. **AST parsing** — extracts symbols, imports, and call graphs from source files (deterministic, free)
@@ -126,154 +153,6 @@ See the [MCP Server](#mcp-server) section for details.
 
 ---
 
-## REST API
-
-### Repository Management
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/repos` | GET | List all registered repos |
-| `/register` | POST | Register & index a repo from URL. Accepts `branches` array or `branch` string, defaults to `["main"]` |
-| `/sync` | POST | Sync a specific branch (git pull + incremental re-index), optional `branch` param |
-| `/sync-all` | POST | Sync all registered branches (iterates checkout → pull → index) |
-| `/rebuild` | POST | Full rebuild of a specific branch, optional `branch` param |
-| `/rebuild-all` | POST | Full rebuild of all registered branches |
-| `/unregister` | POST | Remove a repo |
-| `/api/validate/{name}` | GET | Health check a repo |
-| `/api/task/{task_id}` | GET | Poll async task progress |
-
-Each registered repo can track multiple branches. Specify `branches: ["main", "develop"]` on register — `/sync-all` iterates all of them automatically.
-
-Vectors are isolated by `branch` metadata. Search returns results across all branches; the response includes a `branch` field to identify the source. Webhooks extract the branch from `ref` in push events, syncing only if it matches a registered branch.
-
-### Search & Navigation
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/search` | POST | Semantic search with query rewriting |
-| `/trace` | POST | Trace call graph (up/down) |
-| `/source` | POST | Get source context for a file range |
-| `/api/repo/{name}` | GET | Repo detail |
-| `/skill` | GET | Multi-repo merged skill file |
-
-### Webhook Auto-Sync
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/webhook/{name}` | POST | **Recommended** — triggers sync by repo name |
-| `/webhook` | POST | Generic — matches repo from payload |
-
-After registering a repo, you get a webhook URL: `https://your-server.com/webhook/{name}`. Add this URL to your repository's webhook settings (push events) — each push automatically triggers a wiki sync.
-
-Set `WEBHOOK_SECRET` env var for payload verification (HMAC-SHA256 for GitHub, Token header for GitLab).
-
-### Search with Query Rewriting
-
-By default, search calls LLM to expand your query into multiple precise phrases for better recall. Disable with `"rewrite": false`:
-
-```json
-{
-  "query": "how does authentication work",
-  "top_k": 10,
-  "rewrite": true,
-  "expand_depth": 1
-}
-```
-
-Response includes `rewritten_queries` so you can see what was searched:
-
-```json
-{
-  "results": [...],
-  "total": 5,
-  "rewritten_queries": ["how does authentication work", "authentication handler", "token verification", "login flow", "auth middleware"]
-}
-```
-
-### API Authentication
-
-When `REPO_WIKI_API_KEY` is set, all endpoints (except `/health` and `/webhook`) require an `Authorization: Bearer <key>` header.
-
----
-
-## MCP Server
-
-repo-wiki ships with a [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server, allowing any MCP-capable LLM client — Claude Code, Cursor, Windsurf, VS Code + Copilot, and others — to search your codebase directly.
-
-### Two Modes
-
-```
-repo-wiki serve              # Single-repo — reads local vector store
-repo-wiki serve --api <URL>  # Multi-repo — proxies to REST API backend
-```
-
-#### Single-Repo Mode
-
-Run directly inside an indexed repository. The MCP server reads the local `.indexer/vector_db` and configuration:
-
-```bash
-cd my-project
-repo-wiki run              # index first
-repo-wiki serve            # start MCP server (stdio transport)
-```
-
-Provides 3 tools:
-
-| Tool | Description |
-|------|-------------|
-| `search_symbols_tool` | Semantic search for code symbols |
-| `trace_call_tool` | Trace call graph (up/down) |
-| `get_source_context_tool` | Get source code context |
-
-#### Multi-Repo Mode
-
-Proxies through the REST API, giving access to all registered repositories:
-
-```bash
-repo-wiki serve-api &                  # start REST API first
-repo-wiki serve --api http://localhost:7654  # start MCP pointing at API
-```
-
-Adds a `list_repos` tool for discovering available repositories.
-
-### Integration with LLM Clients
-
-**Claude Code:**
-
-```json
-{
-  "mcpServers": {
-    "repo-wiki": {
-      "command": "repo-wiki",
-      "args": ["serve"]
-    }
-  }
-}
-```
-
-Pointing to a remote REST API:
-
-```json
-{
-  "mcpServers": {
-    "repo-wiki": {
-      "command": "repo-wiki",
-      "args": ["serve", "--api", "http://localhost:7654"]
-    }
-  }
-}
-```
-
-**Cursor / Windsurf / Copilot:**
-
-Similar configuration, point the command at `repo-wiki serve`. See your IDE's MCP configuration docs for details.
-
-### How It Works
-
-The MCP server wraps repo-wiki's retrieval capabilities into standard MCP tools. When the LLM needs to understand code, it calls these tools automatically — no manual source reading required. In multi-repo mode, the MCP server is a lightweight proxy; all retrieval logic runs on the REST API side.
-
----
-
 ## CLI
 
 ```bash
@@ -340,11 +219,145 @@ ChromaDB vector store containing embeddings for every indexed symbol. Used by th
 
 ---
 
-## Loading the Skill
+## REST API
+
+### Repository Management
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/repos` | GET | List all registered repos |
+| `/register` | POST | Register & index a repo from URL. Accepts `branches` array or `branch` string, defaults to `["main"]` |
+| `/sync` | POST | Sync a specific branch (git pull + incremental re-index), optional `branch` param |
+| `/sync-all` | POST | Sync all registered branches (iterates checkout → pull → index) |
+| `/rebuild` | POST | Full rebuild of a specific branch, optional `branch` param |
+| `/rebuild-all` | POST | Full rebuild of all registered branches |
+| `/unregister` | POST | Remove a repo |
+| `/api/validate/{name}` | GET | Health check a repo |
+| `/api/task/{task_id}` | GET | Poll async task progress |
+
+Each registered repo can track multiple branches. Specify `branches: ["main", "develop"]` on register — `/sync-all` iterates all of them automatically. Vectors are isolated by `branch` metadata. Search returns results across all branches; the response includes a `branch` field to identify the source. Webhooks extract the branch from `ref` in push events, syncing only if it matches a registered branch.
+
+### Search & Navigation
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/search` | POST | Semantic search with query rewriting |
+| `/trace` | POST | Trace call graph (up/down) |
+| `/source` | POST | Get source context for a file range |
+| `/api/repo/{name}` | GET | Repo detail |
+| `/skill` | GET | Multi-repo merged skill file |
+
+### Webhook Auto-Sync
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/webhook/{name}` | POST | **Recommended** — triggers sync by repo name |
+| `/webhook` | POST | Generic — matches repo from payload |
+
+After registering a repo, you get a webhook URL: `https://your-server.com/webhook/{name}`. Add this URL to your repository's webhook settings (push events) — each push automatically triggers a wiki sync.
+
+Set `WEBHOOK_SECRET` env var for payload verification (HMAC-SHA256 for GitHub, Token header for GitLab).
+
+### Search with Query Rewriting
+
+By default, search calls LLM to expand your query into multiple precise phrases for better recall. Disable with `"rewrite": false`:
+
+```json
+{
+  "query": "how does authentication work",
+  "top_k": 10,
+  "rewrite": true,
+  "expand_depth": 1
+}
+```
+
+Response includes `rewritten_queries` so you can see what was searched:
+
+```json
+{
+  "results": [...],
+  "total": 5,
+  "rewritten_queries": ["how does authentication work", "authentication handler", "token verification", "login flow", "auth middleware"]
+}
+```
+
+### API Authentication
+
+When `REPO_WIKI_API_KEY` is set, all endpoints (except `/health` and `/webhook`) require an `Authorization: Bearer <key>` header.
+
+---
+
+## MCP Server
+
+repo-wiki ships with a [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server, allowing any MCP-capable LLM client — Claude Code, Cursor, Windsurf, VS Code + Copilot, and others — to search your codebase directly.
+
+### Modes
+
+```
+repo-wiki serve              # Single-repo — reads local vector store
+repo-wiki serve --api <URL>  # Multi-repo — proxies to REST API backend
+```
+
+**Single-Repo Mode:** Run directly inside an indexed repository. The MCP server reads the local `.indexer/vector_db` and configuration:
+
+```bash
+cd my-project
+repo-wiki run              # index first
+repo-wiki serve            # start MCP server (stdio transport)
+```
+
+Provides 3 tools:
+
+| Tool | Description |
+|------|-------------|
+| `search_symbols_tool` | Semantic search for code symbols |
+| `trace_call_tool` | Trace call graph (up/down) |
+| `get_source_context_tool` | Get source code context |
+
+**Multi-Repo Mode:** Proxies through the REST API, giving access to all registered repositories:
+
+```bash
+repo-wiki serve-api &                  # start REST API first
+repo-wiki serve --api http://localhost:7654  # start MCP pointing at API
+```
+
+Adds a `list_repos` tool for discovering available repositories.
+
+### Integration with LLM Clients
+
+**Claude Code:**
+
+```json
+{
+  "mcpServers": {
+    "repo-wiki": {
+      "command": "repo-wiki",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+Pointing to a remote REST API:
+
+```json
+{
+  "mcpServers": {
+    "repo-wiki": {
+      "command": "repo-wiki",
+      "args": ["serve", "--api", "http://localhost:7654"]
+    }
+  }
+}
+```
+
+**Cursor / Windsurf / Copilot:** Similar configuration, point the command at `repo-wiki serve`. See your IDE's MCP configuration docs for details.
+
+### Loading the Skill
 
 The skill file lives at `.indexer/skills/codebase.md` after you run `repo-wiki run`. Load it into your agent once — it activates automatically on any codebase question.
 
-### Claude Code
+**Claude Code:**
 
 ```bash
 # Global — available in every project
@@ -356,9 +369,7 @@ mkdir -p .claude/skills/codebase
 cp .indexer/skills/codebase.md .claude/skills/codebase/SKILL.md
 ```
 
-### Cursor / Windsurf / Copilot / Zed
-
-Same as kiwiskil — see the [original instructions](https://github.com/ximihoque/kiwiskil#loading-the-skill) for your specific editor.
+**Cursor / Windsurf / Copilot / Zed:** Same as kiwiskil — see the [original instructions](https://github.com/ximihoque/kiwiskil#loading-the-skill) for your specific editor.
 
 ---
 
