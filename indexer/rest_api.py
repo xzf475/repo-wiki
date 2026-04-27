@@ -578,6 +578,8 @@ def _run_rebuild_task(task_id: str, name: str, root: Path, skip_deep: bool, bran
 
         cfg = load_config(root)
         save_config(root, cfg)
+
+        logger.info("Rebuild repo=%s branch=%s files=%d", name, repo_branch or "(default)", len(candidates) if candidates else 0)
         if is_git_repo(root) and cfg.pre_commit:
             install_hook(root, skip_deep=not cfg.deep_hook)
 
@@ -707,6 +709,8 @@ def _run_sync_task(task_id: str, name: str, root: Path, skip_deep: bool, branch:
         skill_missing = not (root / ".indexer" / "skills" / "codebase.md").exists()
 
         candidates = [f for f in candidates if _is_indexable(f, cfg)]
+
+        logger.info("Sync repo=%s branch=%s candidates=%d missing_wiki=%d", name, repo_branch or "(default)", len(candidates), len(missing_wiki))
 
         need_regen_meta = (wiki_index_missing or skill_missing) and not candidates
 
@@ -878,10 +882,16 @@ def _run_register_task_inner(
             candidates = list(set(git_changed + stale))
         candidates = [f for f in candidates if _is_indexable(f, cfg)]
 
+        logger.info("Register repo=%s branch=%s candidates=%d all_files=%d", name, branch or "(default)", len(candidates), len(all_files))
+
         if not candidates:
             tasks.update(task_id, status="running", progress=70, step="already_indexed", detail="Nothing to index")
             webhook_url = _get_webhook_url(name)
-            branches_list = [branch] if branch else []
+            existing_info_early = registry.get(name)
+            existing_branches_early = existing_info_early.get("branches", []) if existing_info_early else []
+            if branch and branch not in existing_branches_early:
+                existing_branches_early.append(branch)
+            branches_list = existing_branches_early or ["main"]
             registry.register(name, clone_dir, url=url, branches=branches_list)
             info = registry.get(name)
             has_vectors = (clone_dir / info["config"].vector_store.persist_dir).exists()
@@ -897,7 +907,12 @@ def _run_register_task_inner(
         total_symbols = _run_indexing_pipeline(task_id, name, root, skip_deep, candidates, cfg, manifest, branch=branch)
 
         webhook_url = _get_webhook_url(name)
-        branches_list = [branch] if branch else []
+        existing_info = registry.get(name)
+        existing_branches = existing_info.get("branches", []) if existing_info else []
+        if branch:
+            if branch not in existing_branches:
+                existing_branches.append(branch)
+        branches_list = existing_branches or ["main"]
         registry.register(name, clone_dir, url=url, branches=branches_list)
         info = registry.get(name)
         has_vectors = (clone_dir / info["config"].vector_store.persist_dir).exists()
@@ -1372,7 +1387,7 @@ async def webhook_by_name(request: Request) -> JSONResponse:
     if ref.startswith("refs/heads/"):
         webhook_branch = ref[len("refs/heads/"):]
 
-    target_branch = webhook_branch if webhook_branch in repo_branches else ""
+    target_branch = webhook_branch if (not repo_branches or webhook_branch in repo_branches) else ""
     logger.info("Webhook triggered: repo=%s branch=%s", name, target_branch or webhook_branch or "(any)")
     task_id = tasks.create(name, info.get("url", ""))
 
