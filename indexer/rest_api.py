@@ -103,6 +103,41 @@ class TaskStore:
 tasks = TaskStore()
 
 
+def _detect_default_branch(repo_root: Path) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
+            cwd=repo_root, capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            ref = result.stdout.strip()
+            if ref.startswith("refs/remotes/origin/"):
+                return ref[len("refs/remotes/origin/"):]
+    except Exception:
+        pass
+    try:
+        result = subprocess.run(
+            ["git", "remote", "show", "origin"],
+            cwd=repo_root, capture_output=True, text=True, timeout=15,
+        )
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("HEAD branch:"):
+                return line.split(":")[-1].strip()
+    except Exception:
+        pass
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=repo_root, capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return "main"
+
+
 class RepoRegistry:
     def __init__(self, repos_dir: Path | None = None):
         self.repos: dict[str, dict] = {}
@@ -140,6 +175,9 @@ class RepoRegistry:
                     else:
                         branches = raw
                 repo_root = Path(path_str)
+                if not branches:
+                    detected = _detect_default_branch(repo_root)
+                    branches = [detected] if detected else ["main"]
                 if repo_root.exists():
                     cfg = load_config(repo_root)
                     self.repos[name] = {"root": repo_root, "config": cfg, "url": url, "branches": branches}
@@ -189,7 +227,7 @@ async def register_repo(request: Request) -> JSONResponse:
     if not branches and branch:
         branches = [branch]
     if not branches:
-        branches = ["main"]
+        branches = body.get("branches", [])
 
     if not url:
         return JSONResponse({"error": "url is required"}, status_code=400)
@@ -620,8 +658,10 @@ def _run_rebuild_task(task_id: str, name: str, root: Path, skip_deep: bool, bran
 
 
 def _run_sync_task(task_id: str, name: str, root: Path, skip_deep: bool, branch: str = "") -> None:
+    logger.info("Sync task started: repo=%s branch=%s", name, branch or "(any)")
     lock = _get_repo_lock(name)
     if not lock.acquire(blocking=False):
+        logger.warning("Sync task skipped: repo=%s lock held by another operation", name)
         tasks.update(task_id, status="failed", progress=0, step="locked", error="Another operation is running on this repo")
         return
     existing = registry.get(name)
@@ -882,6 +922,10 @@ def _run_register_task_inner(
             candidates = list(set(git_changed + stale))
         candidates = [f for f in candidates if _is_indexable(f, cfg)]
 
+        if not branch:
+            detected = _detect_default_branch(clone_dir)
+            branch = detected
+
         logger.info("Register repo=%s branch=%s candidates=%d all_files=%d", name, branch or "(default)", len(candidates), len(all_files))
 
         if not candidates:
@@ -891,7 +935,7 @@ def _run_register_task_inner(
             existing_branches_early = existing_info_early.get("branches", []) if existing_info_early else []
             if branch and branch not in existing_branches_early:
                 existing_branches_early.append(branch)
-            branches_list = existing_branches_early or ["main"]
+            branches_list = existing_branches_early or [branch] or ["main"]
             registry.register(name, clone_dir, url=url, branches=branches_list)
             info = registry.get(name)
             has_vectors = (clone_dir / info["config"].vector_store.persist_dir).exists()
@@ -912,7 +956,7 @@ def _run_register_task_inner(
         if branch:
             if branch not in existing_branches:
                 existing_branches.append(branch)
-        branches_list = existing_branches or ["main"]
+        branches_list = existing_branches or [branch] or ["main"]
         registry.register(name, clone_dir, url=url, branches=branches_list)
         info = registry.get(name)
         has_vectors = (clone_dir / info["config"].vector_store.persist_dir).exists()
