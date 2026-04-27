@@ -15,11 +15,15 @@ try:
 except Exception:
     pass
 
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger(__name__)
+
 import subprocess
 import tempfile
 import urllib.parse
-from pathlib import Path
 from starlette.applications import Starlette
+
+logger = logging.getLogger(__name__)
 from starlette.routing import Route
 from starlette.responses import HTMLResponse, JSONResponse
 from starlette.requests import Request
@@ -1343,22 +1347,6 @@ def _verify_webhook_sign(name: str, sign: str) -> bool:
 _WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 
 
-def _extract_repo_url(payload: dict) -> str | None:
-    repo = payload.get("repository")
-    if repo:
-        url = repo.get("clone_url") or repo.get("html_url")
-        if url:
-            return url.rstrip("/")
-
-    project = payload.get("project")
-    if project:
-        url = project.get("git_http_url") or project.get("http_url")
-        if url:
-            return url.rstrip("/")
-
-    return None
-
-
 async def webhook_by_name(request: Request) -> JSONResponse:
     name = request.path_params.get("name", "")
     if not name or not registry.get(name):
@@ -1385,6 +1373,7 @@ async def webhook_by_name(request: Request) -> JSONResponse:
         webhook_branch = ref[len("refs/heads/"):]
 
     target_branch = webhook_branch if webhook_branch in repo_branches else ""
+    logger.info("Webhook triggered: repo=%s branch=%s", name, target_branch or webhook_branch or "(any)")
     task_id = tasks.create(name, info.get("url", ""))
 
     loop = asyncio.get_running_loop()
@@ -1396,66 +1385,6 @@ async def webhook_by_name(request: Request) -> JSONResponse:
         "status": "pending",
         "trigger": "webhook",
         "branch": target_branch or "any",
-    })
-
-
-async def webhook(request: Request) -> JSONResponse:
-    if request.method != "POST":
-        return JSONResponse({"error": "method not allowed"}, status_code=405)
-
-    body = await request.body()
-
-    if _WEBHOOK_SECRET:
-        sign = request.query_params.get("sign", "")
-        if not sign:
-            return JSONResponse({"error": "missing sign"}, status_code=401)
-        matched = False
-        for name in registry.list_names():
-            if _verify_webhook_sign(name, sign):
-                matched = True
-                break
-        if not matched:
-            return JSONResponse({"error": "invalid sign"}, status_code=401)
-
-    try:
-        payload = json.loads(body)
-    except json.JSONDecodeError:
-        return JSONResponse({"error": "invalid JSON"}, status_code=400)
-
-    repo_url = _extract_repo_url(payload)
-    if not repo_url:
-        return JSONResponse({"error": "unable to determine repo URL from payload"}, status_code=400)
-
-    matched_name = None
-    matched_info = None
-    for name, info in registry.repos.items():
-        stored_url = info.get("url", "").rstrip("/")
-        if stored_url and (stored_url == repo_url or stored_url.rstrip(".git") == repo_url.rstrip(".git")):
-            matched_name = name
-            matched_info = info
-            break
-
-    if not matched_name:
-        for name, info in registry.repos.items():
-            stored_url = info.get("url", "").rstrip("/")
-            if stored_url and repo_url.endswith(stored_url.split("/")[-1]):
-                matched_name = name
-                matched_info = info
-                break
-
-    if not matched_name:
-        return JSONResponse({"error": "no registered repo matches the webhook payload"}, status_code=404)
-
-    task_id = tasks.create(matched_name, repo_url)
-
-    loop = asyncio.get_running_loop()
-    loop.run_in_executor(None, _run_sync_task, task_id, matched_name, matched_info["root"], True)
-
-    return JSONResponse({
-        "task_id": task_id,
-        "name": matched_name,
-        "status": "pending",
-        "trigger": "webhook",
     })
 
 
@@ -1479,7 +1408,7 @@ def create_app(repos: dict[str, Path] | None = None, repos_dir: Path | None = No
         class _AuthMiddleware(BaseHTTPMiddleware):
             async def dispatch(self, request, call_next):
                 path = request.url.path
-                if path in ("/health", "/", "/webhook", "/static") or path.startswith(("/webhook/", "/static/")):
+                if path in ("/health", "/", "/static") or path.startswith(("/webhook/", "/static/")):
                     return await call_next(request)
                 token = request.headers.get("Authorization", "").removeprefix("Bearer ")
                 if token != api_key:
@@ -1501,7 +1430,6 @@ def create_app(repos: dict[str, Path] | None = None, repos_dir: Path | None = No
             Route("/sync-all", sync_all_branches, methods=["POST"]),
             Route("/rebuild", rebuild_repo, methods=["POST"]),
             Route("/rebuild-all", rebuild_all_branches, methods=["POST"]),
-            Route("/webhook", webhook, methods=["POST"]),
             Route("/webhook/{name}", webhook_by_name, methods=["POST"]),
             Route("/api/repo/{name}", repo_detail),
             Route("/api/validate/{name}", validate_repo),
