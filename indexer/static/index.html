@@ -129,7 +129,19 @@ footer{border-top:1px solid var(--border);padding:16px 32px;text-align:center;fo
   <div class="logo">repo-wiki<em>.rag</em></div>
   <span class="tag">REST API</span>
   <div style="flex:1"></div>
-  <button onclick="showRegister()">+ Register Repo</button>
+  <div class="header-right">
+    <button onclick="showRegister()">+ Register Repo</button>
+    <div id="progress-bar" style="display:none;flex:1;max-width:300px;margin:0 12px">
+      <div style="font-size:11px;color:var(--text3);margin-bottom:2px;display:flex;justify-content:space-between">
+        <span id="progress-name"></span>
+        <span id="progress-pct" style="color:var(--amber)">0%</span>
+      </div>
+      <div style="height:4px;background:var(--surface2);border-radius:2px;overflow:hidden">
+        <div id="progress-fill" style="height:100%;width:0%;background:var(--accent2);border-radius:2px;transition:width .5s"></div>
+      </div>
+      <div id="progress-step" style="font-size:10px;color:var(--text3);margin-top:1px"></div>
+    </div>
+  </div>
   <button onclick="loadRepos()" class="primary">&#8635; Refresh</button>
 </header>
 
@@ -520,18 +532,33 @@ async function doRegister(){
     hideRegister();
     toast(`"${repoName}" registration started`,'info');
     document.getElementById('reg-btn').disabled=false;
+    const stepNames={queued:'Queued',git_clone:'Cloning repository',git_pull:'Updating repository',init:'Initializing config',parsing:'Parsing files',cross_ref:'Cross-referencing calls',describing_symbols:'Describing symbols',describing_modules:'Describing modules',writing_wiki:'Writing wiki',deep_enrichment:'Deep enrichment',embedding:'Generating embeddings',upserting:'Storing vectors',complete:'Complete',indexing:'Indexing',rebuild_init:'Re-initializing',detecting_files:'Detecting files'};
+    const pb=document.getElementById('progress-bar');
+    const pn=document.getElementById('progress-name');
+    const pp=document.getElementById('progress-pct');
+    const pf=document.getElementById('progress-fill');
+    const ps=document.getElementById('progress-step');
+    if(!pb||!pn||!pp||!pf||!ps){console.warn('progress bar elements missing');}
+    pb.style.display='block';
+    pn.textContent=repoName;
     const poll=async()=>{
       const task=await api('/api/task/'+taskId);
+      const step=stepNames[task.step]||task.step||'...';
+      pp.textContent=task.progress+'%';
+      pf.style.width=task.progress+'%';
+      ps.textContent=task.detail||step;
       if(task.status==='done'){
+        pb.style.display='none';
         toast(`"${repoName}" registered with ${task.result.symbol_count} symbols`);
-        if(currentRepo)await openRepo(currentRepo);
-        else loadRepos();
+        loadRepos();
         return;
       }
       if(task.status==='failed'){
+        pb.style.display='none';
         toast('Registration failed: '+task.error,'error');
         return;
       }
+      loadRepos();
       setTimeout(poll,5000);
     };
     poll();

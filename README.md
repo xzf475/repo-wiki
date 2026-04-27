@@ -122,22 +122,34 @@ open http://localhost:7654
 ### Docker 部署
 
 ```bash
-# 构建并启动
+# 1. 克隆项目
+git clone https://github.com/your/repo-wiki.git
+cd repo-wiki
+
+# 2. 配置环境变量
+#    复制 .env.example 为 .env，填入你的 API Key 等服务端配置
+cp .env.example .env
+#   编辑 .env，至少配置：
+#     LLM_API_KEY_ENV=DASHSCOPE_API_KEY
+#     DASHSCOPE_API_KEY=sk-xxx
+#     EMBEDDING_API_KEY_ENV=DASHSCOPE_API_KEY
+
+# 3. 构建并启动
 docker compose up -d
 
-# 查看日志
+# 4. 查看日志确认启动成功
 docker compose logs -f
 
-# 停止
-docker compose down
-
-# 注册仓库
+# 5. 注册仓库
 curl -X POST http://localhost:7654/register \
   -H 'Content-Type: application/json' \
   -d '{"url": "https://github.com/org/repo.git", "token": "ghp_xxx"}'
+
+# 6. 停止
+docker compose down
 ```
 
-将 `.env` 文件放在项目根目录，`docker-compose.yml` 会自动挂载。所有数据持久化在 Docker volume 中。
+`.env` 文件放在项目根目录，`docker-compose.yml` 会自动挂载到容器内。所有索引数据持久化在 Docker volume 中，不会随容器停止而丢失。详见 [配置章节](#env服务级用于-rest-api--mcp-模式)。
 
 ### MCP 模式（LLM Agent 集成）
 

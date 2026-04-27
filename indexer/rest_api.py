@@ -10,7 +10,10 @@ import uuid
 from pathlib import Path
 
 from indexer.utils import load_env_file
-load_env_file()
+try:
+    load_env_file()
+except Exception:
+    pass
 
 import subprocess
 import tempfile
@@ -208,6 +211,13 @@ async def register_repo(request: Request) -> JSONResponse:
 
     task_id = tasks.create(name, url)
 
+    clone_dir = registry.repos_dir / name
+    clone_dir.mkdir(parents=True, exist_ok=True)
+    branches_list = [branch] if branch else branches or ["main"]
+    registry.register(name, clone_dir, url=url, branches=branches_list)
+
+    webhook_url = _get_webhook_url(name)
+
     loop = asyncio.get_running_loop()
     loop.run_in_executor(
         None,
@@ -215,12 +225,11 @@ async def register_repo(request: Request) -> JSONResponse:
         task_id, name, url, username, password, token, branch, skip_deep, force_reindex,
     )
 
-    webhook_url = _get_webhook_url(name)
     return JSONResponse({
         "task_id": task_id,
         "name": name,
         "status": "pending",
-        "branches": branches,
+        "branches": branches_list,
         "webhook_url": webhook_url,
         "webhook_hint": "Configure this URL in your repo's webhook settings (push events) for auto-sync. Set WEBHOOK_SECRET env var for payload verification."
     })

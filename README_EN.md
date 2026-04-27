@@ -122,22 +122,34 @@ open http://localhost:7654
 ### Docker Deployment
 
 ```bash
-# Build and start
+# 1. Clone the project
+git clone https://github.com/your/repo-wiki.git
+cd repo-wiki
+
+# 2. Configure environment variables
+#    Copy .env.example to .env and fill in your API keys
+cp .env.example .env
+#    Edit .env, at minimum configure:
+#     LLM_API_KEY_ENV=DASHSCOPE_API_KEY
+#     DASHSCOPE_API_KEY=sk-xxx
+#     EMBEDDING_API_KEY_ENV=DASHSCOPE_API_KEY
+
+# 3. Build and start
 docker compose up -d
 
-# View logs
+# 4. Check logs to confirm startup
 docker compose logs -f
 
-# Stop
-docker compose down
-
-# Register a repo
+# 5. Register a repo
 curl -X POST http://localhost:7654/register \
   -H 'Content-Type: application/json' \
   -d '{"url": "https://github.com/org/repo.git", "token": "ghp_xxx"}'
+
+# 6. Stop
+docker compose down
 ```
 
-Place `.env` in the project root — `docker-compose.yml` mounts it automatically. All data is persisted in Docker volumes.
+Place `.env` in the project root — `docker-compose.yml` mounts it into the container automatically. All index data is persisted in Docker volumes and survives container restarts. See the [Configuration](#env-server-level-for-rest-api--mcp-mode) section for details.
 
 ### MCP Mode (LLM Agent Integration)
 
