@@ -1,89 +1,90 @@
 # repo-wiki
 
-**Your codebase, understood by any LLM.**
+**让任何 LLM 理解你的代码库。**
 
-Generate a checked-in wiki, skill files, and vector search from any repo — no cloud, no lock-in.
+从任意仓库生成可提交的 Wiki、技能文件和向量检索——无需上云，无厂商锁定。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python >=3.11](https://img.shields.io/badge/python-%3E%3D3.11-blue)](https://pypi.org/project/repo-wiki/)
 [![Forked from kiwiskil](https://img.shields.io/badge/forked%20from-kiwiskil-6366f1)](https://github.com/ximihoque/kiwiskil)
 
-[Install](#install) · [Quick Start](#quick-start) · [REST API](#rest-api) · [CLI](#cli) · [Configuration](#configuration)
+[安装](#安装) · [快速开始](#快速开始) · [REST API](#rest-api) · [CLI](#cli) · [配置](#配置)
 
-[中文文档](README_CN.md)
-
----
-
-repo-wiki generates a structural wiki, skill files, and a vector search index from any codebase. It enables LLM agents to navigate code without reading source files — using a knowledge graph built from your repo and checked into git.
-
-> **Forked from [kiwiskil](https://github.com/ximihoque/kiwiskil)** — repo-wiki extends the original with a REST API, vector search, query rewriting, repository health checks, and Go language support.
+[English](README_EN.md)
 
 ---
 
-## How It Works
+repo-wiki 从任意代码库生成可提交的结构化 Wiki、技能文件和向量检索索引。它让 LLM Agent 无需阅读源码即可导航代码——使用从你的仓库构建并提交到 Git 的知识图谱。
 
-1. **AST parsing** — extracts symbols, imports, and call graphs from source files (deterministic, free)
-2. **LLM descriptions** — adds one-line descriptions per symbol via LiteLLM (any provider)
-3. **Density-based grouping** — organizes files into wiki pages by logical density, not directory structure
-4. **Embedding** — generates vector representations for every symbol
-5. **ChromaDB** — stores and indexes vectors for fast semantic search
-6. **Pre-commit hook** — keeps the wiki in sync on every commit
-7. **Skill file** — generates `.indexer/skills/codebase.md` so any LLM agent can navigate your codebase
-
-The wiki is plain markdown checked into your repo. No cloud service, no lock-in.
+> **Fork 自 [kiwiskil](https://github.com/ximihoque/kiwiskil)** — repo-wiki 在原版基础上增加了 REST API、向量检索、查询改写、仓库健康检查和 Go 语言支持。
 
 ---
 
-## What's Different from kiwiskil
+## 工作原理
 
-| Feature | kiwiskil | repo-wiki |
-|---------|----------|-----------|
-| Structural wiki + skill file | ✓ | ✓ |
-| Pre-commit hook | ✓ | ✓ |
-| REST API with Web UI | — | ✓ |
-| Vector search (ChromaDB) | — | ✓ |
-| Query rewriting | — | ✓ |
-| Call graph tracing | — | ✓ |
-| Repository health checks | — | ✓ |
-| Auto-repair on sync | — | ✓ |
-| Go language support | — | ✓ |
-| Async task processing | — | ✓ |
+1. **AST 解析** — 从源文件提取符号、导入和调用图（确定性，免费）
+2. **LLM 描述** — 通过 LiteLLM 使用任意模型为每个符号生成一行描述
+3. **密度分组** — 按逻辑密度（而非目录结构）将文件组织为 Wiki 页面
+4. **Embedding** — 为每个符号生成向量表示
+5. **ChromaDB** — 存储和索引向量，支持快速语义搜索
+6. **Pre-commit Hook** — 每次提交自动保持 Wiki 同步
+7. **技能文件** — 生成 `.indexer/skills/codebase.md`，让任何 LLM Agent 能导航你的代码库
 
-### REST API with Web UI
-
-A full-featured REST API (`repo-wiki serve-api`) for remote repository management:
-
-- **Register repos** via URL with git clone support (GitHub PAT, GitLab token, password auth)
-- **Sync / Rebuild** repos with real-time progress tracking
-- **Semantic search** across all registered repos via vector similarity
-- **Call graph tracing** — follow calls up or down the dependency chain
-- **Source context** — fetch specific line ranges from any tracked file
-- **Web dashboard** — manage repos, browse wiki pages, search symbols from a browser
-
-### Vector Search (RAG-ready)
-
-- **ChromaDB** stores embeddings for every indexed symbol
-- **Semantic search** returns results ranked by vector distance, not just text match
-- **Query rewriting** — LLM expands natural language queries into multiple precise search phrases for better recall (e.g. `"how does auth work"` → `["authentication handler", "token verification", "login flow", ...]`)
-- **Call graph expansion** — automatically includes related symbols from the call chain
-
-### Repository Health Checks & Repair
-
-- **Validate** endpoint checks: config file, manifest, wiki pages, skill file, vector DB, stale files
-- **Auto-repair** on sync: missing wiki pages, missing vector DB, stale index entries are all detected and fixed
-- **Manifest path fixup**: corrects wiki page path inconsistencies between manifest and actual files
-
-### Go Language Support
-
-AST parsing for Go via tree-sitter-go — extracts functions, methods, types, interfaces, and call relationships.
-
-### Async Task Processing
-
-Repository registration, sync, and rebuild run as background tasks with real-time progress updates (step name + percentage). The API responds immediately with a task ID.
+Wiki 是纯 Markdown，提交到你的仓库。无需云服务，无厂商锁定。
 
 ---
 
-## Install
+## 与 kiwiskil 的区别
+
+| 功能 | kiwiskil | repo-wiki |
+|------|----------|-----------|
+| 结构化 Wiki + 技能文件 | ✓ | ✓ |
+| Pre-commit Hook | ✓ | ✓ |
+| REST API + Web 管理界面 | — | ✓ |
+| 向量检索（ChromaDB） | — | ✓ |
+| 查询改写 | — | ✓ |
+| 调用链追踪 | — | ✓ |
+| 仓库健康检查 | — | ✓ |
+| 同步时自动修复 | — | ✓ |
+| Go 语言支持 | — | ✓ |
+| 异步任务处理 | — | ✓ |
+
+### REST API + Web 管理界面
+
+通过 `repo-wiki serve-api` 启动完整的 REST API 服务，支持远程仓库管理：
+
+- **注册仓库** — 通过 URL 克隆并索引，支持 GitHub PAT、GitLab Token、密码认证
+- **同步 / 重建** — 带实时进度追踪的增量同步和全量重建
+- **语义搜索** — 跨仓库向量相似度检索
+- **调用链追踪** — 沿调用链向上或向下追踪
+- **源码上下文** — 获取任意文件的指定行范围
+- **Web 仪表盘** — 浏览器中管理仓库、浏览 Wiki、搜索符号
+
+### 向量检索（RAG 就绪）
+
+- **ChromaDB** 存储每个索引符号的向量嵌入
+- **语义搜索** — 按向量距离排序返回结果，而非文本匹配
+- **查询改写** — LLM 将自然语言查询扩展为多个精确检索词，提升召回率
+  - 例：`"认证怎么处理的"` → `["认证处理", "Authentication handler", "token verification", ...]`
+- **调用图扩展** — 自动包含调用链上的相关符号
+
+### 仓库健康检查与自动修复
+
+- **校验端点** 检查：配置文件、清单文件、Wiki 页面、技能文件、向量库、过期文件
+- **同步时自动修复**：缺失的 Wiki 页面、向量库、过期索引条目均可检测并修复
+- **清单路径修正**：自动修正 manifest 中 Wiki 页面路径与实际文件名不一致的问题
+
+### Go 语言支持
+
+通过 tree-sitter-go 实现 Go 语言的 AST 解析——提取函数、方法、类型、接口和调用关系。
+
+### 异步任务处理
+
+仓库注册、同步、重建均作为后台任务运行，实时进度更新（步骤名称 + 百分比）。API 立即返回任务 ID。
+
+---
+
+## 安装
 
 ```bash
 pip install repo-wiki
@@ -91,35 +92,35 @@ pip install repo-wiki
 
 ---
 
-## Quick Start
+## 快速开始
 
-### CLI Mode (Single Repo)
+### CLI 模式（单仓库）
 
 ```bash
-# In any git repo
-repo-wiki init       # creates .indexer.toml, installs pre-commit hook, appends CLAUDE.md
-repo-wiki run        # generates wiki/ and .indexer/skills/codebase.md
+# 在任意 Git 仓库中
+repo-wiki init       # 创建 .indexer.toml，安装 pre-commit hook，追加 CLAUDE.md
+repo-wiki run        # 生成 wiki/ 和 .indexer/skills/codebase.md
 ```
 
-On every subsequent commit, the pre-commit hook runs `repo-wiki run --staged` automatically — only changed files are re-indexed.
+后续每次提交时，pre-commit hook 自动运行 `repo-wiki run --staged`——仅重新索引变更文件。
 
-### REST API Mode (Multi-Repo)
+### REST API 模式（多仓库）
 
 ```bash
-# Start the API server
+# 启动 API 服务
 repo-wiki serve-api --port 7654
 
-# Register a repo (clones + indexes)
+# 注册仓库（克隆 + 索引）
 curl -X POST http://localhost:7654/register \
   -H 'Content-Type: application/json' \
   -d '{"url": "https://github.com/org/repo.git"}'
 
-# Search across repos
+# 跨仓库搜索
 curl -X POST http://localhost:7654/search \
   -H 'Content-Type: application/json' \
-  -d '{"query": "authentication middleware", "top_k": 10}'
+  -d '{"query": "认证中间件", "top_k": 10}'
 
-# Open the web dashboard
+# 打开 Web 仪表盘
 open http://localhost:7654
 ```
 
@@ -127,34 +128,34 @@ open http://localhost:7654
 
 ## REST API
 
-### Repository Management
+### 仓库管理
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/repos` | GET | List all registered repos |
-| `/register` | POST | Register & index a repo from URL |
-| `/sync` | POST | Sync a repo (pull + re-index changes) |
-| `/rebuild` | POST | Full rebuild (delete + re-index) |
-| `/unregister` | POST | Remove a repo |
-| `/api/validate/{name}` | GET | Health check a repo |
-| `/api/task/{task_id}` | GET | Poll async task progress |
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/repos` | GET | 列出所有已注册仓库 |
+| `/register` | POST | 通过 URL 注册并索引仓库 |
+| `/sync` | POST | 同步仓库（拉取 + 重新索引变更） |
+| `/rebuild` | POST | 全量重建（删除 + 重新索引） |
+| `/unregister` | POST | 移除仓库 |
+| `/api/validate/{name}` | GET | 仓库健康检查 |
+| `/api/task/{task_id}` | GET | 轮询异步任务进度 |
 
-### Search & Navigation
+### 搜索与导航
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/search` | POST | Semantic search with query rewriting |
-| `/trace` | POST | Trace call graph (up/down) |
-| `/source` | POST | Get source context for a file range |
-| `/api/repo/{name}` | GET | Repo detail (wiki pages, manifest) |
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/search` | POST | 语义搜索（含查询改写） |
+| `/trace` | POST | 追踪调用链（向上/向下） |
+| `/source` | POST | 获取文件指定行范围的源码 |
+| `/api/repo/{name}` | GET | 仓库详情（Wiki 页面、清单） |
 
-### Search with Query Rewriting
+### 查询改写搜索
 
-By default, search calls LLM to expand your query into multiple precise phrases for better recall. Disable with `"rewrite": false`:
+搜索默认调用 LLM 将查询扩展为多个精确检索词以提升召回率。可通过 `"rewrite": false` 关闭：
 
 ```json
 {
-  "query": "how does authentication work",
+  "query": "认证怎么处理的",
   "repo": "my-project",
   "top_k": 10,
   "rewrite": true,
@@ -162,13 +163,13 @@ By default, search calls LLM to expand your query into multiple precise phrases 
 }
 ```
 
-Response includes `rewritten_queries` so you can see what was searched:
+响应中包含 `rewritten_queries`，可查看实际搜索了哪些词：
 
 ```json
 {
-  "results": [...],
+  "results": ["..."],
   "total": 5,
-  "rewritten_queries": ["how does authentication work", "authentication handler", "token verification", "login flow", "auth middleware"]
+  "rewritten_queries": ["认证怎么处理的", "认证处理", "Authentication handler", "token verification", "login authentication"]
 }
 ```
 
@@ -177,94 +178,94 @@ Response includes `rewritten_queries` so you can see what was searched:
 ## CLI
 
 ```bash
-repo-wiki init              # set up config, hook, and CLAUDE.md
-repo-wiki run               # smart incremental + deep enrichment (default)
-repo-wiki run --skip-deep   # skip narrative/flows/constraints enrichment (faster)
-repo-wiki run --force       # force full re-index of all files
-repo-wiki run --staged      # incremental on staged files only (used by hook)
-repo-wiki status            # show last indexed commit, stale files, stats
-repo-wiki hook install      # manually install pre-commit hook
-repo-wiki hook remove       # remove pre-commit hook
-repo-wiki serve-api         # start REST API server with web dashboard
-repo-wiki mcp               # start MCP server for semantic code search
+repo-wiki init              # 初始化配置、hook 和 CLAUDE.md
+repo-wiki run               # 智能增量索引 + 深度增强（默认）
+repo-wiki run --skip-deep   # 跳过叙述/流程/约束增强（更快）
+repo-wiki run --force       # 强制全量重新索引
+repo-wiki run --staged      # 仅对暂存文件增量索引（hook 使用）
+repo-wiki status            # 显示上次索引提交、过期文件、统计
+repo-wiki hook install      # 手动安装 pre-commit hook
+repo-wiki hook remove       # 移除 pre-commit hook
+repo-wiki serve-api         # 启动 REST API 服务和 Web 仪表盘
+repo-wiki mcp               # 启动 MCP 服务器用于语义代码搜索
 ```
 
-### Deep Mode
+### 深度模式
 
-By default, `repo-wiki run` performs a **deep enrichment** pass after structural indexing. This uses your configured LLM to generate:
+默认情况下，`repo-wiki run` 在结构化索引后执行**深度增强**。使用你配置的 LLM 生成：
 
-- **System narrative** — a plain-English overview of what the codebase does
-- **Key request flows** — end-to-end data flows across modules
-- **Design constraints** — per-module gotchas, invariants, and non-obvious rules
+- **系统叙述** — 代码库功能的自然语言概述
+- **关键请求流程** — 跨模块的端到端数据流
+- **设计约束** — 每个模块的注意事项、不变量和非显而易见的规则
 
-These appear in `wiki/INDEX.md` and in the skill file, giving agents richer context without reading source. Use `--skip-deep` to run structural-only indexing when speed matters.
+这些内容出现在 `wiki/INDEX.md` 和技能文件中，让 Agent 无需阅读源码即可获得更丰富的上下文。速度优先时使用 `--skip-deep` 仅运行结构化索引。
 
 ---
 
-## Output
+## 输出
 
 ### `wiki/INDEX.md`
 
-Top-level map of the entire codebase — which wiki page covers which files, entry points for each group, system overview, and key request flows (when deep mode is enabled).
+代码库的顶层地图——每个 Wiki 页面覆盖哪些文件、每组的入口点、系统概述和关键请求流程（深度模式启用时）。
 
 ### `wiki/<group>.md`
 
-One page per logical folder cluster. Each page contains:
+每个逻辑文件夹集群一个页面。每个页面包含：
 
-- **Modules** — files covered
-- **Key Symbols** — functions, classes, methods with one-line descriptions
-- **Relationships** — what this group calls, what calls it, what it imports
-- **Entry Points** — symbols with no callers (architectural roots)
-- **Data Flows** — end-to-end flows through this module *(deep mode)*
-- **Design Constraints** — invariants and non-obvious rules to respect *(deep mode)*
+- **模块** — 覆盖的文件
+- **关键符号** — 函数、类、方法及一行描述
+- **关系** — 该组调用了什么、被什么调用、导入了什么
+- **入口点** — 无调用者的符号（架构根节点）
+- **数据流** — 穿过该模块的端到端流程 *(深度模式)*
+- **设计约束** — 需要遵守的不变量和非显而易见的规则 *(深度模式)*
 
 ### `.indexer/skills/codebase.md`
 
-A skill file that teaches any LLM agent how to navigate your codebase:
+教会任何 LLM Agent 如何导航你的代码库的技能文件：
 
-- Codebase stats (symbol count, file count, index date, commit)
-- System overview and key request flows
-- Wiki page index with entry points
-- Critical constraints extracted per module
-- Step-by-step navigation workflow for agents
-- Component ID format reference and manifest lookup instructions
+- 代码库统计（符号数、文件数、索引日期、提交）
+- 系统概述和关键请求流程
+- Wiki 页面索引及入口点
+- 每个模块提取的关键约束
+- Agent 的分步导航工作流
+- 组件 ID 格式参考和清单查找说明
 
 ### `.indexer/vector_db/`
 
-ChromaDB vector store containing embeddings for every indexed symbol. Used by the REST API for semantic search.
+ChromaDB 向量存储，包含每个索引符号的嵌入。REST API 用于语义搜索。
 
 ---
 
-## Loading the Skill
+## 加载技能文件
 
-The skill file lives at `.indexer/skills/codebase.md` after you run `repo-wiki run`. Load it into your agent once — it activates automatically on any codebase question.
+运行 `repo-wiki run` 后，技能文件位于 `.indexer/skills/codebase.md`。加载到你的 Agent 中一次——在任何代码库导航问题上自动激活。
 
 ### Claude Code
 
 ```bash
-# Global — available in every project
+# 全局——在所有项目中可用
 mkdir -p ~/.claude/skills/codebase
 cp .indexer/skills/codebase.md ~/.claude/skills/codebase/SKILL.md
 
-# Project-local — available in this repo only
+# 项目级——仅在此仓库中可用
 mkdir -p .claude/skills/codebase
 cp .indexer/skills/codebase.md .claude/skills/codebase/SKILL.md
 ```
 
 ### Cursor / Windsurf / Copilot / Zed
 
-Same as kiwiskil — see the [original instructions](https://github.com/ximihoque/kiwiskil#loading-the-skill) for your specific editor.
+与 kiwiskil 相同——参见[原版说明](https://github.com/ximihoque/kiwiskil#loading-the-skill)。
 
 ---
 
-## Configuration
+## 配置
 
-### `.indexer.toml` (per-repo, created by `repo-wiki init`)
+### `.indexer.toml`（每仓库，由 `repo-wiki init` 创建）
 
 ```toml
 [llm]
-provider = "openai/qwen-plus-2025-04-28"  # any LiteLLM-compatible model string
-api_key_env = "DASHSCOPE_API_KEY"          # env var name, not the key itself
+provider = "openai/qwen-plus-2025-04-28"  # 任意 LiteLLM 兼容模型字符串
+api_key_env = "DASHSCOPE_API_KEY"          # 环境变量名，非密钥本身
 base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
 [indexer]
@@ -289,9 +290,9 @@ synthesize_commit_message = true
 deep = true
 ```
 
-Any LiteLLM-compatible provider works: OpenAI, Anthropic, Gemini, Ollama, local models.
+支持任何 LiteLLM 兼容的提供商：OpenAI、Anthropic、Gemini、Ollama、本地模型。
 
-### `.env` (server-level, for REST API mode)
+### `.env`（服务级，用于 REST API 模式）
 
 ```bash
 # LLM
@@ -305,7 +306,7 @@ EMBEDDING_API_KEY_ENV=DASHSCOPE_API_KEY
 EMBEDDING_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 EMBEDDING_DIMENSIONS=1024
 
-# Vector DB
+# 向量数据库
 VECTOR_BACKEND=chromadb
 VECTOR_PERSIST_DIR=.indexer/vector_db
 VECTOR_COLLECTION_NAME=repo_wiki_code
@@ -313,28 +314,28 @@ VECTOR_COLLECTION_NAME=repo_wiki_code
 
 ---
 
-## Supported Languages
+## 支持的语言
 
-| Language | Status | Parser |
-|----------|--------|--------|
-| Python | Supported | stdlib `ast` |
-| JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`) | Supported | tree-sitter |
-| TypeScript (`.ts`, `.tsx`) | Supported | tree-sitter |
-| Go | Supported | tree-sitter-go |
-| Rust, Java, Ruby | Planned | tree-sitter |
-
----
-
-## Design Principles
-
-- **Structural facts only** — wiki pages contain symbols, relationships, and entry points. No prose summaries, no architectural opinions. The client LLM draws its own conclusions.
-- **Checked in, not served** — the wiki is plain markdown in your repo. It travels with your code, is tracked by git, and is readable by humans and agents alike.
-- **Incremental by default** — git diff + content hash manifest means only changed files are re-processed on each commit.
-- **Provider-agnostic** — LiteLLM means you can use any model, local or cloud, without changing the tool.
-- **Search-ready** — vector embeddings and semantic search are first-class, not an add-on.
+| 语言 | 状态 | 解析器 |
+|------|------|--------|
+| Python | 已支持 | stdlib `ast` |
+| JavaScript（`.js`、`.jsx`、`.mjs`、`.cjs`） | 已支持 | tree-sitter |
+| TypeScript（`.ts`、`.tsx`） | 已支持 | tree-sitter |
+| Go | 已支持 | tree-sitter-go |
+| Rust、Java、Ruby | 计划中 | tree-sitter |
 
 ---
 
-## License
+## 设计原则
+
+- **仅结构化事实** — Wiki 页面包含符号、关系和入口点。无散文摘要，无架构观点。客户端 LLM 自行得出结论。
+- **提交而非服务** — Wiki 是仓库中的纯 Markdown。随代码一起，由 Git 追踪，人和 Agent 都可读。
+- **默认增量** — Git diff + 内容哈希清单意味着每次提交仅重新处理变更文件。
+- **提供商无关** — LiteLLM 意味着你可以使用任何模型，本地或云端，无需更改工具。
+- **搜索就绪** — 向量嵌入和语义搜索是一等公民，不是附加功能。
+
+---
+
+## 许可证
 
 MIT
