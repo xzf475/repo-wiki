@@ -151,6 +151,22 @@ docker compose down
 
 `.env` 文件放在项目根目录，`docker-compose.yml` 会自动挂载到容器内。所有索引数据持久化在 Docker volume 中，不会随容器停止而丢失。详见 [配置章节](#env服务级用于-rest-api--mcp-模式)。
 
+#### 代码更新后重建
+
+```bash
+# 拉取最新代码
+git pull
+
+# 重建并重启（--build 强制重新构建镜像）
+docker compose up -d --build
+
+# 或者：仅重建不重启（先构建，再启动停止的容器）
+docker compose build
+docker compose up -d
+```
+
+首次构建较慢（需编译 tree-sitter，约 2-3 分钟），后续仅变更层重建。`.env` 修改只需重启无需重建：`docker compose restart`。
+
 ### MCP 模式（LLM Agent 集成）
 
 ```bash

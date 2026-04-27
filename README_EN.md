@@ -151,6 +151,22 @@ docker compose down
 
 Place `.env` in the project root — `docker-compose.yml` mounts it into the container automatically. All index data is persisted in Docker volumes and survives container restarts. See the [Configuration](#env-server-level-for-rest-api--mcp-mode) section for details.
 
+#### Rebuild After Code Changes
+
+```bash
+# Pull latest code
+git pull
+
+# Rebuild and restart (--build forces image rebuild)
+docker compose up -d --build
+
+# Or: build only, then start
+docker compose build
+docker compose up -d
+```
+
+The first build is slow (compiles tree-sitter, ~2-3 min). Subsequent builds only rebuild changed layers. For `.env` changes, just restart without rebuild: `docker compose restart`.
+
 ### MCP Mode (LLM Agent Integration)
 
 ```bash
