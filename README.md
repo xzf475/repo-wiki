@@ -139,6 +139,7 @@ open http://localhost:7654
 | `/unregister` | POST | 移除仓库 |
 | `/api/validate/{name}` | GET | 仓库健康检查 |
 | `/api/task/{task_id}` | GET | 轮询异步任务进度 |
+| `/webhook` | POST | Webhook 端点（接收 GitHub/GitLab/Gitee push 事件，自动触发同步） |
 
 ### 搜索与导航
 
@@ -310,6 +311,10 @@ EMBEDDING_DIMENSIONS=1024
 VECTOR_BACKEND=chromadb
 VECTOR_PERSIST_DIR=.indexer/vector_db
 VECTOR_COLLECTION_NAME=repo_wiki_code
+
+# REST API 服务
+PUBLIC_DOMAIN=https://your-server.com   # 公开域名，用于生成 webhook URL
+WEBHOOK_SECRET=your-webhook-secret       # Webhook 签名验证密钥
 ```
 
 ---

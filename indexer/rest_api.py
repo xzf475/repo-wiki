@@ -104,7 +104,13 @@ class RepoRegistry:
         self._registry_file = self.repos_dir / "repos_registry.json"
 
     def _save(self):
-        data = {name: str(info["root"]) for name, info in self.repos.items()}
+        data = {
+            name: {
+                "root": str(info["root"]),
+                "url": info.get("url", ""),
+            }
+            for name, info in self.repos.items()
+        }
         self._registry_file.write_text(json.dumps(data, indent=2))
 
     def _load(self):
@@ -112,19 +118,26 @@ class RepoRegistry:
             return
         try:
             data = json.loads(self._registry_file.read_text())
-            for name, path_str in data.items():
+            for name, entry in data.items():
+                if isinstance(entry, str):
+                    path_str = entry
+                    url = ""
+                else:
+                    path_str = entry.get("root", "")
+                    url = entry.get("url", "")
                 repo_root = Path(path_str)
                 if repo_root.exists():
                     cfg = load_config(repo_root)
-                    self.repos[name] = {"root": repo_root, "config": cfg}
+                    self.repos[name] = {"root": repo_root, "config": cfg, "url": url}
         except (json.JSONDecodeError, OSError) as e:
             logger.warning("Failed to load repo registry: %s", e)
 
-    def register(self, name: str, repo_root: Path):
+    def register(self, name: str, repo_root: Path, url: str = ""):
         cfg = load_config(repo_root)
         self.repos[name] = {
             "root": repo_root,
             "config": cfg,
+            "url": url,
         }
         self._save()
         logger.info(f"Registered repo '{name}' at {repo_root}")
@@ -188,7 +201,14 @@ async def register_repo(request: Request) -> JSONResponse:
         task_id, name, url, username, password, token, branch, skip_deep, force_reindex,
     )
 
-    return JSONResponse({"task_id": task_id, "name": name, "status": "pending"})
+    webhook_url = _get_webhook_url(name)
+    return JSONResponse({
+        "task_id": task_id,
+        "name": name,
+        "status": "pending",
+        "webhook_url": webhook_url,
+        "webhook_hint": "Configure this URL in your repo's webhook settings (push events) for auto-sync. Set WEBHOOK_SECRET env var for payload verification."
+    })
 
 
 async def task_status(request: Request) -> JSONResponse:
@@ -421,6 +441,9 @@ def _run_rebuild_task(task_id: str, name: str, root: Path, skip_deep: bool) -> N
         tasks.update(task_id, status="failed", progress=0, step="locked", error="Another operation is running on this repo")
         return
     try:
+        existing = registry.get(name)
+        repo_url = existing.get("url", "") if existing else ""
+
         import shutil
 
         tasks.update(task_id, status="running", progress=5, step="cleaning")
@@ -464,18 +487,20 @@ def _run_rebuild_task(task_id: str, name: str, root: Path, skip_deep: bool) -> N
 
         if total_symbols == 0:
             tasks.update(task_id, status="done", progress=100, step="complete", detail="No symbols found")
-            registry.register(name, root)
+            registry.register(name, root, url=repo_url)
             return
 
-        registry.register(name, root)
+        registry.register(name, root, url=repo_url)
         info = registry.get(name)
         manifest_data = load_manifest(root)
         symbol_count = sum(len(entry.component_ids) for entry in manifest_data.files.values())
+        webhook_url = _get_webhook_url(name)
 
         tasks.update(task_id, status="done", progress=100, step="complete", result={
             "name": name, "path": str(root),
             "has_vector_db": (root / info["config"].vector_store.persist_dir).exists(),
             "symbol_count": symbol_count, "rebuilt": True,
+            "webhook_url": webhook_url,
         })
 
     except Exception as e:
@@ -489,6 +514,8 @@ def _run_sync_task(task_id: str, name: str, root: Path, skip_deep: bool) -> None
     if not lock.acquire(blocking=False):
         tasks.update(task_id, status="failed", progress=0, step="locked", error="Another operation is running on this repo")
         return
+    existing = registry.get(name)
+    repo_url = existing.get("url", "") if existing else ""
     git_env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
     git_cfg = ["-c", "http.followRedirects=true"]
 
@@ -601,18 +628,21 @@ def _run_sync_task(task_id: str, name: str, root: Path, skip_deep: bool) -> None
                 write_index(wiki_dir, index_content)
             if skill_missing:
                 write_index_and_skill(root, cfg, index_entries, {}, "", [], 0, 0)
-            registry.register(name, root)
+            webhook_url = _get_webhook_url(name)
+            registry.register(name, root, url=repo_url)
             tasks.update(task_id, status="done", progress=100, step="complete", result={
                 "name": name, "path": str(root),
                 "has_vector_db": (root / cfg.vector_store.persist_dir).exists(),
                 "symbol_count": sum(len(e.component_ids) for e in manifest.files.values()),
                 "synced": True, "repaired": True,
+                "webhook_url": webhook_url,
             })
             return
 
         total_symbols = _run_indexing_pipeline(task_id, name, root, skip_deep, candidates, cfg, manifest)
 
-        registry.register(name, root)
+        webhook_url = _get_webhook_url(name)
+        registry.register(name, root, url=repo_url)
         info = registry.get(name)
         manifest_data = load_manifest(root)
         symbol_count = sum(len(entry.component_ids) for entry in manifest_data.files.values())
@@ -621,6 +651,7 @@ def _run_sync_task(task_id: str, name: str, root: Path, skip_deep: bool) -> None
             "name": name, "path": str(root),
             "has_vector_db": (root / info["config"].vector_store.persist_dir).exists(),
             "symbol_count": symbol_count, "synced": True,
+            "webhook_url": webhook_url,
         })
 
     except subprocess.TimeoutExpired:
@@ -734,7 +765,8 @@ def _run_register_task_inner(
 
         if not candidates:
             tasks.update(task_id, status="running", progress=70, step="already_indexed", detail="Nothing to index")
-            registry.register(name, clone_dir)
+            webhook_url = _get_webhook_url(name)
+            registry.register(name, clone_dir, url=url)
             info = registry.get(name)
             has_vectors = (clone_dir / info["config"].vector_store.persist_dir).exists()
             manifest_data = load_manifest(root)
@@ -742,12 +774,14 @@ def _run_register_task_inner(
             tasks.update(task_id, status="done", progress=100, step="complete", result={
                 "name": name, "path": str(clone_dir), "url": url,
                 "has_vector_db": has_vectors, "symbol_count": symbol_count, "indexed": True,
+                "webhook_url": webhook_url,
             })
             return
 
         total_symbols = _run_indexing_pipeline(task_id, name, root, skip_deep, candidates, cfg, manifest)
 
-        registry.register(name, clone_dir)
+        webhook_url = _get_webhook_url(name)
+        registry.register(name, clone_dir, url=url)
         info = registry.get(name)
         has_vectors = (clone_dir / info["config"].vector_store.persist_dir).exists()
         manifest_data = load_manifest(root)
@@ -760,6 +794,7 @@ def _run_register_task_inner(
             "has_vector_db": has_vectors,
             "symbol_count": symbol_count,
             "indexed": True,
+            "webhook_url": webhook_url,
         })
 
     except subprocess.TimeoutExpired as e:
@@ -1126,6 +1161,137 @@ async def multi_repo_skill(request: Request) -> JSONResponse:
     })
 
 
+def _get_webhook_url(name: str) -> str:
+    domain = os.environ.get("PUBLIC_DOMAIN", "").rstrip("/")
+    if domain:
+        return f"{domain}/webhook/{name}"
+    return ""
+
+
+_WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
+
+
+def _verify_webhook(body: bytes, signature: str) -> bool:
+    if not _WEBHOOK_SECRET:
+        return True
+    import hashlib, hmac
+    expected = "sha256=" + hmac.new(
+        _WEBHOOK_SECRET.encode(), body, hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(expected, signature)
+
+
+def _extract_repo_url(payload: dict) -> str | None:
+    repo = payload.get("repository")
+    if repo:
+        url = repo.get("clone_url") or repo.get("html_url")
+        if url:
+            return url.rstrip("/")
+
+    project = payload.get("project")
+    if project:
+        url = project.get("git_http_url") or project.get("http_url")
+        if url:
+            return url.rstrip("/")
+
+    return None
+
+
+async def webhook_by_name(request: Request) -> JSONResponse:
+    name = request.path_params.get("name", "")
+    if not name or not registry.get(name):
+        return JSONResponse({"error": f"repo '{name}' not registered"}, status_code=404)
+
+    body = await request.body()
+
+    gh_signature = request.headers.get("X-Hub-Signature-256", "")
+    gitlab_token = request.headers.get("X-Gitlab-Token", "")
+
+    if _WEBHOOK_SECRET:
+        if gh_signature:
+            if not _verify_webhook(body, gh_signature):
+                return JSONResponse({"error": "invalid signature"}, status_code=401)
+        elif gitlab_token:
+            if gitlab_token != _WEBHOOK_SECRET:
+                return JSONResponse({"error": "invalid token"}, status_code=401)
+
+    info = registry.get(name)
+    task_id = tasks.create(name, info.get("url", ""))
+
+    loop = asyncio.get_running_loop()
+    loop.run_in_executor(None, _run_sync_task, task_id, name, info["root"], True)
+
+    return JSONResponse({
+        "task_id": task_id,
+        "name": name,
+        "status": "pending",
+        "trigger": "webhook",
+    })
+
+
+async def webhook(request: Request) -> JSONResponse:
+    if request.method != "POST":
+        return JSONResponse({"error": "method not allowed"}, status_code=405)
+
+    body = await request.body()
+
+    gh_signature = request.headers.get("X-Hub-Signature-256", "")
+    gitlab_token = request.headers.get("X-Gitlab-Token", "")
+
+    if _WEBHOOK_SECRET:
+        if gh_signature:
+            if not _verify_webhook(body, gh_signature):
+                return JSONResponse({"error": "invalid signature"}, status_code=401)
+        elif gitlab_token:
+            if gitlab_token != _WEBHOOK_SECRET:
+                return JSONResponse({"error": "invalid token"}, status_code=401)
+        else:
+            event = request.headers.get("X-GitHub-Event") or request.headers.get("X-Gitlab-Event", "")
+            if event:
+                return JSONResponse({"error": "missing signature"}, status_code=401)
+
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+
+    repo_url = _extract_repo_url(payload)
+    if not repo_url:
+        return JSONResponse({"error": "unable to determine repo URL from payload"}, status_code=400)
+
+    matched_name = None
+    matched_info = None
+    for name, info in registry.repos.items():
+        stored_url = info.get("url", "").rstrip("/")
+        if stored_url and (stored_url == repo_url or stored_url.rstrip(".git") == repo_url.rstrip(".git")):
+            matched_name = name
+            matched_info = info
+            break
+
+    if not matched_name:
+        for name, info in registry.repos.items():
+            stored_url = info.get("url", "").rstrip("/")
+            if stored_url and repo_url.endswith(stored_url.split("/")[-1]):
+                matched_name = name
+                matched_info = info
+                break
+
+    if not matched_name:
+        return JSONResponse({"error": "no registered repo matches the webhook payload"}, status_code=404)
+
+    task_id = tasks.create(matched_name, repo_url)
+
+    loop = asyncio.get_running_loop()
+    loop.run_in_executor(None, _run_sync_task, task_id, matched_name, matched_info["root"], True)
+
+    return JSONResponse({
+        "task_id": task_id,
+        "name": matched_name,
+        "status": "pending",
+        "trigger": "webhook",
+    })
+
+
 def create_app(repos: dict[str, Path] | None = None, repos_dir: Path | None = None) -> Starlette:
     if repos_dir:
         registry.repos_dir = repos_dir
@@ -1133,7 +1299,7 @@ def create_app(repos: dict[str, Path] | None = None, repos_dir: Path | None = No
 
     if repos:
         for name, path in repos.items():
-            registry.register(name, path)
+            registry.register(name, path, url="")
 
     from starlette.staticfiles import StaticFiles
     from starlette.middleware import Middleware
@@ -1145,7 +1311,8 @@ def create_app(repos: dict[str, Path] | None = None, repos_dir: Path | None = No
     if api_key:
         class _AuthMiddleware(BaseHTTPMiddleware):
             async def dispatch(self, request, call_next):
-                if request.url.path == "/health":
+                path = request.url.path
+                if path in ("/health", "/webhook") or path.startswith("/webhook/"):
                     return await call_next(request)
                 token = request.headers.get("Authorization", "").removeprefix("Bearer ")
                 if token != api_key:
@@ -1165,6 +1332,8 @@ def create_app(repos: dict[str, Path] | None = None, repos_dir: Path | None = No
             Route("/unregister", unregister_repo, methods=["POST"]),
             Route("/sync", sync_repo, methods=["POST"]),
             Route("/rebuild", rebuild_repo, methods=["POST"]),
+            Route("/webhook", webhook, methods=["POST"]),
+            Route("/webhook/{name}", webhook_by_name, methods=["POST"]),
             Route("/api/repo/{name}", repo_detail),
             Route("/api/validate/{name}", validate_repo),
             Route("/api/task/{task_id}", task_status),

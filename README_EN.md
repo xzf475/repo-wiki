@@ -138,6 +138,7 @@ open http://localhost:7654
 | `/unregister` | POST | Remove a repo |
 | `/api/validate/{name}` | GET | Health check a repo |
 | `/api/task/{task_id}` | GET | Poll async task progress |
+| `/webhook` | POST | Webhook endpoint (receives GitHub/GitLab/Gitee push events, triggers auto-sync) |
 
 ### Search & Navigation
 
@@ -309,6 +310,10 @@ EMBEDDING_DIMENSIONS=1024
 VECTOR_BACKEND=chromadb
 VECTOR_PERSIST_DIR=.indexer/vector_db
 VECTOR_COLLECTION_NAME=repo_wiki_code
+
+# REST API Service
+PUBLIC_DOMAIN=https://your-server.com   # Public domain for webhook URL generation
+WEBHOOK_SECRET=your-webhook-secret       # Webhook signature verification key
 ```
 
 ---
