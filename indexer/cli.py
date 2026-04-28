@@ -306,8 +306,11 @@ def serve(transport: str, host: str, port: int, api: str | None):
         server = create_server(root)
         click.echo(f"MCP server started in single-repo mode ({root})")
 
+    server.settings.host = host
+    server.settings.port = port
+
     if transport == "streamable-http":
-        server.run(transport="streamable-http", host=host, port=port)
+        server.run(transport="streamable-http")
     else:
         server.run(transport="stdio")
 
