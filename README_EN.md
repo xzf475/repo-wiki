@@ -176,6 +176,8 @@ For remote mode: `"args": ["-y", "repo-wiki", "serve", "--api", "http://localhos
 }
 ```
 
+When `MCP_API_KEY` is set, clients must send `Authorization: Bearer <key>` header with every request. Configuration depends on your MCP client — some support a `headers` field or a CLI argument for the token.
+
 Server-side startup:
 
 ```bash

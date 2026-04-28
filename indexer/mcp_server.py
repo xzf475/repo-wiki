@@ -6,7 +6,31 @@ from mcp.server.fastmcp import FastMCP
 from indexer.config import Config, load_config
 
 
-def create_server(repo_root: Path | None = None) -> FastMCP:
+def _apply_mcp_auth(mcp: FastMCP, mcp_api_key: str | None) -> None:
+    if not mcp_api_key:
+        return
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.responses import JSONResponse
+
+    _orig_app = mcp.streamable_http_app
+
+    class _MCPAuthMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request, call_next):
+            auth = request.headers.get("Authorization", "")
+            token = auth.removeprefix("Bearer ")
+            if not token or token != mcp_api_key:
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+            return await call_next(request)
+
+    def _patched_app():
+        app = _orig_app()
+        app.add_middleware(_MCPAuthMiddleware)
+        return app
+
+    mcp.streamable_http_app = _patched_app
+
+
+def create_server(repo_root: Path | None = None, mcp_api_key: str | None = None) -> FastMCP:
     if repo_root is None:
         repo_root = Path.cwd()
 
@@ -92,10 +116,11 @@ def create_server(repo_root: Path | None = None) -> FastMCP:
         from indexer.retrieval import get_source_context
         return get_source_context(file_path, line_start, line_end, repo_root, padding=padding)
 
+    _apply_mcp_auth(mcp, mcp_api_key)
     return mcp
 
 
-def create_api_server(api_url: str, api_key: str | None = None) -> FastMCP:
+def create_api_server(api_url: str, api_key: str | None = None, mcp_api_key: str | None = None) -> FastMCP:
     import urllib.request
     import urllib.error
 
@@ -272,4 +297,5 @@ def create_api_server(api_url: str, api_key: str | None = None) -> FastMCP:
 
         return data.get("source", "No source returned.")
 
+    _apply_mcp_auth(mcp, mcp_api_key)
     return mcp

@@ -296,14 +296,15 @@ def hook_remove():
 @click.option("--api", default=None, help="REST API URL for multi-repo mode (e.g. http://localhost:7654)")
 def serve(transport: str, host: str, port: int, api: str | None):
     """Start the repo-wiki MCP server for semantic code search."""
+    mcp_api_key = os.environ.get("MCP_API_KEY", "")
     if api:
         from indexer.mcp_server import create_api_server
-        server = create_api_server(api)
+        server = create_api_server(api, mcp_api_key=mcp_api_key)
         click.echo(f"MCP server started in multi-repo mode (API: {api})")
     else:
         from indexer.mcp_server import create_server
         root = Path.cwd()
-        server = create_server(root)
+        server = create_server(root, mcp_api_key=mcp_api_key)
         click.echo(f"MCP server started in single-repo mode ({root})")
 
     server.settings.host = host

@@ -176,6 +176,8 @@ repo-wiki serve --api http://localhost:7654  # MCP 代理到 API
 }
 ```
 
+设置了 `MCP_API_KEY` 时，客户端需在请求头中添加 `Authorization: Bearer <key>`。根据不同 MCP 客户端配置方式，可能需要增加 headers 字段或使用 CLI 参数传入 Token。
+
 服务端启动方式：
 
 ```bash
