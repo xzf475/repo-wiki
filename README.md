@@ -118,6 +118,15 @@ docker compose down           # 停止
 
 repo-wiki 提供 [MCP](https://modelcontextprotocol.io) 服务器，让支持 MCP 的 LLM 客户端直接搜索你的代码库。
 
+### MCP 工具
+
+| MCP 工具 | 说明 | 可用模式 |
+|----------|------|----------|
+| `search_symbols_tool` | 语义搜索代码符号（支持 LLM 查询改写） | 单仓库 / 多仓库 |
+| `trace_call_tool` | 追踪调用链（向上/向下） | 单仓库 / 多仓库 |
+| `get_source_context_tool` | 获取源码上下文 | 单仓库 / 多仓库 |
+| `list_repos` | 列出所有已注册仓库（含分支、索引提交、统计） | 多仓库 |
+
 ### 单仓库模式
 
 ```bash
@@ -184,7 +193,9 @@ repo-wiki serve --api http://localhost:7654  # MCP 代理到 API
 }
 ```
 
-设置了 `MCP_API_KEY` 时，客户端需在请求头中添加 `Authorization: Bearer <key>`。根据不同 MCP 客户端配置方式，可能需要增加 headers 字段或使用 CLI 参数传入 Token。
+> **认证**：设置了 `MCP_API_KEY` 时，客户端需在请求头中添加 `Authorization: Bearer <key>`。
+> **DNS 反绑定保护**：MCP SDK 默认只接受 `localhost`/`127.0.0.1` 的 Host 头。
+> 远程访问时 SDK 会自动关闭该保护，无需额外配置。
 
 服务端启动方式：
 
@@ -200,6 +211,16 @@ repo-wiki serve --transport streamable-http --port 8000 --api http://localhost:7
 # 全局可用
 mkdir -p ~/.claude/skills/codebase
 cp .indexer/skills/codebase.md ~/.claude/skills/codebase/SKILL.md
+```
+
+项目中还提供了 **repo-wiki MCP Agent 技能**（`skills/SKILL.md`），让 AI Agent 学会通过 MCP 工具自动进行语义搜索、调用链追踪和源码阅读。安装方式：
+
+```bash
+# 复制到 Trae/Claude Code 技能目录
+cp -r skills ~/.trae-cn/skills/repo-wiki-code-analysis
+
+# 或通过 npx skills 安装
+npx skills add /path/to/repo-wiki -g -y
 ```
 
 ---
@@ -297,6 +318,11 @@ VECTOR_COLLECTION_NAME=repo_wiki_code
 REPO_WIKI_API_KEY=                     # API 认证密钥
 PUBLIC_DOMAIN=https://your-server.com  # 公开域名，用于 webhook URL
 WEBHOOK_SECRET=your-webhook-secret     # Webhook 签名密钥
+
+# MCP 服务器
+MCP_ENABLED=false                      # 是否同时启动 MCP 服务器（streamable-http）
+MCP_PORT=8000                          # MCP 服务器端口
+MCP_API_KEY=                           # MCP 认证密钥（可选，设置后需 Bearer Token）
 ```
 
 ---

@@ -118,6 +118,15 @@ docker compose down           # stop
 
 repo-wiki provides an [MCP](https://modelcontextprotocol.io) server, letting MCP-capable LLM clients search your codebase directly.
 
+### MCP Tools
+
+| MCP Tool | Description | Available In |
+|----------|-------------|-------------|
+| `search_symbols_tool` | Semantic search (supports LLM query rewriting) | Single / Multi-repo |
+| `trace_call_tool` | Trace call graph (up/down) | Single / Multi-repo |
+| `get_source_context_tool` | Get source code context | Single / Multi-repo |
+| `list_repos` | List registered repos (branches, indexed commit, stats) | Multi-repo |
+
 ### Single-Repo Mode
 
 ```bash
@@ -184,7 +193,9 @@ For remote mode: `"args": ["-y", "repo-wiki", "serve", "--api", "http://localhos
 }
 ```
 
-When `MCP_API_KEY` is set, clients must send `Authorization: Bearer <key>` header with every request. Configuration depends on your MCP client — some support a `headers` field or a CLI argument for the token.
+> **Auth**: When `MCP_API_KEY` is set, clients must send `Authorization: Bearer <key>`.
+> **DNS Rebinding Protection**: MCP SDK only accepts `localhost`/`127.0.0.1` Host headers by default.
+> Protection is automatically disabled for remote access — no extra config needed.
 
 Server-side startup:
 
@@ -199,6 +210,16 @@ repo-wiki serve --transport streamable-http --port 8000 --api http://localhost:7
 ```bash
 mkdir -p ~/.claude/skills/codebase
 cp .indexer/skills/codebase.md ~/.claude/skills/codebase/SKILL.md
+```
+
+A **repo-wiki MCP Agent skill** (`skills/SKILL.md`) is also included. It teaches AI agents to automatically use MCP tools for semantic search, call graph tracing, and source code reading:
+
+```bash
+# Copy to Trae/Claude Code skills directory
+cp -r skills ~/.trae-cn/skills/repo-wiki-code-analysis
+
+# Or install via npx skills
+npx skills add /path/to/repo-wiki -g -y
 ```
 
 ---
@@ -296,6 +317,11 @@ VECTOR_COLLECTION_NAME=repo_wiki_code
 REPO_WIKI_API_KEY=                       # API auth key
 PUBLIC_DOMAIN=https://your-server.com    # Public domain for webhook URL
 WEBHOOK_SECRET=your-webhook-secret       # Webhook signature key
+
+# MCP Server
+MCP_ENABLED=false                        # Start MCP server alongside REST API
+MCP_PORT=8000                            # MCP server port
+MCP_API_KEY=                             # MCP auth key (optional, requires Bearer Token)
 ```
 
 ---

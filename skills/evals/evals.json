@@ -1,0 +1,26 @@
+{
+  "skill_name": "repo-wiki-code-analysis",
+  "evals": [
+    {
+      "id": 1,
+      "name": "bug-analysis-error-trace",
+      "prompt": "我们在生产环境遇到了一个 bug——用户登录后 session 经常莫名其妙过期，但不是每次都发生。帮我追一下这个问题，看看 session 管理相关的代码有没有问题。先看看系统里有哪些仓库，然后查找 session 相关的代码，看看调用链路有没有问题。",
+      "expected_output": "调用 list_repos 发现仓库 → 调用 search_symbols_tool 查找 session 相关代码 → 对找到的 session 管理符号调用 trace_call_tool 分析调用链 → 调用 get_source_context_tool 阅读具体实现 → 给出分析结论",
+      "files": []
+    },
+    {
+      "id": 2,
+      "name": "feature-code-review",
+      "prompt": "团队刚合了一个 PR，改了用户认证模块，加了新的 JWT token 验证逻辑。帮我 review 一下这个改动，看看它依赖了哪些函数、会不会影响其他模块。仓库叫 bug_agent。",
+      "expected_output": "调用 search_symbols_tool 搜索 JWT/auth 相关符号 → 对找到的符号调用 trace_call_tool(direction='up') 检查调用者 → 调用 trace_call_tool(direction='down') 检查影响范围 → 调用 get_source_context_tool 阅读关键代码 → 给出 review 结论",
+      "files": []
+    },
+    {
+      "id": 3,
+      "name": "quick-source-lookup",
+      "prompt": "bug_agent 仓库里那个处理 WebSocket 连接的中间件，具体是怎么实现的？给我看看代码。",
+      "expected_output": "调用 search_symbols_tool 搜索 WebSocket 中间件相关符号 → 根据搜索结果定位文件和行号 → 调用 get_source_context_tool 读取源码 → 解释实现逻辑",
+      "files": []
+    }
+  ]
+}
