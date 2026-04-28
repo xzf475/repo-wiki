@@ -20,25 +20,23 @@ The wiki captures structure, relationships, and constraints in a fraction of the
 
 ## Stats
 
-- **11 symbols** across **1 files** — indexed 2026-04-28 @ `50ff6f37`
+- **16 symbols** across **1 files** — indexed 2026-04-28 @ `8ff9a71a`
 - Wiki: `wiki/` — 1 page(s)
 - Manifest: `.indexer/manifest.json` — maps every file to its wiki page and component IDs
 
 ## System Overview
 
-The system is a CLI-based indexer tool (indexer/cli.py) with subcommands for initialization, status monitoring, git hook management (install, remove), and a built-in API server (serve, serve_api). Its architecture likely comprises a CLI entry point that dispatches to internal modules for configuration, hook scripts, and a REST API to expose index data. The hook mechanism integrates with version control (e.g., Git pre-commit) to automatically update the index, while the serve module provides real-time query access. Overall, the tool maintains a local index file and coordinates between CLI commands, hook triggers, and an HTTP API.
+The system is an MCP (Model Context Protocol) server implemented in `indexer/mcp_server.py`. It exposes several tools for code indexing and retrieval: `search_symbols_tool`, `trace_call_tool`, `get_source_context_tool`, and `list_repos`. Requests are guarded by a custom auth middleware (`_MCPAuthMiddleware`) that validates host permissions via `_allow_any_host`. The server likely delegates queries to an underlying indexer or database to fulfill symbol searches, call traces, and source context retrieval.
 ## Key Request Flows
-- init -> config creation -> hook installation (hook_install) -> index setup
-- git pre-commit hook triggered -> hook module -> index update -> status check
-- serve -> API server start -> index file read -> endpoint handlers (serve_api)
-- status -> read index file -> print summary
-- hook_remove -> unlink hook scripts -> clean config
+- Incoming tool request → _MCPAuthMiddleware.dispatch → _allow_any_host → search_symbols_tool / trace_call_tool / get_source_context_tool → indexer query
+- list_repos → repository enumeration from indexer
+- _patched_method (likely a monkey-patched decorator) → any tool handler → modify behavior before dispatch
 
 ## Wiki Pages
 
 | Page | Covers | Key Entry Points |
 |------|--------|-----------------|
-| [root](../wiki/root.md) | indexer/cli.py | main, init, status, hook, hook_install |
+| [root](../wiki/root.md) | indexer/mcp_server.py | _patched_method, search_symbols_tool, trace_call_tool, get_source_context_tool, list_repos |
 
 ## Workflow — How to Answer Questions About This Codebase
 

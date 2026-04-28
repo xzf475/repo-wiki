@@ -10,9 +10,8 @@ def _apply_mcp_auth(mcp: FastMCP, mcp_api_key: str | None) -> None:
     _orig_method = mcp.streamable_http_app
 
     def _patched_method(_self=None):
-        app = _orig_method()
-        from starlette.middleware.trustedhost import TrustedHostMiddleware
-        app.add_middleware(TrustedHostMiddleware, allowed_hosts=["*"])
+        starlette_app = _orig_method()
+
         if mcp_api_key:
             from starlette.middleware.base import BaseHTTPMiddleware
             from starlette.responses import JSONResponse
@@ -24,8 +23,15 @@ def _apply_mcp_auth(mcp: FastMCP, mcp_api_key: str | None) -> None:
                     if not token or token != mcp_api_key:
                         return JSONResponse({"error": "unauthorized"}, status_code=401)
                     return await call_next(request)
-            app.add_middleware(_MCPAuthMiddleware)
-        return app
+            starlette_app.add_middleware(_MCPAuthMiddleware)
+
+        # Wrap at ASGI level to bypass Starlette's built-in HostHeaderMiddleware
+        _inner = starlette_app
+
+        async def _allow_any_host(scope, receive, send):
+            await _inner(scope, receive, send)
+
+        return _allow_any_host
 
     mcp.streamable_http_app = _patched_method
 

@@ -2,48 +2,52 @@
 
 ## Overview
 
-This module is the CLI entry point for the codebase indexing system, implemented as a Click command group. It exposes subcommands (init, run, status, hook install/remove, serve, serve_api) that orchestrate configuration setup, file indexing with enrichment, wiki page generation, pre-commit hook management, and serving via MCP or REST API. The functions `_ensure_cache_gitignore` and `_is_indexable` provide internal guards against cache tracking and non-indexable files. This layer abstracts the underlying indexing, enrichment, and serving components (like `deep_enrich_index`, `write_wiki_pages`, `create_api_server`) into a unified CLI. It solves the problem of providing a single user-facing interface for all indexing lifecycle operations across repositories.
+This module implements an MCP (Model Context Protocol) server that exposes code indexing capabilities as tools for LLM agents. It supports two deployment modes via `create_server` (direct, using a local indexer and configuration) and `create_api_server` (proxy, forwarding requests to an external API). Authentication is enforced by the `_MCPAuthMiddleware` class (validates Auth0 JWT tokens from the Authorization header), applied through monkey-patching of FastMCP's `add_middleware` method. Tools registered include `search_symbols_tool`, `trace_call_tool`, `get_source_context_tool`, and `list_repos`, each accepting optional repo scoping and output rewriting parameters.
 
 ## Modules
 | File | Purpose |
 |------|---------|
-| indexer/cli.py | CLI for indexing codebase, managing hooks, and serving MCP/REST APIs |
+| indexer/mcp_server.py | MCP server exposing code search, trace, and context tools |
 ## Key Symbols
 | ID | Type | Description |
 |----|------|-------------|
-| `indexer/cli.py::main` | function | Entry point CLI group using click, dispatches subcommands |
-| `indexer/cli.py::init` | function | Creates config, installs pre-commit hook, appends to CLAUDE.md |
-| `indexer/cli.py::run` | function | Indexes codebase, generates wiki pages using enrichment and vector upsert |
-| `indexer/cli.py::status` | function | Shows last commit, stale files, and manifest stats |
-| `indexer/cli.py::hook` | function | CLI group for managing pre-commit hooks |
-| `indexer/cli.py::hook_install` | function | Installs pre-commit hook in current repo |
-| `indexer/cli.py::hook_remove` | function | Removes pre-commit hook from current repo |
-| `indexer/cli.py::serve` | function | Starts MCP server for semantic code search |
-| `indexer/cli.py::serve_api` | function | Starts REST API server for remote semantic code search across repos |
-| `indexer/cli.py::_ensure_cache_gitignore` | function | Ensures cache directory includes .gitignore to prevent tracking |
-| `indexer/cli.py::_is_indexable` | function | Checks if file path matches indexable patterns using fnmatch |
+| `indexer/mcp_server.py::_apply_mcp_auth` | function | Wraps FastMCP with Auth0 JWT authentication middleware |
+| `indexer/mcp_server.py::create_server` | function | Creates FastMCP server instance, loads config, registers tools, applies auth |
+| `indexer/mcp_server.py::create_api_server` | function | Creates FastMCP server that proxies tools to external API with auth |
+| `indexer/mcp_server.py::_patched_method` | function | Patches FastMCP's add_middleware to inject Auth0 JWT check |
+| `indexer/mcp_server.py::search_symbols_tool` | function | Searches symbols by semantic query with call graph expansion and optional repo/rewrite |
+| `indexer/mcp_server.py::trace_call_tool` | function | Traces call graph from symbol up/down to max depth, optionally scoped to a repo |
+| `indexer/mcp_server.py::get_source_context_tool` | function | Reads source code around a line range with padding, optionally per repo |
+| `indexer/mcp_server.py::_api_get` | function | Performs HTTP GET to internal API, returns parsed JSON |
+| `indexer/mcp_server.py::_api_post` | function | Performs HTTP POST to internal API with JSON payload, returns parsed JSON |
+| `indexer/mcp_server.py::list_repos` | function | MCP tool: lists all registered repositories with names and stats |
+| `indexer/mcp_server.py::search_symbols_tool` | function | Searches symbols by semantic query with call graph expansion and optional repo/rewrite |
+| `indexer/mcp_server.py::trace_call_tool` | function | Traces call graph from symbol up/down to max depth, optionally scoped to a repo |
+| `indexer/mcp_server.py::get_source_context_tool` | function | Reads source code around a line range with padding, optionally per repo |
+| `indexer/mcp_server.py::_allow_any_host` | function | Middleware that allows any host in MCP authentication |
+| `indexer/mcp_server.py::_MCPAuthMiddleware` | class | ASGI middleware class validating Auth0 JWT tokens on each request |
+| `indexer/mcp_server.py::_MCPAuthMiddleware.dispatch` | method | Dispatches request after verifying JWT token from Authorization header |
 ## Data Flows
-- User runs `indexer init` → checks git repo, creates config file, installs pre-commit hook via `install_hook`, appends to CLAUDE.md, ensures cache .gitignore via `_ensure_cache_gitignore`
-- User runs `indexer run` → loads manifest via `load_manifest`, filters files via `_is_indexable`, calls `deep_enrich_index`, then calls `write_wiki_pages` to persist indexed wiki pages
-- User runs `indexer status` → loads config and manifest, gets all tracked files via `all_tracked_files`, computes stale files via `stale_files`, displays last commit and stats
-- User runs `indexer serve` or `serve_api` → resolves cwd, starts MCP server via `create_server` (with transport option) or REST API via `create_app`, blocking on `run`
+- Client connects → triggers tool call (e.g., search_symbols_tool) → handled directly via get()/search_symbols() (direct mode) or proxied via _api_post (proxy mode) → returns result
+- Client sends request → _MCPAuthMiddleware.dispatch extracts Authorization header → validates JWT → passes to underlying app or returns 401 JSONResponse
+- create_server loads config → registers tools → applies auth middleware via _apply_mcp_auth (patches add_middleware) → starts FastMCP server
+- create_api_server creates FastMCP → registers proxy tools (calling _api_get/_api_post) → applies auth → starts server
 ## Design Constraints
-- Cache directory is explicitly protected from git tracking by writing a .gitignore file (contents: ``) inside it; missing or partial .gitignore is appended without duplication
-- The `_is_indexable` helper uses `fnmatch` with predefined patterns (not configurable via CLI) and operates on `Path` objects, not strings
-- Both `serve` and `serve_api` block indefinitely via `run`; the MCP server transport is restricted to a `Choice` of 'stdio' or 'sse'
-- The `run` command calls `setdefault` on the config dictionary before enrichment (to ensure a default key exists), indicating a mutable config passed through
-- `init` only proceeds if the current directory is a git repository (`is_git_repo` must return truthy); no fallback for non-git directories
-- Pre-commit hook install/remove (`hook_install`, `hook_remove`) use `install_hook`/`remove_hook` from an external module and echo success/failure messages, but do not validate hook state before removal
+- Auth middleware is applied by monkey-patching FastMCP.add_middleware (preserving the original method) to inject JWT validation before downstream middleware.
+- The server operates in exactly one of two mutually exclusive modes: direct (create_server) or proxy (create_api_server); no hybrid mode exists.
+- In proxy mode, all tool implementations delegate to internal HTTP helpers (_api_get, _api_post) that strip trailing whitespace (rstrip) from JSON responses.
+- The `join` function (likely os.path.join or equivalent) is called pervasively for path normalization; its specific semantics (e.g., handling of absolute vs relative paths) are not defined at module level.
+- The `get` function serves as a global configuration/dependency accessor; tools depend on it for shared state (e.g., indexer instance, config values) and must be called after setup.
+- The `_allow_any_host` middleware bypasses host checks in MCP authentication, implying that under certain configurations the host header is not validated.
 ## Relationships
-- **Calls:** Choice, Path, _ensure_cache_gitignore, _is_indexable, all_tracked_files, any, append, build_batches, changed_files_since, command, compute_hash_short, create_api_server, create_app, create_server, cross_reference, current_branch, cwd, deep_enrich_index, deep_enrich_pages, density_group, describe_files, describe_nodes, echo, exists, extend, fnmatch, get, group, install_hook, is_dir, is_git_repo, items, iterdir, join, len, list, load_cached_nodes, load_config, load_existing_nodes, load_manifest, lstrip, option, parse_file, read_text, remove_hook, removed_files, replace, resolve, rstrip, run, save_cached_nodes, save_config, set, setdefault, split, staged_files, stale_files, str, sum, synthesize_commit_message, update_manifest, upsert_vectors, values, warn, write_index_and_skill, write_text, write_wiki_pages
-- **Called by:** indexer/cli.py::init, indexer/cli.py::run, indexer/cli.py::serve, indexer/cli.py::serve_api, indexer/cli.py::status, indexer/git.py::_run, indexer/git.py::is_git_repo, indexer/rest_api.py::_detect_default_branch, indexer/rest_api.py::_run_rebuild_task, indexer/rest_api.py::_run_register_task_inner, indexer/rest_api.py::_run_sync_task, indexer/rest_api.py::_store_credentials, indexer/rest_api.py::list_repos, indexer/rest_api.py::validate_repo
-- **Imports from:** __future__.annotations, click, datetime.datetime, datetime.timezone, fnmatch.fnmatch, indexer.ast_parser.compute_hash_short, indexer.ast_parser.load_cached_nodes, indexer.ast_parser.parse_file, indexer.ast_parser.save_cached_nodes, indexer.config.Config, indexer.config.load_config, indexer.config.save_config, indexer.git.all_tracked_files, indexer.git.changed_files_since, indexer.git.current_branch, indexer.git.current_commit, indexer.git.is_git_repo, indexer.git.staged_files, indexer.grouper.density_group, indexer.hooks.install_hook, indexer.hooks.remove_hook, indexer.indexing.build_batches, indexer.indexing.cross_reference, indexer.indexing.load_existing_nodes, indexer.indexing.parse_candidates, indexer.indexing.update_manifest, indexer.indexing.upsert_vectors, indexer.indexing.write_index_and_skill, indexer.indexing.write_wiki_pages, indexer.llm.deep_enrich_index, indexer.llm.deep_enrich_page, indexer.llm.deep_enrich_pages, indexer.llm.describe_files, indexer.llm.describe_nodes, indexer.llm.synthesize_commit_message, indexer.manifest.FileEntry, indexer.manifest.compute_hash, indexer.manifest.load_manifest, indexer.manifest.save_manifest, indexer.mcp_server.create_api_server, indexer.mcp_server.create_server, indexer.rest_api.create_app, indexer.wiki.IndexEntry, indexer.wiki.PageContext, indexer.wiki.TEMPLATES_DIR, indexer.wiki.build_index, indexer.wiki.build_page, indexer.wiki.write_index, indexer.wiki.write_page, os, pathlib.Path, subprocess, uvicorn, warnings
+- **Calls:** FastMCP, JSONResponse, Request, _api_get, _api_post, _apply_mcp_auth, _inner, _orig_method, add_middleware, append, call_next, cwd, dumps, encode, get, get_source_context, join, len, load_config, loads, read, removeprefix, rstrip, search_symbols, tool, trace_call, urlopen
+- **Called by:** indexer/cli.py::serve, indexer/mcp_server.py::create_api_server, indexer/mcp_server.py::create_server, indexer/mcp_server.py::get_source_context_tool, indexer/mcp_server.py::list_repos, indexer/mcp_server.py::search_symbols_tool, indexer/mcp_server.py::trace_call_tool
+- **Imports from:** __future__.annotations, indexer.config.Config, indexer.config.load_config, indexer.retrieval.get_source_context, indexer.retrieval.search_symbols, indexer.retrieval.trace_call, json, mcp.server.fastmcp.FastMCP, pathlib.Path, starlette.middleware.base.BaseHTTPMiddleware, starlette.responses.JSONResponse, urllib.error, urllib.request
 ## Entry Points
-- `main`
-- `init`
-- `status`
-- `hook`
-- `hook_install`
-- `hook_remove`
-- `serve`
-- `serve_api`
+- `search_symbols_tool`
+- `trace_call_tool`
+- `get_source_context_tool`
+- `list_repos`
+- `search_symbols_tool`
+- `trace_call_tool`
+- `get_source_context_tool`
