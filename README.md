@@ -43,6 +43,14 @@
 pip install repo-wiki
 ```
 
+从源码安装（未发布到 PyPI 时）：
+
+```bash
+git clone https://github.com/your/repo-wiki.git
+cd repo-wiki
+pip install -e .
+```
+
 ---
 
 ## CLI 模式

@@ -43,6 +43,14 @@ Output: `wiki/` (structured markdown), `.indexer/manifest.json` (symbol manifest
 pip install repo-wiki
 ```
 
+From source (when not yet published to PyPI):
+
+```bash
+git clone https://github.com/your/repo-wiki.git
+cd repo-wiki
+pip install -e .
+```
+
 ---
 
 ## CLI Mode

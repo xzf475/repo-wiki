@@ -1,0 +1,497 @@
+{
+  "last_indexed_commit": "5ead16e2cf5369f92975f55ef598bfed28fa0f34",
+  "indexed_at": "2026-04-28T10:16:49.348822+00:00",
+  "files": {
+    "indexer/__init__.py": {
+      "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "wiki_page": "wiki/indexer.md",
+      "component_ids": []
+    },
+    "indexer/ast_parser.py": {
+      "hash": "sha256:7ad616f8e5a466100744c826ae65940a6bedcb66816bdabc21da4927eeef8d1f",
+      "wiki_page": "wiki/indexer.md",
+      "component_ids": [
+        "indexer/ast_parser.py::ASTNode",
+        "indexer/ast_parser.py::_extract_imports",
+        "indexer/ast_parser.py::_extract_calls",
+        "indexer/ast_parser.py::_get_class_method_ids",
+        "indexer/ast_parser.py::parse_file",
+        "indexer/ast_parser.py::compute_hash_short",
+        "indexer/ast_parser.py::load_cached_nodes",
+        "indexer/ast_parser.py::save_cached_nodes"
+      ]
+    },
+    "indexer/cli.py": {
+      "hash": "sha256:aa931c9714d2dc160e3b1a4af35907f2435d0b92b25a4d283ae27d17cad19887",
+      "wiki_page": "wiki/indexer.md",
+      "component_ids": [
+        "indexer/cli.py::main",
+        "indexer/cli.py::init",
+        "indexer/cli.py::run",
+        "indexer/cli.py::status",
+        "indexer/cli.py::hook",
+        "indexer/cli.py::hook_install",
+        "indexer/cli.py::hook_remove",
+        "indexer/cli.py::serve",
+        "indexer/cli.py::serve_api",
+        "indexer/cli.py::_ensure_cache_gitignore",
+        "indexer/cli.py::_is_indexable"
+      ]
+    },
+    "indexer/config.py": {
+      "hash": "sha256:0938695cfc37967a4d6cf382bb545473c874c7fb60280e0104ab862d2f4b13b4",
+      "wiki_page": "wiki/indexer.md",
+      "component_ids": [
+        "indexer/config.py::EmbeddingConfig",
+        "indexer/config.py::VectorStoreConfig",
+        "indexer/config.py::Config",
+        "indexer/config.py::_env",
+        "indexer/config.py::_env_int",
+        "indexer/config.py::load_config",
+        "indexer/config.py::_apply_env",
+        "indexer/config.py::save_config"
+      ]
+    },
+    "indexer/embedding.py": {
+      "hash": "sha256:1618f58438bad43f1a45d318b54bb27d19f0a58bbf99b0457d175d013beb20cd",
+      "wiki_page": "wiki/indexer.md",
+      "component_ids": [
+        "indexer/embedding.py::_resolve_api_key",
+        "indexer/embedding.py::_build_text",
+        "indexer/embedding.py::embed_nodes",
+        "indexer/embedding.py::embed_query",
+        "indexer/embedding.py::_call_embedding_api"
+      ]
+    },
+    "indexer/git.py": {
+      "hash": "sha256:88bd9486adbf033a346857f8be06987fded842e9cc70baf7cd93f408d24c802e",
+      "wiki_page": "wiki/indexer.md",
+      "component_ids": [
+        "indexer/git.py::_run",
+        "indexer/git.py::current_commit",
+        "indexer/git.py::current_branch",
+        "indexer/git.py::staged_files",
+        "indexer/git.py::changed_files_since",
+        "indexer/git.py::all_tracked_files",
+        "indexer/git.py::is_git_repo"
+      ]
+    },
+    "indexer/go_parser.py": {
+      "hash": "sha256:e7db8147778aab66a740fe4d13612fe539f97ce439fee3dfd01d60a9c659ba63",
+      "wiki_page": "wiki/indexer.md",
+      "component_ids": [
+        "indexer/go_parser.py::_get_go_language",
+        "indexer/go_parser.py::_extract_go_doc",
+        "indexer/go_parser.py::_extract_imports",
+        "indexer/go_parser.py::_extract_calls",
+        "indexer/go_parser.py::_get_receiver",
+        "indexer/go_parser.py::_get_name",
+        "indexer/go_parser.py::parse_go_file",
+        "indexer/go_parser.py::visit",
+        "indexer/go_parser.py::visit",
+        "indexer/go_parser.py::visit"
+      ]
+    },
+    "indexer/grouper.py": {
+      "hash": "sha256:f0fdde6130d3e51188db1bf25d7cab227de65478f69b917a3777b6880ec82aad",
+      "wiki_page": "wiki/indexer.md",
+      "component_ids": [
+        "indexer/grouper.py::density_group",
+        "indexer/grouper.py::folder_of",
+        "indexer/grouper.py::prefixes",
+        "indexer/grouper.py::resolve_group"
+      ]
+    },
+    "indexer/hooks.py": {
+      "hash": "sha256:444cfc253fd4eea452d1e9984611620e858c0d3769378ecbb65d737dc06f769b",
+      "wiki_page": "wiki/indexer.md",
+      "component_ids": [
+        "indexer/hooks.py::_hook_command",
+        "indexer/hooks.py::_hook_script_fresh",
+        "indexer/hooks.py::_hook_script_append",
+        "indexer/hooks.py::install_hook",
+        "indexer/hooks.py::remove_hook"
+      ]
+    },
+    "indexer/indexing.py": {
+      "hash": "sha256:551dd58add0ed68749684aca446d4132bf210ad4e6db41c1a39a9d0f228d7680",
+      "wiki_page": "wiki/indexer.md",
+      "component_ids": [
+        "indexer/indexing.py::cross_reference",
+        "indexer/indexing.py::load_existing_nodes",
+        "indexer/indexing.py::parse_candidates",
+        "indexer/indexing.py::build_batches",
+        "indexer/indexing.py::write_wiki_pages",
+        "indexer/indexing.py::write_index_and_skill",
+        "indexer/indexing.py::update_manifest",
+        "indexer/indexing.py::upsert_vectors"
+      ]
+    },
+    "indexer/java_parser.py": {
+      "hash": "sha256:c6e714580da5272fa60a099c32675041255fa801a6c02e4c8da76be9a58211c0",
+      "wiki_page": "wiki/indexer.md",
+      "component_ids": [
+        "indexer/java_parser.py::_get_java_language",
+        "indexer/java_parser.py::_extract_javadoc",
+        "indexer/java_parser.py::_extract_imports",
+        "indexer/java_parser.py::_extract_calls",
+        "indexer/java_parser.py::_get_name",
+        "indexer/java_parser.py::_get_type_name",
+        "indexer/java_parser.py::parse_java_file",
+        "indexer/java_parser.py::visit",
+        "indexer/java_parser.py::visit",
+        "indexer/java_parser.py::visit"
+      ]
+    },
+    "indexer/js_parser.py": {
+      "hash": "sha256:004199ab876390bb1a5c5bfcafbfddb401173fa826a6f83e7d4e940469f165d1",
+      "wiki_page": "wiki/indexer.md",
+      "component_ids": [
+        "indexer/js_parser.py::_get_language",
+        "indexer/js_parser.py::_extract_jsdoc",
+        "indexer/js_parser.py::_extract_imports",
+        "indexer/js_parser.py::_extract_calls",
+        "indexer/js_parser.py::_get_name",
+        "indexer/js_parser.py::parse_js_file",
+        "indexer/js_parser.py::visit",
+        "indexer/js_parser.py::visit",
+        "indexer/js_parser.py::visit"
+      ]
+    },
+    "indexer/llm.py": {
+      "hash": "sha256:251536fe2b54ae3735fd1e1ad4e33812b0ac59b5080d8360c3b3c322952919dd",
+      "wiki_page": "wiki/indexer.md",
+      "component_ids": [
+        "indexer/llm.py::_is_anthropic",
+        "indexer/llm.py::_resolve_api_key",
+        "indexer/llm.py::_litellm_kwargs",
+        "indexer/llm.py::_litellm_completion",
+        "indexer/llm.py::_anthropic_completion",
+        "indexer/llm.py::_should_use_anthropic_sdk",
+        "indexer/llm.py::_parse_llm_json",
+        "indexer/llm.py::describe_nodes_batch",
+        "indexer/llm.py::describe_nodes",
+        "indexer/llm.py::describe_files",
+        "indexer/llm.py::deep_enrich_page",
+        "indexer/llm.py::deep_enrich_pages",
+        "indexer/llm.py::deep_enrich_index",
+        "indexer/llm.py::rewrite_query",
+        "indexer/llm.py::synthesize_commit_message"
+      ]
+    },
+    "indexer/manifest.py": {
+      "hash": "sha256:9fb8b9fc0d93f0ed3a9417d1dd3fe10d6e7056b1688ededb5257c2047ab32f08",
+      "wiki_page": "wiki/indexer.md",
+      "component_ids": [
+        "indexer/manifest.py::FileEntry",
+        "indexer/manifest.py::Manifest",
+        "indexer/manifest.py::Manifest.stale_files",
+        "indexer/manifest.py::Manifest.removed_files",
+        "indexer/manifest.py::compute_hash",
+        "indexer/manifest.py::load_manifest",
+        "indexer/manifest.py::save_manifest"
+      ]
+    },
+    "indexer/mcp_server.py": {
+      "hash": "sha256:2253226847ecc2aeda550ec243b3bbf7e2689fc63343f3ab3a35675b254b1f57",
+      "wiki_page": "wiki/indexer.md",
+      "component_ids": [
+        "indexer/mcp_server.py::_apply_mcp_auth",
+        "indexer/mcp_server.py::create_server",
+        "indexer/mcp_server.py::create_api_server",
+        "indexer/mcp_server.py::_patched_method",
+        "indexer/mcp_server.py::search_symbols_tool",
+        "indexer/mcp_server.py::trace_call_tool",
+        "indexer/mcp_server.py::get_source_context_tool",
+        "indexer/mcp_server.py::_api_get",
+        "indexer/mcp_server.py::_api_post",
+        "indexer/mcp_server.py::list_repos",
+        "indexer/mcp_server.py::search_symbols_tool",
+        "indexer/mcp_server.py::trace_call_tool",
+        "indexer/mcp_server.py::get_source_context_tool",
+        "indexer/mcp_server.py::_MCPAuthMiddleware",
+        "indexer/mcp_server.py::_MCPAuthMiddleware.dispatch"
+      ]
+    },
+    "indexer/rest_api.py": {
+      "hash": "sha256:6c9c42c86ed177a09babe0a9fc1e812a93b3a0e75eaf98b2f4442f2cef629c66",
+      "wiki_page": "wiki/indexer.md",
+      "component_ids": [
+        "indexer/rest_api.py::_get_repo_lock",
+        "indexer/rest_api.py::TaskStore",
+        "indexer/rest_api.py::TaskStore.__init__",
+        "indexer/rest_api.py::TaskStore._cleanup",
+        "indexer/rest_api.py::TaskStore.create",
+        "indexer/rest_api.py::TaskStore.get",
+        "indexer/rest_api.py::TaskStore.update",
+        "indexer/rest_api.py::_detect_default_branch",
+        "indexer/rest_api.py::RepoRegistry",
+        "indexer/rest_api.py::RepoRegistry.__init__",
+        "indexer/rest_api.py::RepoRegistry._save",
+        "indexer/rest_api.py::RepoRegistry._load",
+        "indexer/rest_api.py::RepoRegistry.register",
+        "indexer/rest_api.py::RepoRegistry.unregister",
+        "indexer/rest_api.py::RepoRegistry.get",
+        "indexer/rest_api.py::RepoRegistry.list_names",
+        "indexer/rest_api.py::register_repo",
+        "indexer/rest_api.py::task_status",
+        "indexer/rest_api.py::validate_repo",
+        "indexer/rest_api.py::sync_repo",
+        "indexer/rest_api.py::rebuild_repo",
+        "indexer/rest_api.py::sync_all_branches",
+        "indexer/rest_api.py::rebuild_all_branches",
+        "indexer/rest_api.py::_run_indexing_pipeline",
+        "indexer/rest_api.py::_run_rebuild_task",
+        "indexer/rest_api.py::_run_sync_task",
+        "indexer/rest_api.py::_run_register_task",
+        "indexer/rest_api.py::_run_register_task_inner",
+        "indexer/rest_api.py::unregister_repo",
+        "indexer/rest_api.py::search_symbols",
+        "indexer/rest_api.py::trace_call",
+        "indexer/rest_api.py::get_source_context",
+        "indexer/rest_api.py::list_repos",
+        "indexer/rest_api.py::health",
+        "indexer/rest_api.py::repo_detail",
+        "indexer/rest_api.py::multi_repo_skill",
+        "indexer/rest_api.py::_get_webhook_url",
+        "indexer/rest_api.py::_webhook_sign",
+        "indexer/rest_api.py::_verify_webhook_sign",
+        "indexer/rest_api.py::webhook_by_name",
+        "indexer/rest_api.py::create_app",
+        "indexer/rest_api.py::_index_page",
+        "indexer/rest_api.py::_inject_credentials",
+        "indexer/rest_api.py::_sanitize_error",
+        "indexer/rest_api.py::_store_credentials",
+        "indexer/rest_api.py::_resolve_repos",
+        "indexer/rest_api.py::_trace_call_impl",
+        "indexer/rest_api.py::_expand_with_call_graph",
+        "indexer/rest_api.py::_parse_json_list",
+        "indexer/rest_api.py::_parse_body",
+        "indexer/rest_api.py::_run_all",
+        "indexer/rest_api.py::_run_all",
+        "indexer/rest_api.py::_AuthMiddleware",
+        "indexer/rest_api.py::_AuthMiddleware.dispatch"
+      ]
+    },
+    "indexer/retrieval.py": {
+      "hash": "sha256:a00f24fd0ad11d637d92cd43734f9b3fd2e00dad07aabf64333f945612b8438b",
+      "wiki_page": "wiki/indexer.md",
+      "component_ids": [
+        "indexer/retrieval.py::search_symbols",
+        "indexer/retrieval.py::trace_call",
+        "indexer/retrieval.py::get_source_context",
+        "indexer/retrieval.py::_expand_with_call_graph",
+        "indexer/retrieval.py::_parse_json_list"
+      ]
+    },
+    "indexer/ruby_parser.py": {
+      "hash": "sha256:1e580ab8c168d1adbd235bae78706668dbd2758ab0ded31588414922ea6b532e",
+      "wiki_page": "wiki/indexer.md",
+      "component_ids": [
+        "indexer/ruby_parser.py::_get_ruby_language",
+        "indexer/ruby_parser.py::_extract_ruby_doc",
+        "indexer/ruby_parser.py::_extract_imports",
+        "indexer/ruby_parser.py::_extract_calls",
+        "indexer/ruby_parser.py::_get_name",
+        "indexer/ruby_parser.py::parse_ruby_file",
+        "indexer/ruby_parser.py::visit",
+        "indexer/ruby_parser.py::visit",
+        "indexer/ruby_parser.py::visit"
+      ]
+    },
+    "indexer/rust_parser.py": {
+      "hash": "sha256:9958527ef6b4eca3060268db5126aa19c7c6e1c83373a7f04ef27c390f762876",
+      "wiki_page": "wiki/indexer.md",
+      "component_ids": [
+        "indexer/rust_parser.py::_get_rust_language",
+        "indexer/rust_parser.py::_extract_rust_doc",
+        "indexer/rust_parser.py::_extract_imports",
+        "indexer/rust_parser.py::_extract_calls",
+        "indexer/rust_parser.py::_get_name",
+        "indexer/rust_parser.py::parse_rust_file",
+        "indexer/rust_parser.py::visit",
+        "indexer/rust_parser.py::visit",
+        "indexer/rust_parser.py::visit"
+      ]
+    },
+    "indexer/utils.py": {
+      "hash": "sha256:61adbdcd3c24ec7ae2d2f465353bb4c13583b89bc17fa7e818db14ba13783f5d",
+      "wiki_page": "wiki/indexer.md",
+      "component_ids": [
+        "indexer/utils.py::_rel",
+        "indexer/utils.py::_node_text",
+        "indexer/utils.py::load_env_file"
+      ]
+    },
+    "indexer/vector_store.py": {
+      "hash": "sha256:ed32993f71cab63fb69ceda8d8866d66e28572d48a7510ca4a7e3119dbb8572b",
+      "wiki_page": "wiki/indexer.md",
+      "component_ids": [
+        "indexer/vector_store.py::_get_client",
+        "indexer/vector_store.py::_get_or_create_collection",
+        "indexer/vector_store.py::upsert_nodes",
+        "indexer/vector_store.py::search",
+        "indexer/vector_store.py::get_by_ids",
+        "indexer/vector_store.py::delete_by_files",
+        "indexer/vector_store.py::_build_doc",
+        "indexer/vector_store.py::_build_meta",
+        "indexer/vector_store.py::json_dumps_compact"
+      ]
+    },
+    "indexer/wiki.py": {
+      "hash": "sha256:ff192d49df62d7f9e0b9c664b4cdc9469d3b2892000ac7af5aa2ee4d118e36c9",
+      "wiki_page": "wiki/indexer.md",
+      "component_ids": [
+        "indexer/wiki.py::PageContext",
+        "indexer/wiki.py::IndexEntry",
+        "indexer/wiki.py::_jinja_env",
+        "indexer/wiki.py::build_page",
+        "indexer/wiki.py::build_index",
+        "indexer/wiki.py::sanitize_group_label",
+        "indexer/wiki.py::write_page",
+        "indexer/wiki.py::write_index"
+      ]
+    },
+    "tests/__init__.py": {
+      "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "wiki_page": "wiki/tests.md",
+      "component_ids": []
+    },
+    "tests/fixtures/sample_java/App.java": {
+      "hash": "sha256:6a12cb3e0f01fca00020c86dd27771ec0209af77ad0ba2b4e170ec97fae536f1",
+      "wiki_page": "wiki/tests_fixtures.md",
+      "component_ids": [
+        "tests/fixtures/sample_java/App.java::App",
+        "tests/fixtures/sample_java/App.java::App.addUser",
+        "tests/fixtures/sample_java/App.java::App.getUserCount",
+        "tests/fixtures/sample_java/App.java::UserProfile",
+        "tests/fixtures/sample_java/App.java::getDisplayName",
+        "tests/fixtures/sample_java/App.java::getRole",
+        "tests/fixtures/sample_java/App.java::Role"
+      ]
+    },
+    "tests/fixtures/sample_py/auth.py": {
+      "hash": "sha256:21deaa3f6b8ca9142669d72baaaebf2c2f742aeebd06e6b7e3c6a2de32dddb4b",
+      "wiki_page": "wiki/tests_fixtures.md",
+      "component_ids": [
+        "tests/fixtures/sample_py/auth.py::TokenValidator",
+        "tests/fixtures/sample_py/auth.py::TokenValidator.refresh",
+        "tests/fixtures/sample_py/auth.py::require_auth",
+        "tests/fixtures/sample_py/auth.py::wrapper"
+      ]
+    },
+    "tests/fixtures/sample_ruby/app.rb": {
+      "hash": "sha256:31c51abca5cfe27a417a4de40ff407c032e15fb3feb7376987110911a687c65f",
+      "wiki_page": "wiki/tests_fixtures.md",
+      "component_ids": [
+        "tests/fixtures/sample_ruby/app.rb::Router",
+        "tests/fixtures/sample_ruby/app.rb::Router.initialize",
+        "tests/fixtures/sample_ruby/app.rb::Router.add_route",
+        "tests/fixtures/sample_ruby/app.rb::Router.dispatch",
+        "tests/fixtures/sample_ruby/app.rb::Parser",
+        "tests/fixtures/sample_ruby/app.rb::parse"
+      ]
+    },
+    "tests/fixtures/sample_rust/lib.rs": {
+      "hash": "sha256:9f3db26e0383354b4a9c4821148da31659ac15fb97a417557f47cf23699e2a22",
+      "wiki_page": "wiki/tests_fixtures.md",
+      "component_ids": [
+        "tests/fixtures/sample_rust/lib.rs::User",
+        "tests/fixtures/sample_rust/lib.rs::age_difference",
+        "tests/fixtures/sample_rust/lib.rs::User.new",
+        "tests/fixtures/sample_rust/lib.rs::User.is_adult",
+        "tests/fixtures/sample_rust/lib.rs::ToJson",
+        "tests/fixtures/sample_rust/lib.rs::ToJson.to_json",
+        "tests/fixtures/sample_rust/lib.rs::User.to_json",
+        "tests/fixtures/sample_rust/lib.rs::Status",
+        "tests/fixtures/sample_rust/lib.rs::UserResult"
+      ]
+    },
+    "tests/test_ast_parser.py": {
+      "hash": "sha256:3c159f827de9afd11b044e6d1d1710757d774e4d7ac36a7a5bfd192bccf1b121",
+      "wiki_page": "wiki/tests.md",
+      "component_ids": [
+        "tests/test_ast_parser.py::test_parse_returns_nodes",
+        "tests/test_ast_parser.py::test_function_node",
+        "tests/test_ast_parser.py::test_method_node",
+        "tests/test_ast_parser.py::test_class_node",
+        "tests/test_ast_parser.py::test_docstring_extracted",
+        "tests/test_ast_parser.py::test_imports_extracted",
+        "tests/test_ast_parser.py::test_calls_extracted",
+        "tests/test_ast_parser.py::test_cache_roundtrip",
+        "tests/test_ast_parser.py::test_rust_parse_returns_nodes",
+        "tests/test_ast_parser.py::test_rust_function_node",
+        "tests/test_ast_parser.py::test_rust_struct_node",
+        "tests/test_ast_parser.py::test_rust_method_node",
+        "tests/test_ast_parser.py::test_rust_trait_node",
+        "tests/test_ast_parser.py::test_rust_trait_method_spec",
+        "tests/test_ast_parser.py::test_rust_enum_node",
+        "tests/test_ast_parser.py::test_rust_type_alias",
+        "tests/test_ast_parser.py::test_rust_docstring_extracted",
+        "tests/test_ast_parser.py::test_rust_imports_extracted",
+        "tests/test_ast_parser.py::test_java_parse_returns_nodes",
+        "tests/test_ast_parser.py::test_java_class_node",
+        "tests/test_ast_parser.py::test_java_method_node",
+        "tests/test_ast_parser.py::test_java_interface_node",
+        "tests/test_ast_parser.py::test_java_enum_node",
+        "tests/test_ast_parser.py::test_java_javadoc_extracted",
+        "tests/test_ast_parser.py::test_java_imports_extracted",
+        "tests/test_ast_parser.py::test_ruby_parse_returns_nodes",
+        "tests/test_ast_parser.py::test_ruby_class_node",
+        "tests/test_ast_parser.py::test_ruby_method_node",
+        "tests/test_ast_parser.py::test_ruby_module_node",
+        "tests/test_ast_parser.py::test_ruby_function_node",
+        "tests/test_ast_parser.py::test_ruby_docstring_extracted"
+      ]
+    },
+    "tests/test_config.py": {
+      "hash": "sha256:5f4a8569d655c6511fef1714edd44c54153e8d7ba202014c4998edf59cd32ede",
+      "wiki_page": "wiki/tests.md",
+      "component_ids": [
+        "tests/test_config.py::_clean_env",
+        "tests/test_config.py::_restore_env",
+        "tests/test_config.py::test_load_defaults",
+        "tests/test_config.py::test_save_and_reload",
+        "tests/test_config.py::test_partial_toml_uses_defaults"
+      ]
+    },
+    "tests/test_grouper.py": {
+      "hash": "sha256:19bc74dde19a1ed61e6678f81719f36a85c221eddca6fea25c965b9524919ef2",
+      "wiki_page": "wiki/tests.md",
+      "component_ids": [
+        "tests/test_grouper.py::test_sparse_folders_merge_to_parent",
+        "tests/test_grouper.py::test_dense_folder_gets_own_page",
+        "tests/test_grouper.py::test_different_folders_get_separate_groups",
+        "tests/test_grouper.py::test_deep_sparse_merges_upward",
+        "tests/test_grouper.py::test_root_level_files",
+        "tests/test_grouper.py::test_returns_all_files",
+        "tests/test_grouper.py::test_root_files_count_correctly"
+      ]
+    },
+    "tests/test_manifest.py": {
+      "hash": "sha256:a0a292f3625cf43f5dd1b0784dfaa081939cf871b0a2510d0f785eb8fd13e21c",
+      "wiki_page": "wiki/tests.md",
+      "component_ids": [
+        "tests/test_manifest.py::test_compute_hash_stable",
+        "tests/test_manifest.py::test_empty_manifest_on_missing",
+        "tests/test_manifest.py::test_save_and_reload",
+        "tests/test_manifest.py::test_stale_files_detected",
+        "tests/test_manifest.py::test_fresh_file_not_stale",
+        "tests/test_manifest.py::test_load_manifest_missing_component_ids"
+      ]
+    },
+    "tests/test_wiki.py": {
+      "hash": "sha256:b22e150879d6fd91b222affe337863abddf579d7faaaf99b7574db2672335c17",
+      "wiki_page": "wiki/tests.md",
+      "component_ids": [
+        "tests/test_wiki.py::_make_node",
+        "tests/test_wiki.py::test_build_page_contains_symbol",
+        "tests/test_wiki.py::test_build_page_contains_calls",
+        "tests/test_wiki.py::test_build_page_contains_called_by",
+        "tests/test_wiki.py::test_build_page_no_agent_hints",
+        "tests/test_wiki.py::test_build_index_contains_page",
+        "tests/test_wiki.py::test_write_page_creates_file"
+      ]
+    }
+  }
+}

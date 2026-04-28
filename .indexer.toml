@@ -1,0 +1,33 @@
+[llm]
+provider = "openai/deepseek-v4-flash"
+api_key_env = "DASHSCOPE_API_KEY"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+[indexer]
+wiki_dir = "wiki"
+ignore = [
+    "node_modules",
+    ".venv",
+    "dist",
+    "build",
+    "__pycache__",
+    "*.test.*",
+]
+max_tokens_per_batch = 8000
+merge_threshold = 2
+
+[hooks]
+pre_commit = true
+synthesize_commit_message = true
+deep = true
+
+[embedding]
+provider = "dashscope/text-embedding-v4"
+api_key_env = "DASHSCOPE_API_KEY"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+dimensions = 1024
+
+[vector_store]
+backend = "chromadb"
+persist_dir = ".indexer/vector_db"
+collection_name = "repo_code"
