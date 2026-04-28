@@ -7,10 +7,10 @@ from indexer.config import Config, load_config
 
 
 def _apply_mcp_auth(mcp: FastMCP, mcp_api_key: str | None) -> None:
-    _orig_app = mcp.streamable_http_app
+    _orig_method = mcp.streamable_http_app
 
-    def _patched_app():
-        app = _orig_app()
+    def _patched_method(_self=None):
+        app = _orig_method()
         from starlette.middleware.trustedhost import TrustedHostMiddleware
         app.add_middleware(TrustedHostMiddleware, allowed_hosts=["*"])
         if mcp_api_key:
@@ -27,7 +27,7 @@ def _apply_mcp_auth(mcp: FastMCP, mcp_api_key: str | None) -> None:
             app.add_middleware(_MCPAuthMiddleware)
         return app
 
-    mcp.streamable_http_app = _patched_app
+    mcp.streamable_http_app = _patched_method
 
 
 def create_server(repo_root: Path | None = None, mcp_api_key: str | None = None) -> FastMCP:
