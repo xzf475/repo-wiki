@@ -1,6 +1,6 @@
 {
-  "last_indexed_commit": "5ead16e2cf5369f92975f55ef598bfed28fa0f34",
-  "indexed_at": "2026-04-28T10:16:49.348822+00:00",
+  "last_indexed_commit": "b7afe16298b8468527cd1be788e330f183a8e900",
+  "indexed_at": "2026-04-28T12:59:21.370618+00:00",
   "files": {
     "indexer/__init__.py": {
       "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -214,8 +214,8 @@
       ]
     },
     "indexer/rest_api.py": {
-      "hash": "sha256:6c9c42c86ed177a09babe0a9fc1e812a93b3a0e75eaf98b2f4442f2cef629c66",
-      "wiki_page": "wiki/indexer.md",
+      "hash": "sha256:4344f4e2e8cfec84927bc36b9ed57712109a32bf984405fac19ed17be161ae82",
+      "wiki_page": "wiki/root.md",
       "component_ids": [
         "indexer/rest_api.py::_get_repo_lock",
         "indexer/rest_api.py::TaskStore",

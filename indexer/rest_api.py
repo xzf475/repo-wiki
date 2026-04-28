@@ -1040,8 +1040,6 @@ async def search_symbols(request: Request) -> JSONResponse:
             if len(repo_branches) > 1:
                 branch_conditions = [{"branch": b} for b in repo_branches]
                 where_clause = {"$or": branch_conditions} if branch_conditions else None
-            elif repo_branches:
-                where_clause = {"branch": repo_branches[0]}
             else:
                 where_clause = None
             for qv in all_query_vectors:

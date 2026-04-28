@@ -20,42 +20,25 @@ The wiki captures structure, relationships, and constraints in a fraction of the
 
 ## Stats
 
-- **301 symbols** across **32 files** — indexed 2026-04-28 @ `5ead16e2`
-- Wiki: `wiki/` — 3 page(s)
+- **54 symbols** across **1 files** — indexed 2026-04-28 @ `b7afe162`
+- Wiki: `wiki/` — 1 page(s)
 - Manifest: `.indexer/manifest.json` — maps every file to its wiki page and component IDs
 
 ## System Overview
 
-The system is a multi-language code indexer and semantic retrieval engine. It parses source code into AST nodes via language-specific parsers (indexer/ast_parser.py, rust_parser.py, java_parser.py, ruby_parser.py, js_parser.py, go_parser.py), groups nodes into pages (grouper.py), generates embeddings (embedding.py), and stores them in a vector store (vector_store.py). Indexing state is managed by Manifest (manifest.py) with git integration (git.py) for incremental updates, and a REST API (rest_api.py) and MCP server (mcp_server.py) expose search, symbol tracing, and context retrieval.
+This system is a REST API server (likely built on FastAPI) that manages indexing tasks for code repositories. The core components are `TaskStore`, which handles the lifecycle of background tasks (create, get, cleanup); `RepoRegistry`, which persists repository configurations (register, unregister, get, list); and `_AuthMiddleware`, which provides token-based authentication for endpoints. The API exposes endpoints for registering/unregistering repos, triggering sync/rebuild tasks (single or all branches), querying task status, and handling webhook events, all orchestrated through task creation and registry lookups.
 ## Key Request Flows
-- CLI index command → indexer/cli.py → git.py (clone/pull) → indexing.py → language-specific parsers → grouper.py → manifest.py → embedding.py → vector_store.py → wiki.py
-- REST API search → indexer/rest_api.py → retrieval.py → vector_store.py (query) → return results with page context
-- MCP trace_call_tool → indexer/mcp_server.py → retrieval.py → indexing.py → parser node cross-references → call graph response
-- Webhook sync → indexer/hooks.py → git.py (pull) → _index_page → parsers → grouping → embedding → update manifest and vector store
-- LLM deep enrichment → indexer/llm.py → retrieval.py (get symbol context) → LLM generates agent hints → update page content in wiki.py
+- register_repo → _run_register_task → RepoRegistry.register → TaskStore.create → task execution
+- sync_repo → TaskStore.create → sync handler → RepoRegistry.get → _run_all
+- task_status → TaskStore.get → return status
+- webhook_by_name → validate (auth?) → RepoRegistry.get → trigger sync/rebuild task
+- _AuthMiddleware.dispatch → token validation → route handler (e.g., register_repo, list_repos)
 
 ## Wiki Pages
 
 | Page | Covers | Key Entry Points |
 |------|--------|-----------------|
-| [indexer](../wiki/indexer.md) | indexer/ast_parser.py, indexer/cli.py, indexer/config.py, indexer/embedding.py, indexer/git.py, indexer/go_parser.py, indexer/grouper.py, indexer/hooks.py, indexer/indexing.py, indexer/java_parser.py, indexer/js_parser.py, indexer/llm.py, indexer/manifest.py, indexer/mcp_server.py, indexer/rest_api.py, indexer/retrieval.py, indexer/ruby_parser.py, indexer/rust_parser.py, indexer/utils.py, indexer/vector_store.py, indexer/wiki.py | main, init, status, hook, hook_install |
-| [tests_fixtures](../wiki/tests_fixtures.md) | tests/fixtures/sample_java/App.java, tests/fixtures/sample_py/auth.py, tests/fixtures/sample_ruby/app.rb, tests/fixtures/sample_rust/lib.rs | App, App.addUser, App.getUserCount, UserProfile, getDisplayName |
-| [tests](../wiki/tests.md) | tests/test_ast_parser.py, tests/test_config.py, tests/test_grouper.py, tests/test_manifest.py, tests/test_wiki.py | test_parse_returns_nodes, test_function_node, test_method_node, test_class_node, test_docstring_extracted |
-## Critical Constraints (read before editing)
-**indexer**
-- File hash (SHA256) determines re-parse need; unchanged files use cached ASTNode JSON to avoid redundant computation.
-- Embedding API key resolved via environment variable or .env file; if absent, embedding step silently skips (nodes stored without vectors).
-- ASTNode cache is stored in `.indexer/cache/<file_hash>.json`; cache directory auto-added to `.gitignore` on `init`.
-- Language-specific parser selection is based on file extension (e.g., `.py` → python parser, `.js` → js_parser); unsupported extensions are ignored by `_is_indexable`.
-- Indexable files filtered by `ignore` globs in `.indexer.toml`; dot-directories and common build artifacts excluded by default.
-- Vector store (ChromaDB) is ephemeral per index run; wiki markdown pages are the persistent searchable artifact, not the vector DB.
-**tests**
-- Cached nodes are stored as pickled files keyed by file path; cache is invalidated only on file modification time, not content hash, so timestamps must be reliable across runs.
-- Docstring extraction differs per language: Java parses Javadoc comments, Python uses docstring statements, Ruby and Rust use doc comments (///, /**). The parser must strip leading `*` and whitespace uniformly.
-- Rust trait methods are emitted as separate `Node` objects with type `trait_method` and a parent reference to the trait node; they are not nested inside the trait's method list.
-- Imports are always emitted as synthetic `Node` objects of type `Import`; they do not carry docstrings or calls, only a `name` field (the fully qualified import path) and a `line` number.
-- Java enums and interfaces are parsed as `class` nodes with a `kind` field set to `enum` or `interface`; the same unified `Node` structure is used, not separate subtypes.
-- Ruby module nodes are top‑level constructs; inside them, classes and methods are nested by line‑range rather than as child references — consumers must flatten manually if needed.
+| [root](../wiki/root.md) | indexer/rest_api.py | TaskStore, TaskStore.__init__, TaskStore._cleanup, TaskStore.create, TaskStore.get |
 
 ## Workflow — How to Answer Questions About This Codebase
 
