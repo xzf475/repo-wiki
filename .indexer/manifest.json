@@ -1,6 +1,6 @@
 {
-  "last_indexed_commit": "b7afe16298b8468527cd1be788e330f183a8e900",
-  "indexed_at": "2026-04-28T12:59:21.370618+00:00",
+  "last_indexed_commit": "50ff6f37c75bb4f71422cc106db3856a86ed44c3",
+  "indexed_at": "2026-04-28T14:15:16.756386+00:00",
   "files": {
     "indexer/__init__.py": {
       "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -22,8 +22,8 @@
       ]
     },
     "indexer/cli.py": {
-      "hash": "sha256:aa931c9714d2dc160e3b1a4af35907f2435d0b92b25a4d283ae27d17cad19887",
-      "wiki_page": "wiki/indexer.md",
+      "hash": "sha256:ee9b5af3c31b0aa15ae6dc2c285d4c430d83dd79e6a9e30e399ed238c33d60c6",
+      "wiki_page": "wiki/root.md",
       "component_ids": [
         "indexer/cli.py::main",
         "indexer/cli.py::init",

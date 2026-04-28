@@ -2,17 +2,17 @@
 
 ## System Overview
 
-This system is a REST API server (likely built on FastAPI) that manages indexing tasks for code repositories. The core components are `TaskStore`, which handles the lifecycle of background tasks (create, get, cleanup); `RepoRegistry`, which persists repository configurations (register, unregister, get, list); and `_AuthMiddleware`, which provides token-based authentication for endpoints. The API exposes endpoints for registering/unregistering repos, triggering sync/rebuild tasks (single or all branches), querying task status, and handling webhook events, all orchestrated through task creation and registry lookups.
+The system is a CLI-based indexer tool (indexer/cli.py) with subcommands for initialization, status monitoring, git hook management (install, remove), and a built-in API server (serve, serve_api). Its architecture likely comprises a CLI entry point that dispatches to internal modules for configuration, hook scripts, and a REST API to expose index data. The hook mechanism integrates with version control (e.g., Git pre-commit) to automatically update the index, while the serve module provides real-time query access. Overall, the tool maintains a local index file and coordinates between CLI commands, hook triggers, and an HTTP API.
 ## Key Flows
-- register_repo → _run_register_task → RepoRegistry.register → TaskStore.create → task execution
-- sync_repo → TaskStore.create → sync handler → RepoRegistry.get → _run_all
-- task_status → TaskStore.get → return status
-- webhook_by_name → validate (auth?) → RepoRegistry.get → trigger sync/rebuild task
-- _AuthMiddleware.dispatch → token validation → route handler (e.g., register_repo, list_repos)
+- init -> config creation -> hook installation (hook_install) -> index setup
+- git pre-commit hook triggered -> hook module -> index update -> status check
+- serve -> API server start -> index file read -> endpoint handlers (serve_api)
+- status -> read index file -> print summary
+- hook_remove -> unlink hook scripts -> clean config
 
 ## Structure
 | Wiki Page | Covers | Entry Points |
 |-----------|--------|--------------|
-| wiki/root.md | indexer/rest_api.py | TaskStore, TaskStore.__init__, TaskStore._cleanup, TaskStore.create, TaskStore.get, TaskStore.update, RepoRegistry, RepoRegistry.__init__, RepoRegistry._save, RepoRegistry._load, RepoRegistry.register, RepoRegistry.unregister, RepoRegistry.get, RepoRegistry.list_names, register_repo, task_status, validate_repo, sync_repo, rebuild_repo, sync_all_branches, rebuild_all_branches, _run_register_task, unregister_repo, list_repos, health, repo_detail, multi_repo_skill, webhook_by_name, _index_page, _run_all, _run_all, _AuthMiddleware, _AuthMiddleware.dispatch |
+| wiki/root.md | indexer/cli.py | main, init, status, hook, hook_install, hook_remove, serve, serve_api |
 ## Last Indexed
-Commit: b7afe16298b8468527cd1be788e330f183a8e900 — 2026-04-28
+Commit: 50ff6f37c75bb4f71422cc106db3856a86ed44c3 — 2026-04-28
