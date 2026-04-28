@@ -1,6 +1,6 @@
 {
-  "last_indexed_commit": "19dfa17df824ef39a5a521ee581e51d7e39db627",
-  "indexed_at": "2026-04-28T15:33:22.054335+00:00",
+  "last_indexed_commit": "72695493cfab23ad693127817e79f16a5325ea40",
+  "indexed_at": "2026-04-28T18:09:19.010797+00:00",
   "files": {
     "indexer/__init__.py": {
       "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -214,7 +214,7 @@
       ]
     },
     "indexer/rest_api.py": {
-      "hash": "sha256:4344f4e2e8cfec84927bc36b9ed57712109a32bf984405fac19ed17be161ae82",
+      "hash": "sha256:31ad9f392fdc3a07963957b4862f8ece57397d63d31833823fe88276f99294ed",
       "wiki_page": "wiki/root.md",
       "component_ids": [
         "indexer/rest_api.py::_get_repo_lock",
@@ -225,6 +225,7 @@
         "indexer/rest_api.py::TaskStore.get",
         "indexer/rest_api.py::TaskStore.update",
         "indexer/rest_api.py::_detect_default_branch",
+        "indexer/rest_api.py::_discover_remote_branches",
         "indexer/rest_api.py::RepoRegistry",
         "indexer/rest_api.py::RepoRegistry.__init__",
         "indexer/rest_api.py::RepoRegistry._save",

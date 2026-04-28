@@ -231,7 +231,7 @@ npx skills add /path/to/repo-wiki -g -y
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/repos` | GET | List all registered repos |
-| `/register` | POST | Register & index a repo. Accepts `branches` array or `branch` string, defaults to `["main"]` |
+| `/register` | POST | Register and index a repo. Supports `branches` array, `branch` string, or `branch_rule` glob pattern (e.g. `release/*`, `feature/*`). Defaults to `["main"]` |
 | `/sync` | POST | Sync a specific branch, optional `branch` param |
 | `/sync-all` | POST | Sync all registered branches |
 | `/rebuild` | POST | Full rebuild of a specific branch |

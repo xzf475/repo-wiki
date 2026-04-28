@@ -1,6 +1,7 @@
 # indexer/rest_api.py
 from __future__ import annotations
 import asyncio
+import fnmatch
 import json
 import logging
 import os
@@ -138,6 +139,30 @@ def _detect_default_branch(repo_root: Path) -> str:
     return "main"
 
 
+def _discover_remote_branches(url: str, pattern: str) -> list[str]:
+    """Use git ls-remote to find remote branches matching a glob pattern."""
+    try:
+        result = subprocess.run(
+            ["git", "ls-remote", "--heads", url],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            return []
+        branches = []
+        for line in result.stdout.splitlines():
+            if "\t" not in line:
+                continue
+            ref = line.split("\t")[-1].strip()
+            if ref.startswith("refs/heads/"):
+                branch_name = ref[len("refs/heads/"):]
+                if fnmatch.fnmatch(branch_name, pattern):
+                    branches.append(branch_name)
+        return branches
+    except Exception as e:
+        logger.warning("Failed to discover remote branches for %s: %s", url, e)
+        return []
+
+
 class RepoRegistry:
     def __init__(self, repos_dir: Path | None = None):
         self.repos: dict[str, dict] = {}
@@ -151,6 +176,7 @@ class RepoRegistry:
                 "root": str(info["root"]),
                 "url": info.get("url", ""),
                 "branches": info.get("branches", []),
+                "branch_rule": info.get("branch_rule", ""),
             }
             for name, info in self.repos.items()
         }
@@ -166,9 +192,11 @@ class RepoRegistry:
                     path_str = entry
                     url = ""
                     branches = []
+                    branch_rule = ""
                 else:
                     path_str = entry.get("root", "")
                     url = entry.get("url", "")
+                    branch_rule = entry.get("branch_rule", "")
                     raw = entry.get("branches", entry.get("branch", ""))
                     if isinstance(raw, str):
                         branches = [raw] if raw else []
@@ -180,17 +208,18 @@ class RepoRegistry:
                     branches = [detected] if detected else ["main"]
                 if repo_root.exists():
                     cfg = load_config(repo_root)
-                    self.repos[name] = {"root": repo_root, "config": cfg, "url": url, "branches": branches}
+                    self.repos[name] = {"root": repo_root, "config": cfg, "url": url, "branches": branches, "branch_rule": branch_rule}
         except (json.JSONDecodeError, OSError) as e:
             logger.warning("Failed to load repo registry: %s", e)
 
-    def register(self, name: str, repo_root: Path, url: str = "", branches: list[str] | None = None):
+    def register(self, name: str, repo_root: Path, url: str = "", branches: list[str] | None = None, branch_rule: str = ""):
         cfg = load_config(repo_root)
         self.repos[name] = {
             "root": repo_root,
             "config": cfg,
             "url": url,
             "branches": branches or [],
+            "branch_rule": branch_rule,
         }
         self._save()
         logger.info(f"Registered repo '{name}' at {repo_root}")
@@ -221,6 +250,7 @@ async def register_repo(request: Request) -> JSONResponse:
     token = body.get("token", "")
     branch = body.get("branch", "")
     branches = body.get("branches", body.get("branches", []))
+    branch_rule = body.get("branch_rule", "")
     skip_deep = body.get("skip_deep", True)
     force_reindex = body.get("force_reindex", False)
 
@@ -228,6 +258,13 @@ async def register_repo(request: Request) -> JSONResponse:
         branches = [branch]
     if not branches:
         branches = body.get("branches", [])
+
+    # If a branch rule is specified, discover matching branches from remote
+    if branch_rule and not branches:
+        discovered = _discover_remote_branches(url, branch_rule)
+        if not discovered:
+            return JSONResponse({"error": f"no remote branches match pattern '{branch_rule}'"}, status_code=400)
+        branches = discovered
 
     if not url:
         return JSONResponse({"error": "url is required"}, status_code=400)
@@ -256,15 +293,18 @@ async def register_repo(request: Request) -> JSONResponse:
     clone_dir = registry.repos_dir / name
     clone_dir.mkdir(parents=True, exist_ok=True)
     branches_list = [branch] if branch else branches or ["main"]
-    registry.register(name, clone_dir, url=url, branches=branches_list)
+    registry.register(name, clone_dir, url=url, branches=branches_list, branch_rule=branch_rule)
 
     webhook_url = _get_webhook_url(name)
+
+    # Use the first branch for initial clone, but register all branches
+    first_branch = branches_list[0] if branches_list else ""
 
     loop = asyncio.get_running_loop()
     loop.run_in_executor(
         None,
         _run_register_task,
-        task_id, name, url, username, password, token, branch, skip_deep, force_reindex,
+        task_id, name, url, username, password, token, first_branch, skip_deep, force_reindex, branch_rule,
     )
 
     return JSONResponse({
@@ -272,6 +312,7 @@ async def register_repo(request: Request) -> JSONResponse:
         "name": name,
         "status": "pending",
         "branches": branches_list,
+        "branch_rule": branch_rule or None,
         "webhook_url": webhook_url,
         "webhook_hint": "Configure this URL in your repo's webhook settings (push events) for auto-sync. Set WEBHOOK_SECRET env var for payload verification."
     })
@@ -428,9 +469,17 @@ async def sync_all_branches(request: Request) -> JSONResponse:
     if not info:
         return JSONResponse({"error": f"repo '{name}' not registered"}, status_code=404)
 
+    # Re-discover branches if branch_rule is set
     branches = info.get("branches", [])
-    if len(branches) < 2:
-        return JSONResponse({"error": f"repo '{name}' has fewer than 2 branches configured. Use POST /sync instead."}, status_code=400)
+    branch_rule = info.get("branch_rule", "")
+    if branch_rule and info.get("url"):
+        discovered = _discover_remote_branches(info["url"], branch_rule)
+        if discovered:
+            branches = discovered
+            registry.register(name, info["root"], url=info.get("url", ""), branches=branches, branch_rule=branch_rule)
+
+    if len(branches) < 1:
+        return JSONResponse({"error": f"no branches to sync for '{name}'"}, status_code=400)
 
     task_id = tasks.create(name, info.get("url", ""))
 
@@ -460,9 +509,17 @@ async def rebuild_all_branches(request: Request) -> JSONResponse:
     if not info:
         return JSONResponse({"error": f"repo '{name}' not registered"}, status_code=404)
 
+    # Re-discover branches if branch_rule is set
     branches = info.get("branches", [])
-    if len(branches) < 2:
-        return JSONResponse({"error": f"repo '{name}' has fewer than 2 branches configured. Use POST /rebuild instead."}, status_code=400)
+    branch_rule = info.get("branch_rule", "")
+    if branch_rule and info.get("url"):
+        discovered = _discover_remote_branches(info["url"], branch_rule)
+        if discovered:
+            branches = discovered
+            registry.register(name, info["root"], url=info.get("url", ""), branches=branches, branch_rule=branch_rule)
+
+    if len(branches) < 1:
+        return JSONResponse({"error": f"no branches to rebuild for '{name}'"}, status_code=400)
 
     task_id = tasks.create(name, info.get("url", ""))
 
@@ -832,13 +889,14 @@ def _run_register_task(
     branch: str,
     skip_deep: bool,
     force_reindex: bool,
+    branch_rule: str = "",
 ) -> None:
     lock = _get_repo_lock(name)
     if not lock.acquire(blocking=False):
         tasks.update(task_id, status="failed", progress=0, step="locked", error="Another operation is running on this repo")
         return
     try:
-        _run_register_task_inner(task_id, name, url, username, password, token, branch, skip_deep, force_reindex)
+        _run_register_task_inner(task_id, name, url, username, password, token, branch, skip_deep, force_reindex, branch_rule)
     finally:
         lock.release()
 
@@ -853,6 +911,7 @@ def _run_register_task_inner(
     branch: str,
     skip_deep: bool,
     force_reindex: bool,
+    branch_rule: str = "",
 ) -> None:
     clone_url = _inject_credentials(url, username, password, token)
     clone_dir = registry.repos_dir / name
@@ -883,8 +942,7 @@ def _run_register_task_inner(
                 shutil.rmtree(clone_dir)
 
             clone_cmd = ["git", "-c", "http.followRedirects=true", "clone"]
-            if branch:
-                clone_cmd.extend(["--branch", branch])
+            # Clone all branches by default (no --branch flag)
             clone_cmd.extend([clone_url, str(clone_dir)])
 
             result = subprocess.run(
@@ -915,50 +973,53 @@ def _run_register_task_inner(
         tasks.update(task_id, status="running", progress=35, step="detecting_files")
         manifest = load_manifest(root)
         all_files = [f for f in all_tracked_files(root) if _is_indexable(f, cfg)]
-        if manifest.last_indexed_commit is None:
-            candidates = all_files
-        else:
-            git_changed = changed_files_since(root, manifest.last_indexed_commit) if is_git_repo(root) else []
-            stale = manifest.stale_files(root, all_files)
-            candidates = list(set(git_changed + stale))
-        candidates = [f for f in candidates if _is_indexable(f, cfg)]
 
-        if not branch:
-            detected = _detect_default_branch(clone_dir)
-            branch = detected
+        # If branch_rule is set, discover and register all matching branches
+        if branch_rule and url:
+            discovered = _discover_remote_branches(url, branch_rule)
+            if discovered:
+                registry.register(name, clone_dir, url=url, branches=discovered, branch_rule=branch_rule)
+            else:
+                logger.warning("No branches matched branch_rule '%s' for repo %s", branch_rule, name)
 
-        logger.info("Register repo=%s branch=%s candidates=%d all_files=%d", name, branch or "(default)", len(candidates), len(all_files))
+        # Determine which branches to index
+        repo_info = registry.get(name)
+        registered_branches = repo_info.get("branches", []) if repo_info else ([] if not branch else [branch])
+        branches_to_index = registered_branches if branch_rule else ([branch] if branch else registered_branches[:1])
 
-        if not candidates:
-            tasks.update(task_id, status="running", progress=70, step="already_indexed", detail="Nothing to index")
-            webhook_url = _get_webhook_url(name)
-            existing_info_early = registry.get(name)
-            existing_branches_early = existing_info_early.get("branches", []) if existing_info_early else []
-            if branch and branch not in existing_branches_early:
-                existing_branches_early.append(branch)
-            branches_list = existing_branches_early or [branch] or ["main"]
-            registry.register(name, clone_dir, url=url, branches=branches_list)
-            info = registry.get(name)
-            has_vectors = (clone_dir / info["config"].vector_store.persist_dir).exists()
-            manifest_data = load_manifest(root)
-            symbol_count = sum(len(entry.component_ids) for entry in manifest_data.files.values())
-            tasks.update(task_id, status="done", progress=100, step="complete", result={
-                "name": name, "path": str(clone_dir), "url": url,
-                "has_vector_db": has_vectors, "symbol_count": symbol_count, "indexed": True,
-                "webhook_url": webhook_url,
-            })
-            return
+        for idx, current_branch in enumerate(branches_to_index):
+            if not current_branch:
+                continue
 
-        total_symbols = _run_indexing_pipeline(task_id, name, root, skip_deep, candidates, cfg, manifest, branch=branch)
+            tasks.update(task_id, status="running", progress=40 + (50 * idx // len(branches_to_index)),
+                         step=f"checkout_{current_branch}")
+
+            # Checkout the branch
+            subprocess.run(
+                ["git"] + git_cfg + ["checkout", current_branch],
+                cwd=root, capture_output=True, text=True, timeout=30, env=git_env,
+            )
+            subprocess.run(
+                ["git"] + git_cfg + ["pull", "--rebase", "origin", current_branch],
+                cwd=root, capture_output=True, text=True, timeout=60, env=git_env,
+            )
+
+            # Index this branch
+            manifest = load_manifest(root)
+            all_files = [f for f in all_tracked_files(root) if _is_indexable(f, cfg)]
+            if manifest.last_indexed_commit is None:
+                candidates = all_files
+            else:
+                git_changed = changed_files_since(root, manifest.last_indexed_commit) if is_git_repo(root) else []
+                stale = manifest.stale_files(root, all_files)
+                candidates = list(set(git_changed + stale))
+            candidates = [f for f in candidates if _is_indexable(f, cfg)]
+
+            logger.info("Register repo=%s branch=%s candidates=%d all_files=%d", name, current_branch, len(candidates), len(all_files))
+
+            _run_indexing_pipeline(task_id, name, root, skip_deep, candidates, cfg, manifest, branch=current_branch)
 
         webhook_url = _get_webhook_url(name)
-        existing_info = registry.get(name)
-        existing_branches = existing_info.get("branches", []) if existing_info else []
-        if branch:
-            if branch not in existing_branches:
-                existing_branches.append(branch)
-        branches_list = existing_branches or [branch] or ["main"]
-        registry.register(name, clone_dir, url=url, branches=branches_list)
         info = registry.get(name)
         has_vectors = (clone_dir / info["config"].vector_store.persist_dir).exists()
         manifest_data = load_manifest(root)

@@ -232,7 +232,7 @@ npx skills add /path/to/repo-wiki -g -y
 | 端点 | 方法 | 说明 |
 |------|------|------|
 | `/repos` | GET | 列出所有已注册仓库 |
-| `/register` | POST | 注册并索引仓库。支持 `branches` 数组或 `branch` 字符串，默认 `["main"]` |
+| `/register` | POST | 注册并索引仓库。支持 `branches` 数组、`branch` 字符串或 `branch_rule` 通配符规则（如 `release/*`、`feature/*`）。默认 `["main"]` |
 | `/sync` | POST | 增量同步指定分支，可选 `branch` 参数 |
 | `/sync-all` | POST | 同步所有已注册分支 |
 | `/rebuild` | POST | 全量重建指定分支 |
