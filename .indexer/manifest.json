@@ -1,6 +1,6 @@
 {
-  "last_indexed_commit": "8ff9a71aaf42a2fbaa4f2caaebbf9626aa384dbd",
-  "indexed_at": "2026-04-28T14:29:17.458201+00:00",
+  "last_indexed_commit": "19dfa17df824ef39a5a521ee581e51d7e39db627",
+  "indexed_at": "2026-04-28T15:33:22.054335+00:00",
   "files": {
     "indexer/__init__.py": {
       "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -193,7 +193,7 @@
       ]
     },
     "indexer/mcp_server.py": {
-      "hash": "sha256:0860a4cd2a25a0e7abbb9b2b5a77a89ef106a7c5f20cd03a4357528a05f45945",
+      "hash": "sha256:723aacb0ff823fd2fc14c6fa5b4b5a0e7c1f108fb2280f434229ab27f0212f91",
       "wiki_page": "wiki/root.md",
       "component_ids": [
         "indexer/mcp_server.py::_apply_mcp_auth",
@@ -209,7 +209,6 @@
         "indexer/mcp_server.py::search_symbols_tool",
         "indexer/mcp_server.py::trace_call_tool",
         "indexer/mcp_server.py::get_source_context_tool",
-        "indexer/mcp_server.py::_allow_any_host",
         "indexer/mcp_server.py::_MCPAuthMiddleware",
         "indexer/mcp_server.py::_MCPAuthMiddleware.dispatch"
       ]

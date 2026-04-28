@@ -20,17 +20,19 @@ The wiki captures structure, relationships, and constraints in a fraction of the
 
 ## Stats
 
-- **16 symbols** across **1 files** — indexed 2026-04-28 @ `8ff9a71a`
+- **15 symbols** across **1 files** — indexed 2026-04-28 @ `19dfa17d`
 - Wiki: `wiki/` — 1 page(s)
 - Manifest: `.indexer/manifest.json` — maps every file to its wiki page and component IDs
 
 ## System Overview
 
-The system is an MCP (Model Context Protocol) server implemented in `indexer/mcp_server.py`. It exposes several tools for code indexing and retrieval: `search_symbols_tool`, `trace_call_tool`, `get_source_context_tool`, and `list_repos`. Requests are guarded by a custom auth middleware (`_MCPAuthMiddleware`) that validates host permissions via `_allow_any_host`. The server likely delegates queries to an underlying indexer or database to fulfill symbol searches, call traces, and source context retrieval.
+This system is a Model Context Protocol (MCP) server for code indexing, implemented primarily in `indexer/mcp_server.py`. It exposes tools for searching symbols (`search_symbols_tool`), tracing function calls (`trace_call_tool`), retrieving source code context (`get_source_context_tool`), and listing repositories (`list_repos`). All requests pass through `_MCPAuthMiddleware.dispatch` for JWT-based authentication before reaching the tool handlers. The server relies on an underlying code database (likely SQLite or vector store) to serve indexed metadata and source code.
 ## Key Request Flows
-- Incoming tool request → _MCPAuthMiddleware.dispatch → _allow_any_host → search_symbols_tool / trace_call_tool / get_source_context_tool → indexer query
-- list_repos → repository enumeration from indexer
-- _patched_method (likely a monkey-patched decorator) → any tool handler → modify behavior before dispatch
+- HTTP request → _MCPAuthMiddleware.dispatch → token validation → route to tool handler
+- search_symbols_tool → query index DB (symbol table) → return matching symbols with locations
+- trace_call_tool → traverse call graph DB → return call chain (caller/callee pairs) with source references
+- get_source_context_tool → fetch source code from DB → return surrounding context lines for a symbol
+- list_repos → query repo metadata DB → return list of repositories with last indexed timestamp
 
 ## Wiki Pages
 

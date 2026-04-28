@@ -2,47 +2,46 @@
 
 ## Overview
 
-This module implements an MCP (Model Context Protocol) server that exposes code indexing capabilities as tools for LLM agents. It supports two deployment modes via `create_server` (direct, using a local indexer and configuration) and `create_api_server` (proxy, forwarding requests to an external API). Authentication is enforced by the `_MCPAuthMiddleware` class (validates Auth0 JWT tokens from the Authorization header), applied through monkey-patching of FastMCP's `add_middleware` method. Tools registered include `search_symbols_tool`, `trace_call_tool`, `get_source_context_tool`, and `list_repos`, each accepting optional repo scoping and output rewriting parameters.
+This module implements an MCP (Model Context Protocol) server that exposes the code indexer’s capabilities—symbol search, call graph tracing, and source context retrieval—as AI-accessible tools. It solves the problem of making a rich static analysis backend consumable by LLM agents or chat interfaces via a standardized tool protocol. Two server factories exist: `create_server` wires tools directly to in-process indexer functions (e.g., `search_symbols`, `trace_call`), while `create_api_server` delegates all requests to a remote indexing service via HTTP. Authentication is enforced by `_MCPAuthMiddleware`, an ASGI middleware that validates Auth0 JWTs and wraps each tool handler through `_apply_mcp_auth`. The module thus bridges the indexer’s internal data structures to external MCP clients, with a pluggable auth layer and a remote-proxy mode for distributed deployments.
 
 ## Modules
 | File | Purpose |
 |------|---------|
-| indexer/mcp_server.py | MCP server exposing code search, trace, and context tools |
+| indexer/mcp_server.py | MCP server providing semantic code search, call graph tracing, and source context tools |
 ## Key Symbols
 | ID | Type | Description |
 |----|------|-------------|
-| `indexer/mcp_server.py::_apply_mcp_auth` | function | Wraps FastMCP with Auth0 JWT authentication middleware |
-| `indexer/mcp_server.py::create_server` | function | Creates FastMCP server instance, loads config, registers tools, applies auth |
-| `indexer/mcp_server.py::create_api_server` | function | Creates FastMCP server that proxies tools to external API with auth |
-| `indexer/mcp_server.py::_patched_method` | function | Patches FastMCP's add_middleware to inject Auth0 JWT check |
-| `indexer/mcp_server.py::search_symbols_tool` | function | Searches symbols by semantic query with call graph expansion and optional repo/rewrite |
-| `indexer/mcp_server.py::trace_call_tool` | function | Traces call graph from symbol up/down to max depth, optionally scoped to a repo |
-| `indexer/mcp_server.py::get_source_context_tool` | function | Reads source code around a line range with padding, optionally per repo |
-| `indexer/mcp_server.py::_api_get` | function | Performs HTTP GET to internal API, returns parsed JSON |
-| `indexer/mcp_server.py::_api_post` | function | Performs HTTP POST to internal API with JSON payload, returns parsed JSON |
-| `indexer/mcp_server.py::list_repos` | function | MCP tool: lists all registered repositories with names and stats |
-| `indexer/mcp_server.py::search_symbols_tool` | function | Searches symbols by semantic query with call graph expansion and optional repo/rewrite |
-| `indexer/mcp_server.py::trace_call_tool` | function | Traces call graph from symbol up/down to max depth, optionally scoped to a repo |
-| `indexer/mcp_server.py::get_source_context_tool` | function | Reads source code around a line range with padding, optionally per repo |
-| `indexer/mcp_server.py::_allow_any_host` | function | Middleware that allows any host in MCP authentication |
-| `indexer/mcp_server.py::_MCPAuthMiddleware` | class | ASGI middleware class validating Auth0 JWT tokens on each request |
-| `indexer/mcp_server.py::_MCPAuthMiddleware.dispatch` | method | Dispatches request after verifying JWT token from Authorization header |
+| `indexer/mcp_server.py::_apply_mcp_auth` | function | Wraps MCP handler with Auth0 JWT authentication, returns JSON error on failure |
+| `indexer/mcp_server.py::create_server` | function | Creates a FastMCP server with search, trace, and source context tools |
+| `indexer/mcp_server.py::create_api_server` | function | Creates a FastMCP API server delegating to a remote indexing service |
+| `indexer/mcp_server.py::_patched_method` | function | Patches a method to apply MCP authentication middleware |
+| `indexer/mcp_server.py::search_symbols_tool` | function | Searches symbols across repos via API with optional query rewriting |
+| `indexer/mcp_server.py::trace_call_tool` | function | Traces call graph via API across specified repo with depth control |
+| `indexer/mcp_server.py::get_source_context_tool` | function | Fetches source code context via API for given repo and line range |
+| `indexer/mcp_server.py::_api_get` | function | Performs a GET request to the indexer API and returns parsed JSON |
+| `indexer/mcp_server.py::_api_post` | function | Performs a POST request to the indexer API with JSON body |
+| `indexer/mcp_server.py::list_repos` | function | Lists all registered repositories with names and basic stats |
+| `indexer/mcp_server.py::search_symbols_tool` | function | Searches symbols across repos via API with optional query rewriting |
+| `indexer/mcp_server.py::trace_call_tool` | function | Traces call graph via API across specified repo with depth control |
+| `indexer/mcp_server.py::get_source_context_tool` | function | Fetches source code context via API for given repo and line range |
+| `indexer/mcp_server.py::_MCPAuthMiddleware` | class | ASGI middleware that validates JWT tokens for MCP endpoints |
+| `indexer/mcp_server.py::_MCPAuthMiddleware.dispatch` | method | Dispatches request after extracting and validating Bearer token |
 ## Data Flows
-- Client connects → triggers tool call (e.g., search_symbols_tool) → handled directly via get()/search_symbols() (direct mode) or proxied via _api_post (proxy mode) → returns result
-- Client sends request → _MCPAuthMiddleware.dispatch extracts Authorization header → validates JWT → passes to underlying app or returns 401 JSONResponse
-- create_server loads config → registers tools → applies auth middleware via _apply_mcp_auth (patches add_middleware) → starts FastMCP server
-- create_api_server creates FastMCP → registers proxy tools (calling _api_get/_api_post) → applies auth → starts server
+- Client opens MCP connection → FastMCP routes tool call → `_apply_mcp_auth` wraps handler → `_MCPAuthMiddleware.dispatch` validates Bearer token → tool function runs (e.g., `search_symbols_tool` → `_api_post` → remote indexer API) → JSON response returned to client.
+- Local mode: Client requests symbol search → `search_symbols_tool` invoked → calls in-process `search_symbols` with `repo`, `symbol`, `rewrite` params → returns joined results list as string.
+- Remote mode: Client requests trace call graph → `trace_call_tool` calls `_api_post` → POST to `/api/trace_call` with JSON body → response decoded via `loads` → returns formatted trace string.
+- Authentication failure flow: HTTP request to `/mcp/...` → `_MCPAuthMiddleware.dispatch` extracts token → JWT validation fails → returns `JSONResponse` with status 401 and error details, never reaching the tool handler.
 ## Design Constraints
-- Auth middleware is applied by monkey-patching FastMCP.add_middleware (preserving the original method) to inject JWT validation before downstream middleware.
-- The server operates in exactly one of two mutually exclusive modes: direct (create_server) or proxy (create_api_server); no hybrid mode exists.
-- In proxy mode, all tool implementations delegate to internal HTTP helpers (_api_get, _api_post) that strip trailing whitespace (rstrip) from JSON responses.
-- The `join` function (likely os.path.join or equivalent) is called pervasively for path normalization; its specific semantics (e.g., handling of absolute vs relative paths) are not defined at module level.
-- The `get` function serves as a global configuration/dependency accessor; tools depend on it for shared state (e.g., indexer instance, config values) and must be called after setup.
-- The `_allow_any_host` middleware bypasses host checks in MCP authentication, implying that under certain configurations the host header is not validated.
+- The `_apply_mcp_auth` function monkey‑patches the original handler method by replacing it with `_patched_method`, which inserts `_MCPAuthMiddleware` as a wrapper. This means auth is injected at the method level, not the router level.
+- The middleware strips the leading `/mcp/` prefix from `scope['path']` before passing to the underlying application, so downstream handlers must not expect that prefix.
+- All API calls in remote mode (`_api_get`, `_api_post`) use blocking `urllib` calls inside tool handlers. This is safe only because FastMCP runs tool handlers in a thread pool; a truly async implementation would require aiohttp.
+- Authentication is optional: if environment variables `AUTH0_DOMAIN`, `AUTH0_CLIENT_ID`, `AUTH0_CLIENT_SECRET` are missing, `_apply_mcp_auth` returns the original handler unmodified, disabling JWT checks entirely.
+- Local mode tools (`create_server`) require the indexer’s in‑memory data to be pre‑loaded (e.g., via `indexer/__init__.py` initialization). The remote mode tools (`create_api_server`) have no such requirement and rely on the external API being available.
+- The tool functions (e.g., `search_symbols_tool`, `trace_call_tool`) accept optional parameters like `api_key` for remote authentication and `rewrite` for query rewriting; these parameters are passed through to the underlying API call, but the MCP tool schema does not enforce their presence.
 ## Relationships
-- **Calls:** FastMCP, JSONResponse, Request, _api_get, _api_post, _apply_mcp_auth, _inner, _orig_method, add_middleware, append, call_next, cwd, dumps, encode, get, get_source_context, join, len, load_config, loads, read, removeprefix, rstrip, search_symbols, tool, trace_call, urlopen
-- **Called by:** indexer/cli.py::serve, indexer/mcp_server.py::create_api_server, indexer/mcp_server.py::create_server, indexer/mcp_server.py::get_source_context_tool, indexer/mcp_server.py::list_repos, indexer/mcp_server.py::search_symbols_tool, indexer/mcp_server.py::trace_call_tool
-- **Imports from:** __future__.annotations, indexer.config.Config, indexer.config.load_config, indexer.retrieval.get_source_context, indexer.retrieval.search_symbols, indexer.retrieval.trace_call, json, mcp.server.fastmcp.FastMCP, pathlib.Path, starlette.middleware.base.BaseHTTPMiddleware, starlette.responses.JSONResponse, urllib.error, urllib.request
+- **Calls:** FastMCP, JSONResponse, Request, _MCPAuthMiddleware, _api_get, _api_post, _apply_mcp_auth, _orig_method, append, call_next, cwd, dumps, encode, get, get_source_context, join, len, load_config, loads, read, removeprefix, rstrip, search_symbols, tool, trace_call, urlopen
+- **Called by:** indexer/cli.py::serve, indexer/mcp_server.py::_apply_mcp_auth, indexer/mcp_server.py::_patched_method, indexer/mcp_server.py::create_api_server, indexer/mcp_server.py::create_server, indexer/mcp_server.py::get_source_context_tool, indexer/mcp_server.py::list_repos, indexer/mcp_server.py::search_symbols_tool, indexer/mcp_server.py::trace_call_tool
+- **Imports from:** __future__.annotations, indexer.config.load_config, indexer.retrieval.get_source_context, indexer.retrieval.search_symbols, indexer.retrieval.trace_call, json, mcp.server.fastmcp.FastMCP, pathlib.Path, starlette.middleware.base.BaseHTTPMiddleware, starlette.responses.JSONResponse, urllib.error, urllib.request
 ## Entry Points
 - `search_symbols_tool`
 - `trace_call_tool`
