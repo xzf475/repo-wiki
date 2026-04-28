@@ -108,7 +108,7 @@ docker compose down           # stop
 
 ## MCP Server
 
-repo-wiki provides an [MCP](https://modelcontextprotocol.io) server, letting MCP-capable LLM clients (Claude Code, Cursor, etc.) search your codebase directly.
+repo-wiki provides an [MCP](https://modelcontextprotocol.io) server, letting MCP-capable LLM clients search your codebase directly.
 
 ### Single-Repo Mode
 
@@ -133,7 +133,9 @@ repo-wiki serve --api http://localhost:7654  # MCP proxies to API
 
 Adds a `list_repos` tool.
 
-### Claude Code Setup
+### Client Configuration
+
+**Local install** (`pip install repo-wiki`):
 
 ```json
 {
@@ -146,7 +148,41 @@ Adds a `list_repos` tool.
 }
 ```
 
-For remote mode: `"args": ["serve", "--api", "http://localhost:7654"]`.
+**npx mode** (no install required):
+
+```json
+{
+  "mcpServers": {
+    "repo-wiki": {
+      "command": "npx",
+      "args": ["-y", "repo-wiki", "serve"]
+    }
+  }
+}
+```
+
+For remote mode: `"args": ["-y", "repo-wiki", "serve", "--api", "http://localhost:7654"]`.
+
+**Remote server mode** (no local install, server deployed in cloud):
+
+```json
+{
+  "mcpServers": {
+    "repo-wiki": {
+      "url": "http://your-server.com:8000/mcp",
+      "transport": "streamable-http"
+    }
+  }
+}
+```
+
+Server-side startup:
+
+```bash
+# Run these on your cloud server
+repo-wiki serve-api --port 7654 &
+repo-wiki serve --transport streamable-http --port 8000 --api http://localhost:7654
+```
 
 ### Loading the Skill
 

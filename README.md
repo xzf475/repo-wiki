@@ -108,7 +108,7 @@ docker compose down           # 停止
 
 ## MCP 服务器
 
-repo-wiki 提供 [MCP](https://modelcontextprotocol.io) 服务器，让支持 MCP 的 LLM 客户端（Claude Code、Cursor 等）直接搜索你的代码库。
+repo-wiki 提供 [MCP](https://modelcontextprotocol.io) 服务器，让支持 MCP 的 LLM 客户端直接搜索你的代码库。
 
 ### 单仓库模式
 
@@ -133,7 +133,9 @@ repo-wiki serve --api http://localhost:7654  # MCP 代理到 API
 
 额外提供 `list_repos` 工具。
 
-### Claude Code 配置
+### 客户端配置
+
+**本地安装模式**（已 `pip install repo-wiki`）：
 
 ```json
 {
@@ -146,7 +148,41 @@ repo-wiki serve --api http://localhost:7654  # MCP 代理到 API
 }
 ```
 
-远程模式将 args 改为 `["serve", "--api", "http://localhost:7654"]`。
+**npx 模式**（无需安装，即用即走）：
+
+```json
+{
+  "mcpServers": {
+    "repo-wiki": {
+      "command": "npx",
+      "args": ["-y", "repo-wiki", "serve"]
+    }
+  }
+}
+```
+
+远程模式将 args 改为 `["-y", "repo-wiki", "serve", "--api", "http://localhost:7654"]`。
+
+**远程服务器模式**（本地无 repo-wiki，服务端在云端部署）：
+
+```json
+{
+  "mcpServers": {
+    "repo-wiki": {
+      "url": "http://your-server.com:8000/mcp",
+      "transport": "streamable-http"
+    }
+  }
+}
+```
+
+服务端启动方式：
+
+```bash
+# 在云端服务器上运行
+repo-wiki serve-api --port 7654 &                          # REST API
+repo-wiki serve --transport streamable-http --port 8000 --api http://localhost:7654  # MCP HTTP
+```
 
 ### 加载技能文件
 

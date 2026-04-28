@@ -1153,11 +1153,14 @@ async def list_repos(request: Request) -> JSONResponse:
         manifest_path = root / ".indexer" / "manifest.json"
         symbol_count = 0
         last_synced_at = ""
+        last_indexed_commit = ""
         if manifest_path.exists():
             from indexer.manifest import load_manifest
             manifest = load_manifest(root)
             symbol_count = sum(len(entry.component_ids) for entry in manifest.files.values())
             last_synced_at = manifest.indexed_at or ""
+            if manifest.last_indexed_commit:
+                last_indexed_commit = manifest.last_indexed_commit[:7]
         if not last_synced_at:
             try:
                 from indexer.git import current_commit
@@ -1183,6 +1186,7 @@ async def list_repos(request: Request) -> JSONResponse:
             "has_vector_db": has_vectors,
             "symbol_count": symbol_count,
             "last_synced_at": last_synced_at,
+            "last_indexed_commit": last_indexed_commit,
         })
     return JSONResponse({"repos": result})
 

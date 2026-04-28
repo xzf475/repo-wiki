@@ -4,13 +4,17 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "7654:7654"
+      - "${API_PORT:-7654}:${API_PORT:-7654}"
+      - "${MCP_PORT:-8000}:${MCP_PORT:-8000}"
     volumes:
       - repo_wiki_data:/app/.indexer
       - repo_wiki_wiki:/app/wiki
       - repo_wiki_repos:/tmp/repo_wiki_repos
       - ./.env:/app/.env:ro
     environment:
+      - API_PORT=${API_PORT:-7654}
+      - MCP_ENABLED=${MCP_ENABLED:-false}
+      - MCP_PORT=${MCP_PORT:-8000}
       - REPO_WIKI_API_KEY=${REPO_WIKI_API_KEY:-}
     restart: unless-stopped
 

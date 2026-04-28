@@ -22,10 +22,12 @@ COPY --from=builder /build/dist/*.whl /tmp/
 RUN pip install --no-cache-dir /tmp/*.whl \
     && rm /tmp/*.whl
 
-EXPOSE 7654
+COPY docker-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+EXPOSE 7654 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:7654/health')" || exit 1
+    CMD python -c "import os,urllib.request; urllib.request.urlopen(f'http://localhost:{os.environ.get(\"API_PORT\",\"7654\")}/health')" || exit 1
 
-ENTRYPOINT ["repo-wiki"]
-CMD ["serve-api", "--host", "0.0.0.0", "--port", "7654"]
+ENTRYPOINT ["docker-entrypoint.sh"]

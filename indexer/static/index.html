@@ -280,6 +280,7 @@ async function loadRepos(){
       </div>
       <div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:6px;align-items:center">
         ${(r.branches||[]).map(b=>'<span style="font-size:10px;padding:2px 8px;border:1px solid var(--accent);border-radius:3px;color:var(--accent)">'+esc(b)+'</span>').join('')}
+        ${r.last_indexed_commit?'<code style="font-size:10px;color:var(--text3);margin-left:4px">@'+esc(r.last_indexed_commit)+'</code>':''}
         ${r.last_synced_at?'<span style="font-size:10px;color:var(--text3);margin-left:auto">&#9200; '+fmtTime(r.last_synced_at)+'</span>':''}
       </div>
       ${r.webhook_url?`

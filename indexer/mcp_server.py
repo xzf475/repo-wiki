@@ -143,8 +143,9 @@ def create_api_server(api_url: str, api_key: str | None = None) -> FastMCP:
 
         lines = ["**Registered Repositories:**\n"]
         for r in repos:
+            commit_tag = f" @{r.get('last_indexed_commit', '')}" if r.get('last_indexed_commit') else ""
             lines.append(
-                f"- **{r['name']}** — {r.get('symbol_count', '?')} symbols, "
+                f"- **{r['name']}**{commit_tag} — {r.get('symbol_count', '?')} symbols, "
                 f"{r.get('tracked_files', '?')} files"
                 f"{', has vector DB' if r.get('has_vector_db') else ', no vector DB'}"
             )
