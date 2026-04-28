@@ -671,6 +671,8 @@ def _run_sync_task(task_id: str, name: str, root: Path, skip_deep: bool, branch:
     git_env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
     git_cfg = ["-c", "http.followRedirects=true"]
 
+    from indexer.git import is_git_repo, all_tracked_files, current_commit, changed_files_since
+
     try:
         tasks.update(task_id, status="running", progress=10, step="git_pull")
         if repo_branch and is_git_repo(root):
@@ -689,7 +691,6 @@ def _run_sync_task(task_id: str, name: str, root: Path, skip_deep: bool, branch:
 
         from indexer.config import Config, load_config, save_config
         from indexer.manifest import load_manifest, save_manifest, compute_hash, FileEntry
-        from indexer.git import all_tracked_files, current_commit, is_git_repo, changed_files_since
         from indexer.cli import _is_indexable
         from indexer.grouper import density_group
         from indexer.wiki import sanitize_group_label
