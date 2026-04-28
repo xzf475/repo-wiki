@@ -7,24 +7,24 @@ from indexer.config import Config, load_config
 
 
 def _apply_mcp_auth(mcp: FastMCP, mcp_api_key: str | None) -> None:
-    if not mcp_api_key:
-        return
-    from starlette.middleware.base import BaseHTTPMiddleware
-    from starlette.responses import JSONResponse
-
     _orig_app = mcp.streamable_http_app
-
-    class _MCPAuthMiddleware(BaseHTTPMiddleware):
-        async def dispatch(self, request, call_next):
-            auth = request.headers.get("Authorization", "")
-            token = auth.removeprefix("Bearer ")
-            if not token or token != mcp_api_key:
-                return JSONResponse({"error": "unauthorized"}, status_code=401)
-            return await call_next(request)
 
     def _patched_app():
         app = _orig_app()
-        app.add_middleware(_MCPAuthMiddleware)
+        from starlette.middleware.trustedhost import TrustedHostMiddleware
+        app.add_middleware(TrustedHostMiddleware, allowed_hosts=["*"])
+        if mcp_api_key:
+            from starlette.middleware.base import BaseHTTPMiddleware
+            from starlette.responses import JSONResponse
+
+            class _MCPAuthMiddleware(BaseHTTPMiddleware):
+                async def dispatch(self, request, call_next):
+                    auth = request.headers.get("Authorization", "")
+                    token = auth.removeprefix("Bearer ")
+                    if not token or token != mcp_api_key:
+                        return JSONResponse({"error": "unauthorized"}, status_code=401)
+                    return await call_next(request)
+            app.add_middleware(_MCPAuthMiddleware)
         return app
 
     mcp.streamable_http_app = _patched_app
