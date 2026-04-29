@@ -177,6 +177,8 @@ class RepoRegistry:
                 "url": info.get("url", ""),
                 "branches": info.get("branches", []),
                 "branch_rule": info.get("branch_rule", ""),
+                "description": info.get("description", ""),
+                "tags": info.get("tags", []),
             }
             for name, info in self.repos.items()
         }
@@ -193,10 +195,14 @@ class RepoRegistry:
                     url = ""
                     branches = []
                     branch_rule = ""
+                    description = ""
+                    tags = []
                 else:
                     path_str = entry.get("root", "")
                     url = entry.get("url", "")
                     branch_rule = entry.get("branch_rule", "")
+                    description = entry.get("description", "")
+                    tags = entry.get("tags", [])
                     raw = entry.get("branches", entry.get("branch", ""))
                     if isinstance(raw, str):
                         branches = [raw] if raw else []
@@ -208,11 +214,11 @@ class RepoRegistry:
                     branches = [detected] if detected else ["main"]
                 if repo_root.exists():
                     cfg = load_config(repo_root)
-                    self.repos[name] = {"root": repo_root, "config": cfg, "url": url, "branches": branches, "branch_rule": branch_rule}
+                    self.repos[name] = {"root": repo_root, "config": cfg, "url": url, "branches": branches, "branch_rule": branch_rule, "description": description, "tags": tags}
         except (json.JSONDecodeError, OSError) as e:
             logger.warning("Failed to load repo registry: %s", e)
 
-    def register(self, name: str, repo_root: Path, url: str = "", branches: list[str] | None = None, branch_rule: str = ""):
+    def register(self, name: str, repo_root: Path, url: str = "", branches: list[str] | None = None, branch_rule: str = "", description: str = "", tags: list[str] | None = None):
         cfg = load_config(repo_root)
         self.repos[name] = {
             "root": repo_root,
@@ -220,6 +226,8 @@ class RepoRegistry:
             "url": url,
             "branches": branches or [],
             "branch_rule": branch_rule,
+            "description": description,
+            "tags": tags or [],
         }
         self._save()
         logger.info(f"Registered repo '{name}' at {repo_root}")
@@ -248,6 +256,8 @@ async def register_repo(request: Request) -> JSONResponse:
     username = body.get("username", "")
     password = body.get("password", "")
     token = body.get("token", "")
+    description = body.get("description", "")
+    tags = body.get("tags", [])
     branch = body.get("branch", "")
     branches = body.get("branches", body.get("branches", []))
     branch_rule = body.get("branch_rule", "")
@@ -293,7 +303,7 @@ async def register_repo(request: Request) -> JSONResponse:
     clone_dir = registry.repos_dir / name
     clone_dir.mkdir(parents=True, exist_ok=True)
     branches_list = [branch] if branch else branches or ["main"]
-    registry.register(name, clone_dir, url=url, branches=branches_list, branch_rule=branch_rule)
+    registry.register(name, clone_dir, url=url, branches=branches_list, branch_rule=branch_rule, description=description, tags=tags)
 
     webhook_url = _get_webhook_url(name)
 
@@ -1252,6 +1262,8 @@ async def list_repos(request: Request) -> JSONResponse:
             "path": str(root),
             "url": info.get("url", ""),
             "branches": branches,
+            "description": info.get("description", ""),
+            "tags": info.get("tags", []),
             "webhook_url": webhook_url,
             "has_vector_db": has_vectors,
             "symbol_count": symbol_count,

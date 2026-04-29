@@ -1,6 +1,6 @@
 {
-  "last_indexed_commit": "d388569df8ed5dd4a42a9685aac3e590b8c9cbc8",
-  "indexed_at": "2026-04-29T03:31:08.224861+00:00",
+  "last_indexed_commit": "e7850e36764e1724c1c97b7a4d497e9bded3e0a3",
+  "indexed_at": "2026-04-29T05:57:33.925455+00:00",
   "files": {
     "indexer/__init__.py": {
       "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -193,8 +193,8 @@
       ]
     },
     "indexer/mcp_server.py": {
-      "hash": "sha256:723aacb0ff823fd2fc14c6fa5b4b5a0e7c1f108fb2280f434229ab27f0212f91",
-      "wiki_page": "wiki/root.md",
+      "hash": "sha256:a318b4ea8b1f929f7d34b34c6083366d9ebfb40806dee9f45b6db15eb1d00f0b",
+      "wiki_page": "wiki/indexer.md",
       "component_ids": [
         "indexer/mcp_server.py::_apply_mcp_auth",
         "indexer/mcp_server.py::create_server",
@@ -214,7 +214,7 @@
       ]
     },
     "indexer/rest_api.py": {
-      "hash": "sha256:709a467dc68582749daeb01c3806a13d0dc1883cf3e1a22065ee895fac9a6c85",
+      "hash": "sha256:829ab3186955c6b7f259f38edad2762b536cc4fa017e6dccffc793ea76941808",
       "wiki_page": "wiki/indexer.md",
       "component_ids": [
         "indexer/rest_api.py::_get_repo_lock",

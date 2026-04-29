@@ -20,33 +20,33 @@ The wiki captures structure, relationships, and constraints in a fraction of the
 
 ## Stats
 
-- **62 symbols** across **2 files** — indexed 2026-04-29 @ `d388569d`
+- **72 symbols** across **2 files** — indexed 2026-04-29 @ `e7850e36`
 - Wiki: `wiki/` — 1 page(s)
 - Manifest: `.indexer/manifest.json` — maps every file to its wiki page and component IDs
 
 ## System Overview
 
-This indexer service manages code repository indexing and retrieval via a REST API. The core components are `TaskStore` for tracking background indexing tasks and `RepoRegistry` for persisting repository metadata, both used by endpoints in `indexer/rest_api.py`. The `indexer/retrieval.py` module (not detailed here) handles retrieval logic. The service supports registering, syncing, rebuilding, and unregistering repos, with middleware for logging (`_LoggingMiddleware`) and authentication (`_AuthMiddleware`).
+The system is a code indexing service with dual interfaces: an MCP (Model Context Protocol) server exposing tools for symbol search, call tracing, and source context retrieval, and a REST API for repository management (register, sync, rebuild, unregister) and task tracking. Core components include the `indexer/mcp_server.py` serving MCP tools, `indexer/rest_api.py` hosting REST endpoints, `TaskStore` for asynchronous task creation and lifecycle, and `RepoRegistry` for persistent repository state. Middleware layers (`_MCPAuthMiddleware`, `_LoggingMiddleware`, `_AuthMiddleware`) provide authentication and logging across both interfaces, while a webhook endpoint (`webhook_by_name`) enables event-driven reindexing.
 ## Key Request Flows
-- Register repo endpoint → `register_repo` → `_run_register_task` → `TaskStore.create` → background indexing
-- Sync repo endpoint → `sync_repo` → `TaskStore.update` as task starts → triggers indexing of branches
-- Health check → `health` endpoint → returns basic service status (no TaskStore dependency)
-- Unregister repo → `unregister_repo` → `RepoRegistry.unregister` → `RepoRegistry._save` to persist change
-- List repos → `list_repos` → `RepoRegistry.list_names` → returns all registered repo names
+- MCP client → _MCPAuthMiddleware.dispatch → search_symbols_tool (symbol lookup)
+- REST client → _AuthMiddleware.dispatch → register_repo → TaskStore.create → _run_register_task → RepoRegistry.register
+- REST client → sync_repo → TaskStore.create → (sync task targeting a repository)
+- Webhook POST → webhook_by_name → validates event → triggers indexing tasks via TaskStore.create
+- Any request → _LoggingMiddleware.dispatch → _AuthMiddleware.dispatch → route handler (REST or MCP)
 
 ## Wiki Pages
 
 | Page | Covers | Key Entry Points |
 |------|--------|-----------------|
-| [indexer](../wiki/indexer.md) | indexer/rest_api.py, indexer/retrieval.py | TaskStore, TaskStore.__init__, TaskStore._cleanup, TaskStore.create, TaskStore.get |
+| [indexer](../wiki/indexer.md) | indexer/mcp_server.py, indexer/rest_api.py | _patched_method, search_symbols_tool, trace_call_tool, get_source_context_tool, list_repos |
 ## Critical Constraints (read before editing)
 **indexer**
-- Per-repo lock acquired via `_get_repo_lock` (a `Lock` per repo name); two operations on the same repo will be serialized, but different repos can run concurrently.
-- `TaskStore` is purely in-memory and tasks expire after a hardcoded TTL (checked in `_cleanup`). Task IDs (UUIDs) are transient — lost on server restart.
-- `RepoRegistry` stores entries on disk (temp directory) with a legacy migration path (`_load` converts old format and detects default branch via `_detect_default_branch`). Saving happens synchronously after every mutation.
-- Remote branch discovery (`_discover_remote_branches`) uses `git ls-remote` with fnmatch glob patterns; results are cached only during the call — no persistent branch list.
-- Default branch detection (`_detect_default_branch`) parses `git symbolic-ref` output; fallback is 'main' if detection fails (handled in `_load` via warning).
-- Indexing pipeline functions (`describe_nodes`, `deep_enrich_pages`, `build_batches`, `density_group`) are expected to be synchronous and run inside `run_in_executor` to avoid blocking the event loop.
+- The MCP authentication patching (_apply_mcp_auth) is only applied when create_server is called directly; the REST API backend mode (create_api_server) has no auth layer.
+- TaskStore entries older than 1 hour are silently removed on every create() call, so long-running tasks may expire before being polled.
+- RepoRegistry persistence uses a single temp JSON file (no database); data is lost on machine reboot unless re-registered.
+- Default branch detection (_detect_default_branch) requires network access to the remote git endpoint and may silently fail for unreachable repos.
+- The context tool (get_source_context_tool) returns raw code lines without any sanitization; callers must handle potentially large output.
+- The direct server mode (create_server) uses the current working directory (cwd) as the base path, making it sensitive to the process's startup directory.
 
 ## Workflow — How to Answer Questions About This Codebase
 

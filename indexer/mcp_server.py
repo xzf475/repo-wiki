@@ -160,9 +160,10 @@ def create_api_server(api_url: str, api_key: str | None = None, mcp_api_key: str
 
     @mcp.tool()
     def list_repos() -> str:
-        """List all registered repositories. Returns repo names, paths, and basic stats.
+        """List all registered repositories. Returns repo names, descriptions, tags, and basic stats.
 
         Use this first to discover which repos are available before searching or tracing.
+        The description and tags help you understand which repo is relevant to the user's task.
         """
         data = _api_get("/repos")
         repos = data.get("repos", [])
@@ -172,9 +173,13 @@ def create_api_server(api_url: str, api_key: str | None = None, mcp_api_key: str
         lines = ["**Registered Repositories:**\n"]
         for r in repos:
             commit_tag = f" @{r.get('last_indexed_commit', '')}" if r.get('last_indexed_commit') else ""
+            desc = r.get("description", "")
+            tags = r.get("tags", [])
+            desc_tag = f" — {desc}" if desc else ""
+            tags_tag = f"  `{' '.join(f'#{t}' for t in tags)}`" if tags else ""
             lines.append(
-                f"- **{r['name']}**{commit_tag} — {r.get('symbol_count', '?')} symbols, "
-                f"{r.get('tracked_files', '?')} files"
+                f"- **{r['name']}**{commit_tag}{desc_tag}{tags_tag}\n"
+                f"  {r.get('symbol_count', '?')} symbols"
                 f"{', has vector DB' if r.get('has_vector_db') else ', no vector DB'}"
             )
         return "\n".join(lines)
