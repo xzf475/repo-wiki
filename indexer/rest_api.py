@@ -1062,7 +1062,7 @@ async def search_symbols(request: Request) -> JSONResponse:
     body = await _parse_body(request)
     query = body.get("query", "")
     repo = body.get("repo")
-    top_k = min(body.get("top_k", 10), 50)
+    top_k = min(body.get("top_k", 10), 100)
     expand_depth = body.get("expand_depth", 1)
     rewrite = body.get("rewrite", True)
 
@@ -1145,7 +1145,7 @@ async def trace_call(request: Request) -> JSONResponse:
     body = await _parse_body(request)
     symbol_id = body.get("symbol_id", "")
     direction = body.get("direction", "down")
-    max_depth = min(body.get("max_depth", 3), 5)
+    max_depth = min(body.get("max_depth", 3), 8)
     repo = body.get("repo")
 
     if not symbol_id:
@@ -1171,7 +1171,7 @@ async def get_source_context(request: Request) -> JSONResponse:
     line_start = body.get("line_start", 1)
     line_end = body.get("line_end", 1)
     repo = body.get("repo")
-    padding = min(body.get("padding", 5), 20)
+    padding = min(body.get("padding", 5), 50)
 
     if not file_path or not repo:
         return JSONResponse({"error": "file_path and repo are required"}, status_code=400)
@@ -1198,7 +1198,7 @@ async def get_source_context(request: Request) -> JSONResponse:
     start = max(1, line_start - padding) - 1
     end = min(len(lines), line_end + padding)
     # Anti-scraping: hard cap total returned lines
-    MAX_LINES = 200
+    MAX_LINES = 500
     if end - start > MAX_LINES:
         end = start + MAX_LINES
     selected = lines[start:end]

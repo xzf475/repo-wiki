@@ -15,7 +15,7 @@ def search_symbols(
     expand_depth: int = 1,
     branch: str = "",
 ) -> list[dict]:
-    top_k = min(top_k, 50)
+    top_k = min(top_k, 100)
     query_vector = embed_query(query, cfg.embedding)
     where_clause = {"branch": branch} if branch else None
     hits = search(query_vector, cfg.vector_store, repo_root, top_k=top_k, where=where_clause)
@@ -40,7 +40,7 @@ def trace_call(
     direction: str = "down",
     max_depth: int = 3,
 ) -> list[dict]:
-    max_depth = min(max_depth, 5)
+    max_depth = min(max_depth, 8)
     seed = get_by_ids([symbol_id], cfg.vector_store, repo_root)
     if not seed:
         return []
@@ -87,7 +87,7 @@ def get_source_context(
     repo_root: Path,
     padding: int = 5,
 ) -> str:
-    padding = min(padding, 20)
+    padding = min(padding, 50)
     abs_path = (repo_root / file_path).resolve()
     root_resolved = repo_root.resolve()
 
@@ -105,7 +105,7 @@ def get_source_context(
     start = max(1, line_start - padding) - 1
     end = min(len(lines), line_end + padding)
     # Anti-scraping: hard cap total returned lines
-    MAX_LINES = 200
+    MAX_LINES = 500
     if end - start > MAX_LINES:
         end = start + MAX_LINES
 

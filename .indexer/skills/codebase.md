@@ -20,19 +20,19 @@ The wiki captures structure, relationships, and constraints in a fraction of the
 
 ## Stats
 
-- **62 symbols** across **2 files** — indexed 2026-04-29 @ `d3851c5d`
+- **62 symbols** across **2 files** — indexed 2026-04-29 @ `d388569d`
 - Wiki: `wiki/` — 1 page(s)
 - Manifest: `.indexer/manifest.json` — maps every file to its wiki page and component IDs
 
 ## System Overview
 
-The indexer service manages repository registration and indexing tasks via a REST API (indexer/rest_api.py). Core components are the RepoRegistry (persistent repo metadata store) and TaskStore (asynchronous task queue for indexing operations). The service exposes endpoints for registering/unregistering repos, triggering sync/rebuild, and checking status, with authentication and logging middleware wrapping all requests.
+This indexer service manages code repository indexing and retrieval via a REST API. The core components are `TaskStore` for tracking background indexing tasks and `RepoRegistry` for persisting repository metadata, both used by endpoints in `indexer/rest_api.py`. The `indexer/retrieval.py` module (not detailed here) handles retrieval logic. The service supports registering, syncing, rebuilding, and unregistering repos, with middleware for logging (`_LoggingMiddleware`) and authentication (`_AuthMiddleware`).
 ## Key Request Flows
-- register_repo endpoint → validate_repo → RepoRegistry.register → _run_register_task → TaskStore.create → async indexer task
-- sync_repo endpoint → RepoRegistry.get → TaskStore.create (sync task) → _index_page → repo retrieval logic
-- webhook_by_name endpoint → RepoRegistry.get → TaskStore.create (rebuild task) → rebuild_repo → _run_all
-- health endpoint → TaskStore.get (status check) → return health status
-- request → _AuthMiddleware.dispatch (JWT validation) → route handler → response → _LoggingMiddleware.dispatch
+- Register repo endpoint → `register_repo` → `_run_register_task` → `TaskStore.create` → background indexing
+- Sync repo endpoint → `sync_repo` → `TaskStore.update` as task starts → triggers indexing of branches
+- Health check → `health` endpoint → returns basic service status (no TaskStore dependency)
+- Unregister repo → `unregister_repo` → `RepoRegistry.unregister` → `RepoRegistry._save` to persist change
+- List repos → `list_repos` → `RepoRegistry.list_names` → returns all registered repo names
 
 ## Wiki Pages
 
@@ -41,12 +41,12 @@ The indexer service manages repository registration and indexing tasks via a RES
 | [indexer](../wiki/indexer.md) | indexer/rest_api.py, indexer/retrieval.py | TaskStore, TaskStore.__init__, TaskStore._cleanup, TaskStore.create, TaskStore.get |
 ## Critical Constraints (read before editing)
 **indexer**
-- A per-repo lock (via `_get_repo_lock`) prevents concurrent register/sync/rebuild operations on the same repo; the lock must be explicitly acquired and released in each task function.
-- `TaskStore._cleanup` is called on every `create()`, removing stale tasks older than max age; callers must not rely on tasks persisting indefinitely.
-- `RepoRegistry` stores data in a temporary directory (`gettempdir`), so registry is ephemeral across restarts unless persisted elsewhere.
-- Default branch detection and remote branch listing use `git ls-remote`; they may fail or return empty for repositories without remotes or with authentication issues.
-- Unregister (`unregister_repo`) only removes the entry from `RepoRegistry`; it does not delete indexed data or the local clone (that is left to a separate cleanup or subsequent rebuild).
-- Validation computes tracked file counts from `all_tracked_files` and sums file counts from manifest; missing files are reported but not automatically fixed.
+- Per-repo lock acquired via `_get_repo_lock` (a `Lock` per repo name); two operations on the same repo will be serialized, but different repos can run concurrently.
+- `TaskStore` is purely in-memory and tasks expire after a hardcoded TTL (checked in `_cleanup`). Task IDs (UUIDs) are transient — lost on server restart.
+- `RepoRegistry` stores entries on disk (temp directory) with a legacy migration path (`_load` converts old format and detects default branch via `_detect_default_branch`). Saving happens synchronously after every mutation.
+- Remote branch discovery (`_discover_remote_branches`) uses `git ls-remote` with fnmatch glob patterns; results are cached only during the call — no persistent branch list.
+- Default branch detection (`_detect_default_branch`) parses `git symbolic-ref` output; fallback is 'main' if detection fails (handled in `_load` via warning).
+- Indexing pipeline functions (`describe_nodes`, `deep_enrich_pages`, `build_batches`, `density_group`) are expected to be synchronous and run inside `run_in_executor` to avoid blocking the event loop.
 
 ## Workflow — How to Answer Questions About This Codebase
 
