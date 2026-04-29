@@ -516,6 +516,59 @@ async def sync_all_branches(request: Request) -> JSONResponse:
     return JSONResponse({"task_id": task_id, "name": name, "branches": branches, "status": "pending"})
 
 
+async def reindex_repo(request: Request) -> JSONResponse:
+    """Atomically update repo meta + re-discover branches + rebuild all."""
+    repo_name = request.path_params.get("name", "")
+    info = registry.get(repo_name)
+    if not info:
+        return JSONResponse({"error": f"repo '{repo_name}' not registered"}, status_code=404)
+
+    body = await _parse_body(request)
+    description = body.get("description")
+    tags = body.get("tags")
+    branch_rule = body.get("branch_rule")
+    skip_deep = body.get("skip_deep", True)
+
+    if description is None and tags is None and branch_rule is None:
+        return JSONResponse({"error": "no fields to update (send description, tags, and/or branch_rule)"}, status_code=400)
+
+    # 1. Update meta
+    registry.update_meta(repo_name, description=description, tags=tags, branch_rule=branch_rule)
+
+    # 2. Re-discover branches if branch_rule changed
+    url = info.get("url", "")
+    if branch_rule is not None and url:
+        discovered = _discover_remote_branches(url, branch_rule)
+        if discovered:
+            registry.register(repo_name, info["root"], url=url, branches=discovered, branch_rule=branch_rule, description=description, tags=tags)
+        else:
+            logger.warning("No branches matched branch_rule '%s' for repo %s", branch_rule, repo_name)
+
+    # 3. Rebuild all branches (no locking since we coordinate the sequence)
+    updated_info = registry.get(repo_name)
+    branches_to_rebuild = updated_info.get("branches", []) if updated_info else []
+    if not branches_to_rebuild:
+        return JSONResponse({"error": f"no branches to rebuild for '{repo_name}'"}, status_code=400)
+
+    task_id = tasks.create(repo_name, url)
+    root = info["root"]
+
+    def _rebuild_all():
+        for br in branches_to_rebuild:
+            _run_rebuild_task_inner(task_id, repo_name, root, skip_deep, branch=br, repo_url=url, repo_branches=branches_to_rebuild)
+        tasks.update(task_id, status="done", progress=100, step="complete", result={"branches": branches_to_rebuild})
+
+    loop = asyncio.get_running_loop()
+    loop.run_in_executor(None, _rebuild_all)
+
+    return JSONResponse({
+        "task_id": task_id,
+        "name": repo_name,
+        "branches": branches_to_rebuild,
+        "status": "pending",
+    })
+
+
 async def rebuild_all_branches(request: Request) -> JSONResponse:
     body = await _parse_body(request)
     name = body.get("name", "")
@@ -653,10 +706,17 @@ def _run_rebuild_task(task_id: str, name: str, root: Path, skip_deep: bool, bran
         existing = registry.get(name)
         repo_url = existing.get("url", "") if existing else ""
         repo_branches = existing.get("branches", []) if existing else []
-        repo_branch = branch or (repo_branches[0] if repo_branches else "")
+        _run_rebuild_task_inner(task_id, name, root, skip_deep, branch=branch, repo_url=repo_url, repo_branches=repo_branches)
+    finally:
+        lock.release()
 
-        import shutil
 
+def _run_rebuild_task_inner(task_id: str, name: str, root: Path, skip_deep: bool, branch: str = "", repo_url: str = "", repo_branches: list[str] | None = None) -> None:
+    repo_branch = branch or (repo_branches[0] if repo_branches else "")
+
+    import shutil
+
+    try:
         tasks.update(task_id, status="running", progress=5, step="cleaning")
         wiki_dir = root / "wiki"
         indexer_dir = root / ".indexer"
@@ -697,13 +757,14 @@ def _run_rebuild_task(task_id: str, name: str, root: Path, skip_deep: bool, bran
         cfg = load_config(root)
         save_config(root, cfg)
 
-        logger.info("Rebuild repo=%s branch=%s files=%d", name, repo_branch or "(default)", len(candidates) if candidates else 0)
         if is_git_repo(root) and cfg.pre_commit:
             install_hook(root, skip_deep=not cfg.deep_hook)
 
         tasks.update(task_id, status="running", progress=15, step="detecting_files")
         all_files = [f for f in all_tracked_files(root) if _is_indexable(f, cfg)]
         candidates = all_files
+
+        logger.info("Rebuild repo=%s branch=%s files=%d", name, repo_branch or "(default)", len(candidates))
 
         if not candidates:
             tasks.update(task_id, status="done", progress=100, step="complete", detail="Nothing to index")
@@ -729,11 +790,8 @@ def _run_rebuild_task(task_id: str, name: str, root: Path, skip_deep: bool, bran
             "symbol_count": symbol_count, "rebuilt": True,
             "webhook_url": webhook_url,
         })
-
     except Exception as e:
         tasks.update(task_id, status="failed", progress=0, step="unknown", error=str(e))
-    finally:
-        lock.release()
 
 
 
@@ -1547,6 +1605,7 @@ async def webhook_by_name(request: Request) -> JSONResponse:
 
     info = registry.get(name)
     repo_branches = info.get("branches", [])
+    branch_rule = info.get("branch_rule", "")
 
     try:
         payload = json.loads(body)
@@ -1558,7 +1617,16 @@ async def webhook_by_name(request: Request) -> JSONResponse:
     if ref.startswith("refs/heads/"):
         webhook_branch = ref[len("refs/heads/"):]
 
-    target_branch = webhook_branch if (not repo_branches or webhook_branch in repo_branches) else ""
+    target_branch = ""
+    if webhook_branch:
+        if not repo_branches or webhook_branch in repo_branches:
+            target_branch = webhook_branch
+        elif branch_rule and fnmatch.fnmatch(webhook_branch, branch_rule):
+            # New branch matching branch_rule — register it and sync
+            target_branch = webhook_branch
+            if target_branch not in repo_branches:
+                repo_branches.append(target_branch)
+                registry.register(name, info["root"], url=info.get("url", ""), branches=repo_branches, branch_rule=branch_rule)
     logger.info("Webhook triggered: repo=%s branch=%s", name, target_branch or webhook_branch or "(any)")
     task_id = tasks.create(name, info.get("url", ""))
 
@@ -1634,6 +1702,7 @@ def create_app(repos: dict[str, Path] | None = None, repos_dir: Path | None = No
             Route("/webhook/{name}", webhook_by_name, methods=["POST"]),
             Route("/api/repo/{name}", repo_detail),
             Route("/api/repo/{name}", update_repo_meta, methods=["PATCH"]),
+            Route("/api/repo/{name}/reindex", reindex_repo, methods=["POST"]),
             Route("/api/validate/{name}", validate_repo),
             Route("/api/task/{task_id}", task_status),
             Route("/skill", multi_repo_skill),

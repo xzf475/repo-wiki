@@ -602,24 +602,18 @@ async function doEditMeta(){
   const statusEl=document.getElementById('edit-meta-status');
   const btn=document.getElementById('edit-meta-btn');
   btn.disabled=true;
-  statusEl.textContent='Updating...';
+  statusEl.textContent='Updating & reindexing...';
 
   try{
-    const data=await api('/api/repo/'+encodeURIComponent(name),'PATCH',{description,tags,branch_rule});
+    const data=await api('/api/repo/'+encodeURIComponent(name)+'/reindex','POST',{description,tags,branch_rule});
     if(data.error){
       statusEl.textContent='Error: '+data.error;
       btn.disabled=false;
       return;
     }
     hideEditMeta();
-    toast(`"${name}" info updated, starting re-sync of all branches...`,'info');
-    // Re-sync all branches
-    const syncData=await api('/sync-all','POST',{name});
-    if(syncData.error){
-      toast('Sync error: '+syncData.error,'error');
-    }else{
-      toast(`Re-sync started for ${(syncData.branches||[]).length} branches`,'info');
-    }
+    const n=(data.branches||[]).length;
+    toast(`"${name}" info updated, reindexing ${n} branches (${data.task_id})`,'info');
     openRepo(name);
   }catch(e){
     statusEl.textContent='Network error: '+e.message;

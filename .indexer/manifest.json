@@ -1,6 +1,6 @@
 {
-  "last_indexed_commit": "02415dfb9ec17fdba069d385d052ce25d82caa8c",
-  "indexed_at": "2026-04-29T12:48:51.672035+00:00",
+  "last_indexed_commit": "3f01d0666d9aa552f77ee217406d68705b18d0ee",
+  "indexed_at": "2026-04-29T15:03:23.482181+00:00",
   "files": {
     "indexer/__init__.py": {
       "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -214,7 +214,7 @@
       ]
     },
     "indexer/rest_api.py": {
-      "hash": "sha256:81b98f8d2839e298d8b63e15043a7b06be7b6351e5838f571a714a4d94a3cea2",
+      "hash": "sha256:289fb4853e4662ecc4d9308a268cbb4613029c7129691310b8dfa3a0230a8485",
       "wiki_page": "wiki/root.md",
       "component_ids": [
         "indexer/rest_api.py::_get_repo_lock",
@@ -241,9 +241,11 @@
         "indexer/rest_api.py::sync_repo",
         "indexer/rest_api.py::rebuild_repo",
         "indexer/rest_api.py::sync_all_branches",
+        "indexer/rest_api.py::reindex_repo",
         "indexer/rest_api.py::rebuild_all_branches",
         "indexer/rest_api.py::_run_indexing_pipeline",
         "indexer/rest_api.py::_run_rebuild_task",
+        "indexer/rest_api.py::_run_rebuild_task_inner",
         "indexer/rest_api.py::_run_sync_task",
         "indexer/rest_api.py::_run_register_task",
         "indexer/rest_api.py::_run_register_task_inner",
@@ -271,6 +273,7 @@
         "indexer/rest_api.py::_parse_json_list",
         "indexer/rest_api.py::_parse_body",
         "indexer/rest_api.py::_run_all",
+        "indexer/rest_api.py::_rebuild_all",
         "indexer/rest_api.py::_run_all",
         "indexer/rest_api.py::_LoggingMiddleware",
         "indexer/rest_api.py::_LoggingMiddleware.dispatch",

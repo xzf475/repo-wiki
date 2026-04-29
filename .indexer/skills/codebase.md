@@ -20,19 +20,19 @@ The wiki captures structure, relationships, and constraints in a fraction of the
 
 ## Stats
 
-- **59 symbols** across **1 files** — indexed 2026-04-29 @ `02415dfb`
+- **62 symbols** across **1 files** — indexed 2026-04-29 @ `3f01d066`
 - Wiki: `wiki/` — 1 page(s)
 - Manifest: `.indexer/manifest.json` — maps every file to its wiki page and component IDs
 
 ## System Overview
 
-The system is a REST API for indexing and managing code repositories, built with FastAPI (likely) and exposed via `indexer/rest_api.py`. Main components include `TaskStore` for persistent task management (create, get, update, cleanup), `RepoRegistry` for repo metadata (register, unregister, list, update meta), and a set of route handlers (`register_repo`, `unregister_repo`, `sync_repo`, `rebuild_repo`, `sync_all_branches`, `health`, `webhook_by_name`) with middleware layers for logging (`_LoggingMiddleware`) and authentication (`_AuthMiddleware`). The `multi_repo_skill` entry point suggests a batched operation across repos, and webhooks trigger index updates.
+The system is a REST API (likely FastAPI) defined in `indexer/rest_api.py` for managing code repository indexing and synchronization. It exposes endpoints to register, unregister, sync, rebuild, and reindex repositories, with task management via `TaskStore` and persistent repo metadata via `RepoRegistry`. Request processing is layered with `_LoggingMiddleware` and `_AuthMiddleware` for audit and JWT authentication, and all heavy operations are dispatched as asynchronous tasks. The overall architecture centers on stateless route handlers that delegate to store and registry components, with status polling endpoints to track progress.
 ## Key Request Flows
-- POST /register_repo → validate_repo → RepoRegistry.register → TaskStore.create (index task) → _run_register_task
-- POST /unregister_repo → RepoRegistry.unregister → TaskStore.create (cleanup task) → _run_all
-- POST /sync_all_branches → sync_all_branches → RepoRegistry.list_names → TaskStore.create (sync tasks per repo) → _run_all
-- POST /webhook_by_name → webhook_by_name → RepoRegistry.get → validate → TaskStore.create (rebuild task) → _run_all
-- GET /repos → list_repos → RepoRegistry.list_names → RepoRegistry.get (each) → return repo detail
+- _AuthMiddleware.dispatch (JWT validation) → route handler (e.g., register_repo, list_repos, health)
+- register_repo → _run_register_task → TaskStore.create (task) → RepoRegistry.register (persist metadata) → task_status (polling)
+- sync_repo → TaskStore.create (sync task) → RepoRegistry.get (lookup repo) → _rebuild_all? → task_status
+- webhook_by_name → RepoRegistry.get (lookup webhook) → trigger sync or rebuild → task_status
+- health → simple response; also used by monitoring to verify auth/logging middleware is active
 
 ## Wiki Pages
 
