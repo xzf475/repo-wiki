@@ -1,6 +1,6 @@
 {
-  "last_indexed_commit": "72695493cfab23ad693127817e79f16a5325ea40",
-  "indexed_at": "2026-04-28T18:09:19.010797+00:00",
+  "last_indexed_commit": "d3851c5d44cae9ec77ac8ec7a02d776059b3e901",
+  "indexed_at": "2026-04-29T03:06:28.359663+00:00",
   "files": {
     "indexer/__init__.py": {
       "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -214,8 +214,8 @@
       ]
     },
     "indexer/rest_api.py": {
-      "hash": "sha256:31ad9f392fdc3a07963957b4862f8ece57397d63d31833823fe88276f99294ed",
-      "wiki_page": "wiki/root.md",
+      "hash": "sha256:709a467dc68582749daeb01c3806a13d0dc1883cf3e1a22065ee895fac9a6c85",
+      "wiki_page": "wiki/indexer.md",
       "component_ids": [
         "indexer/rest_api.py::_get_repo_lock",
         "indexer/rest_api.py::TaskStore",
@@ -270,12 +270,14 @@
         "indexer/rest_api.py::_parse_body",
         "indexer/rest_api.py::_run_all",
         "indexer/rest_api.py::_run_all",
+        "indexer/rest_api.py::_LoggingMiddleware",
+        "indexer/rest_api.py::_LoggingMiddleware.dispatch",
         "indexer/rest_api.py::_AuthMiddleware",
         "indexer/rest_api.py::_AuthMiddleware.dispatch"
       ]
     },
     "indexer/retrieval.py": {
-      "hash": "sha256:a00f24fd0ad11d637d92cd43734f9b3fd2e00dad07aabf64333f945612b8438b",
+      "hash": "sha256:d42a13e966ebc576bf7b8b787a460aaf67018fc5e555b78090eff72169ed80c4",
       "wiki_page": "wiki/indexer.md",
       "component_ids": [
         "indexer/retrieval.py::search_symbols",

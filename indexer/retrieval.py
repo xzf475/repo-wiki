@@ -15,12 +15,20 @@ def search_symbols(
     expand_depth: int = 1,
     branch: str = "",
 ) -> list[dict]:
+    top_k = min(top_k, 50)
     query_vector = embed_query(query, cfg.embedding)
     where_clause = {"branch": branch} if branch else None
     hits = search(query_vector, cfg.vector_store, repo_root, top_k=top_k, where=where_clause)
 
+    for h in hits:
+        if "document" in h and h["document"]:
+            h["document"] = h["document"][:2000]
+
     if expand_depth > 0:
         hits = _expand_with_call_graph(hits, cfg, repo_root, expand_depth)
+        for h in hits:
+            if "document" in h and h["document"]:
+                h["document"] = h["document"][:2000]
 
     return hits
 
@@ -32,6 +40,7 @@ def trace_call(
     direction: str = "down",
     max_depth: int = 3,
 ) -> list[dict]:
+    max_depth = min(max_depth, 5)
     seed = get_by_ids([symbol_id], cfg.vector_store, repo_root)
     if not seed:
         return []
@@ -78,6 +87,7 @@ def get_source_context(
     repo_root: Path,
     padding: int = 5,
 ) -> str:
+    padding = min(padding, 20)
     abs_path = (repo_root / file_path).resolve()
     root_resolved = repo_root.resolve()
 
@@ -94,6 +104,10 @@ def get_source_context(
 
     start = max(1, line_start - padding) - 1
     end = min(len(lines), line_end + padding)
+    # Anti-scraping: hard cap total returned lines
+    MAX_LINES = 200
+    if end - start > MAX_LINES:
+        end = start + MAX_LINES
 
     selected = lines[start:end]
     numbered = [f"{i+1:>4} | {line}" for i, line in zip(range(start, end), selected)]

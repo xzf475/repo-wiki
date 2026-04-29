@@ -20,25 +20,33 @@ The wiki captures structure, relationships, and constraints in a fraction of the
 
 ## Stats
 
-- **55 symbols** across **1 files** — indexed 2026-04-28 @ `72695493`
+- **62 symbols** across **2 files** — indexed 2026-04-29 @ `d3851c5d`
 - Wiki: `wiki/` — 1 page(s)
 - Manifest: `.indexer/manifest.json` — maps every file to its wiki page and component IDs
 
 ## System Overview
 
-The system is a REST API for managing indexing tasks across multiple code repositories, implemented primarily in `indexer/rest_api.py`. Main components are `TaskStore` (manages async task lifecycle and cleanup), `RepoRegistry` (persists repository metadata to disk), and `_AuthMiddleware` (JWT-based authentication). The API exposes endpoints for registering, syncing, rebuilding, and unregistering repos, as well as health checks and webhook handling; all flows coordinate between the middleware, the task store, and the registry.
+The indexer service manages repository registration and indexing tasks via a REST API (indexer/rest_api.py). Core components are the RepoRegistry (persistent repo metadata store) and TaskStore (asynchronous task queue for indexing operations). The service exposes endpoints for registering/unregistering repos, triggering sync/rebuild, and checking status, with authentication and logging middleware wrapping all requests.
 ## Key Request Flows
-- Auth Middleware → _AuthMiddleware.dispatch → route handler (e.g., register_repo, sync_repo)
-- Register repository → register_repo → RepoRegistry.register → _run_register_task → TaskStore.create → auto-triggers sync_all_branches
-- Sync/rebuild repository → sync_repo/rebuild_repo → TaskStore.create → repo_detail (status polling) or webhook_by_name → _run_all
-- Webhook trigger → webhook_by_name → validate_repo → _run_register_task or sync_all_branches → TaskStore tasks
-- Health check → health → TaskStore._cleanup → returns status (active/recent tasks count, registry summary)
+- register_repo endpoint → validate_repo → RepoRegistry.register → _run_register_task → TaskStore.create → async indexer task
+- sync_repo endpoint → RepoRegistry.get → TaskStore.create (sync task) → _index_page → repo retrieval logic
+- webhook_by_name endpoint → RepoRegistry.get → TaskStore.create (rebuild task) → rebuild_repo → _run_all
+- health endpoint → TaskStore.get (status check) → return health status
+- request → _AuthMiddleware.dispatch (JWT validation) → route handler → response → _LoggingMiddleware.dispatch
 
 ## Wiki Pages
 
 | Page | Covers | Key Entry Points |
 |------|--------|-----------------|
-| [root](../wiki/root.md) | indexer/rest_api.py | TaskStore, TaskStore.__init__, TaskStore._cleanup, TaskStore.create, TaskStore.get |
+| [indexer](../wiki/indexer.md) | indexer/rest_api.py, indexer/retrieval.py | TaskStore, TaskStore.__init__, TaskStore._cleanup, TaskStore.create, TaskStore.get |
+## Critical Constraints (read before editing)
+**indexer**
+- A per-repo lock (via `_get_repo_lock`) prevents concurrent register/sync/rebuild operations on the same repo; the lock must be explicitly acquired and released in each task function.
+- `TaskStore._cleanup` is called on every `create()`, removing stale tasks older than max age; callers must not rely on tasks persisting indefinitely.
+- `RepoRegistry` stores data in a temporary directory (`gettempdir`), so registry is ephemeral across restarts unless persisted elsewhere.
+- Default branch detection and remote branch listing use `git ls-remote`; they may fail or return empty for repositories without remotes or with authentication issues.
+- Unregister (`unregister_repo`) only removes the entry from `RepoRegistry`; it does not delete indexed data or the local clone (that is left to a separate cleanup or subsequent rebuild).
+- Validation computes tracked file counts from `all_tracked_files` and sums file counts from manifest; missing files are reported but not automatically fixed.
 
 ## Workflow — How to Answer Questions About This Codebase
 
