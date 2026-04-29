@@ -2,17 +2,17 @@
 
 ## System Overview
 
-The system is a code indexing service with dual interfaces: an MCP (Model Context Protocol) server exposing tools for symbol search, call tracing, and source context retrieval, and a REST API for repository management (register, sync, rebuild, unregister) and task tracking. Core components include the `indexer/mcp_server.py` serving MCP tools, `indexer/rest_api.py` hosting REST endpoints, `TaskStore` for asynchronous task creation and lifecycle, and `RepoRegistry` for persistent repository state. Middleware layers (`_MCPAuthMiddleware`, `_LoggingMiddleware`, `_AuthMiddleware`) provide authentication and logging across both interfaces, while a webhook endpoint (`webhook_by_name`) enables event-driven reindexing.
+The system is a REST API for indexing and managing code repositories, built with FastAPI (likely) and exposed via `indexer/rest_api.py`. Main components include `TaskStore` for persistent task management (create, get, update, cleanup), `RepoRegistry` for repo metadata (register, unregister, list, update meta), and a set of route handlers (`register_repo`, `unregister_repo`, `sync_repo`, `rebuild_repo`, `sync_all_branches`, `health`, `webhook_by_name`) with middleware layers for logging (`_LoggingMiddleware`) and authentication (`_AuthMiddleware`). The `multi_repo_skill` entry point suggests a batched operation across repos, and webhooks trigger index updates.
 ## Key Flows
-- MCP client → _MCPAuthMiddleware.dispatch → search_symbols_tool (symbol lookup)
-- REST client → _AuthMiddleware.dispatch → register_repo → TaskStore.create → _run_register_task → RepoRegistry.register
-- REST client → sync_repo → TaskStore.create → (sync task targeting a repository)
-- Webhook POST → webhook_by_name → validates event → triggers indexing tasks via TaskStore.create
-- Any request → _LoggingMiddleware.dispatch → _AuthMiddleware.dispatch → route handler (REST or MCP)
+- POST /register_repo → validate_repo → RepoRegistry.register → TaskStore.create (index task) → _run_register_task
+- POST /unregister_repo → RepoRegistry.unregister → TaskStore.create (cleanup task) → _run_all
+- POST /sync_all_branches → sync_all_branches → RepoRegistry.list_names → TaskStore.create (sync tasks per repo) → _run_all
+- POST /webhook_by_name → webhook_by_name → RepoRegistry.get → validate → TaskStore.create (rebuild task) → _run_all
+- GET /repos → list_repos → RepoRegistry.list_names → RepoRegistry.get (each) → return repo detail
 
 ## Structure
 | Wiki Page | Covers | Entry Points |
 |-----------|--------|--------------|
-| wiki/indexer.md | indexer/mcp_server.py, indexer/rest_api.py | _patched_method, search_symbols_tool, trace_call_tool, get_source_context_tool, list_repos, search_symbols_tool, trace_call_tool, get_source_context_tool, _MCPAuthMiddleware.dispatch, TaskStore, TaskStore.__init__, TaskStore._cleanup, TaskStore.create, TaskStore.get, TaskStore.update, RepoRegistry, RepoRegistry.__init__, RepoRegistry._save, RepoRegistry._load, RepoRegistry.register, RepoRegistry.unregister, RepoRegistry.get, RepoRegistry.list_names, register_repo, task_status, validate_repo, sync_repo, rebuild_repo, sync_all_branches, rebuild_all_branches, _run_register_task, unregister_repo, list_repos, health, repo_detail, multi_repo_skill, webhook_by_name, _index_page, _run_all, _run_all, _LoggingMiddleware, _LoggingMiddleware.dispatch, _AuthMiddleware, _AuthMiddleware.dispatch |
+| wiki/root.md | indexer/rest_api.py | TaskStore, TaskStore.__init__, TaskStore._cleanup, TaskStore.create, TaskStore.get, TaskStore.update, RepoRegistry, RepoRegistry.__init__, RepoRegistry._save, RepoRegistry._load, RepoRegistry.register, RepoRegistry.unregister, RepoRegistry.get, RepoRegistry.list_names, RepoRegistry.update_meta, register_repo, task_status, validate_repo, sync_repo, rebuild_repo, sync_all_branches, rebuild_all_branches, _run_register_task, unregister_repo, list_repos, health, repo_detail, update_repo_meta, multi_repo_skill, webhook_by_name, _index_page, _run_all, _run_all, _LoggingMiddleware, _LoggingMiddleware.dispatch, _AuthMiddleware, _AuthMiddleware.dispatch |
 ## Last Indexed
-Commit: e7850e36764e1724c1c97b7a4d497e9bded3e0a3 — 2026-04-29
+Commit: 02415dfb9ec17fdba069d385d052ce25d82caa8c — 2026-04-29

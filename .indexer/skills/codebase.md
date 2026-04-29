@@ -20,33 +20,25 @@ The wiki captures structure, relationships, and constraints in a fraction of the
 
 ## Stats
 
-- **72 symbols** across **2 files** — indexed 2026-04-29 @ `e7850e36`
+- **59 symbols** across **1 files** — indexed 2026-04-29 @ `02415dfb`
 - Wiki: `wiki/` — 1 page(s)
 - Manifest: `.indexer/manifest.json` — maps every file to its wiki page and component IDs
 
 ## System Overview
 
-The system is a code indexing service with dual interfaces: an MCP (Model Context Protocol) server exposing tools for symbol search, call tracing, and source context retrieval, and a REST API for repository management (register, sync, rebuild, unregister) and task tracking. Core components include the `indexer/mcp_server.py` serving MCP tools, `indexer/rest_api.py` hosting REST endpoints, `TaskStore` for asynchronous task creation and lifecycle, and `RepoRegistry` for persistent repository state. Middleware layers (`_MCPAuthMiddleware`, `_LoggingMiddleware`, `_AuthMiddleware`) provide authentication and logging across both interfaces, while a webhook endpoint (`webhook_by_name`) enables event-driven reindexing.
+The system is a REST API for indexing and managing code repositories, built with FastAPI (likely) and exposed via `indexer/rest_api.py`. Main components include `TaskStore` for persistent task management (create, get, update, cleanup), `RepoRegistry` for repo metadata (register, unregister, list, update meta), and a set of route handlers (`register_repo`, `unregister_repo`, `sync_repo`, `rebuild_repo`, `sync_all_branches`, `health`, `webhook_by_name`) with middleware layers for logging (`_LoggingMiddleware`) and authentication (`_AuthMiddleware`). The `multi_repo_skill` entry point suggests a batched operation across repos, and webhooks trigger index updates.
 ## Key Request Flows
-- MCP client → _MCPAuthMiddleware.dispatch → search_symbols_tool (symbol lookup)
-- REST client → _AuthMiddleware.dispatch → register_repo → TaskStore.create → _run_register_task → RepoRegistry.register
-- REST client → sync_repo → TaskStore.create → (sync task targeting a repository)
-- Webhook POST → webhook_by_name → validates event → triggers indexing tasks via TaskStore.create
-- Any request → _LoggingMiddleware.dispatch → _AuthMiddleware.dispatch → route handler (REST or MCP)
+- POST /register_repo → validate_repo → RepoRegistry.register → TaskStore.create (index task) → _run_register_task
+- POST /unregister_repo → RepoRegistry.unregister → TaskStore.create (cleanup task) → _run_all
+- POST /sync_all_branches → sync_all_branches → RepoRegistry.list_names → TaskStore.create (sync tasks per repo) → _run_all
+- POST /webhook_by_name → webhook_by_name → RepoRegistry.get → validate → TaskStore.create (rebuild task) → _run_all
+- GET /repos → list_repos → RepoRegistry.list_names → RepoRegistry.get (each) → return repo detail
 
 ## Wiki Pages
 
 | Page | Covers | Key Entry Points |
 |------|--------|-----------------|
-| [indexer](../wiki/indexer.md) | indexer/mcp_server.py, indexer/rest_api.py | _patched_method, search_symbols_tool, trace_call_tool, get_source_context_tool, list_repos |
-## Critical Constraints (read before editing)
-**indexer**
-- The MCP authentication patching (_apply_mcp_auth) is only applied when create_server is called directly; the REST API backend mode (create_api_server) has no auth layer.
-- TaskStore entries older than 1 hour are silently removed on every create() call, so long-running tasks may expire before being polled.
-- RepoRegistry persistence uses a single temp JSON file (no database); data is lost on machine reboot unless re-registered.
-- Default branch detection (_detect_default_branch) requires network access to the remote git endpoint and may silently fail for unreachable repos.
-- The context tool (get_source_context_tool) returns raw code lines without any sanitization; callers must handle potentially large output.
-- The direct server mode (create_server) uses the current working directory (cwd) as the base path, making it sensitive to the process's startup directory.
+| [root](../wiki/root.md) | indexer/rest_api.py | TaskStore, TaskStore.__init__, TaskStore._cleanup, TaskStore.create, TaskStore.get |
 
 ## Workflow — How to Answer Questions About This Codebase
 

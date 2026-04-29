@@ -157,9 +157,16 @@ footer{border-top:1px solid var(--border);padding:16px 32px;text-align:center;fo
 
   <div id="repo-detail-view" class="view" style="display:none">
     <div class="repo-header">
-      <h1 id="detail-name"></h1>
+      <h1 id="detail-name" style="margin:0"></h1>
       <span class="meta" id="detail-meta"></span>
-      <button onclick="backToRepos()">&#8592; Back</button>
+      <div id="detail-desc" style="font-size:13px;color:var(--text2);margin-top:4px"></div>
+      <div id="detail-tags" style="display:flex;flex-wrap:wrap;gap:4px;margin-top:4px"></div>
+      <div id="detail-branches" style="display:flex;flex-wrap:wrap;gap:4px;margin-top:6px;align-items:center"></div>
+      <div id="detail-branch-rule" style="font-size:11px;color:var(--text3);margin-top:2px"></div>
+      <div style="margin-top:8px;display:flex;gap:6px">
+        <button onclick="showEditMeta()" style="font-size:12px;padding:5px 12px">&#9998; Edit Info</button>
+        <button onclick="backToRepos()">&#8592; Back</button>
+      </div>
     </div>
     <div class="tabs" id="detail-tabs">
       <div class="tab active" data-tab="wiki" onclick="switchTab('wiki')">Wiki Pages</div>
@@ -192,7 +199,10 @@ footer{border-top:1px solid var(--border);padding:16px 32px;text-align:center;fo
     <h3 style="font-family:var(--serif);font-size:20px;margin-bottom:16px;color:var(--text)">Register Repository</h3>
     <div class="field"><label>URL</label><input type="text" id="reg-url" placeholder="https://github.com/org/repo.git"></div>
     <div class="field"><label>Name (optional)</label><input type="text" id="reg-name" placeholder="Auto-detected from URL"></div>
+    <div class="field"><label>Description (optional)</label><input type="text" id="reg-desc" placeholder="e.g. Microservice gateway with JWT auth"></div>
+    <div class="field"><label>Tags (optional, comma separated)</label><input type="text" id="reg-tags" placeholder="e.g. auth, gateway, go"></div>
     <div class="field"><label>Branch (optional)</label><input type="text" id="reg-branch" placeholder="Default branch"></div>
+    <div class="field"><label>Branch Rule (optional, glob pattern)</label><input type="text" id="reg-branch-rule" placeholder="e.g. release/* to auto-discover all release branches"></div>
     <div class="field"><label>Token (GitHub PAT, GitLab token)</label><input type="password" id="reg-token" placeholder="ghp_xxx or glpat-xxx"></div>
     <div class="field"><label>Username</label><input type="text" id="reg-username" placeholder="For password auth"></div>
     <div class="field"><label>Password</label><input type="password" id="reg-password" placeholder="For password auth"></div>
@@ -214,6 +224,21 @@ footer{border-top:1px solid var(--border);padding:16px 32px;text-align:center;fo
       <button onclick="hideRebuild()">Cancel</button>
     </div>
     <div id="rebuild-status" style="margin-top:12px;font-size:12px;color:var(--text3)"></div>
+  </div>
+</div>
+
+<div id="edit-meta-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.6);z-index:200;display:none;align-items:center;justify-content:center">
+  <div class="register-form" style="position:relative">
+    <h3 style="font-family:var(--serif);font-size:20px;margin-bottom:16px;color:var(--text)">Edit Repository Info</h3>
+    <p style="font-size:12px;color:var(--text3);margin-bottom:12px">Editing <strong id="edit-meta-name"></strong>. Changes will trigger a re-sync of all branches.</p>
+    <div class="field"><label>Description</label><input type="text" id="edit-desc" placeholder="e.g. Microservice gateway with JWT auth"></div>
+    <div class="field"><label>Tags (comma separated)</label><input type="text" id="edit-tags" placeholder="e.g. auth, gateway, go"></div>
+    <div class="field"><label>Branch Rule (glob pattern)</label><input type="text" id="edit-branch-rule" placeholder="e.g. release/*, feature/*, *"></div>
+    <div style="display:flex;gap:8px;margin-top:16px">
+      <button onclick="doEditMeta()" class="primary" id="edit-meta-btn">Save & Re-sync</button>
+      <button onclick="hideEditMeta()">Cancel</button>
+    </div>
+    <div id="edit-meta-status" style="margin-top:12px;font-size:12px;color:var(--text3)"></div>
   </div>
 </div>
 
@@ -274,6 +299,8 @@ async function loadRepos(){
       <div class="status-dot ${r.has_vector_db?'ready':'empty'}"></div>
       <div class="name" onclick="openRepo('${esc(r.name)}')">${esc(r.name)}</div>
       <div class="path">${esc(r.path)}</div>
+      ${r.description?`<div style="font-size:12px;color:var(--text2);margin-top:2px">${esc(r.description)}</div>`:''}
+      ${r.tags&&r.tags.length?`<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:4px">${r.tags.map(t=>'<span style="font-size:10px;padding:1px 6px;background:var(--surface2);border-radius:3px;color:var(--accent2)">#'+esc(t)+'</span>').join('')}</div>`:''}
       <div class="stats">
         <span class="stat">&#9654; <span class="val">${r.symbol_count||0}</span> symbols</span>
         <span class="stat">${r.has_vector_db?'&#10003; Vector DB':'&#10005; No vectors'}</span>
@@ -309,6 +336,32 @@ async function openRepo(name){
   document.getElementById('repo-detail-view').style.display='block';
   document.getElementById('detail-name').textContent=data.name;
   document.getElementById('detail-meta').textContent=data.path+' | '+data.wiki_pages.length+' wiki pages | '+Object.keys(data.manifest.files||{}).length+' tracked files';
+  const descEl=document.getElementById('detail-desc');
+  const tagsEl=document.getElementById('detail-tags');
+  if(data.description){
+    descEl.textContent=data.description;
+    descEl.style.display='block';
+  }else{
+    descEl.style.display='none';
+  }
+  if(data.tags&&data.tags.length){
+    tagsEl.innerHTML=data.tags.map(t=>'<span style="font-size:11px;padding:2px 8px;background:var(--surface2);border-radius:3px;color:var(--accent2)">#'+esc(t)+'</span>').join(' ');
+    tagsEl.style.display='flex';
+  }else{
+    tagsEl.style.display='none';
+  }
+  const branchesEl=document.getElementById('detail-branches');
+  branchesEl.innerHTML='';
+  if(data.branches&&data.branches.length){
+    branchesEl.innerHTML=data.branches.map(b=>'<span style="font-size:10px;padding:2px 8px;border:1px solid var(--accent);border-radius:3px;color:var(--accent)">'+esc(b)+'</span>').join('');
+  }
+  const ruleEl=document.getElementById('detail-branch-rule');
+  if(data.branch_rule){
+    ruleEl.innerHTML='Branch Rule: <code style="font-size:11px;color:var(--amber)">'+esc(data.branch_rule)+'</code>';
+    ruleEl.style.display='block';
+  }else{
+    ruleEl.style.display='none';
+  }
   renderWiki(data.wiki_pages);
   renderManifest(data.manifest);
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
@@ -519,13 +572,71 @@ async function doValidate(repoName){
   }
 }
 
+function showEditMeta(){
+  const name=currentRepo;
+  document.getElementById('edit-meta-name').textContent=name;
+  // Pre-fill with current values from the detail page
+  document.getElementById('edit-desc').value=document.getElementById('detail-desc').textContent||'';
+  // Tags: read from the rendered tags spans
+  const tagsEl=document.getElementById('detail-tags');
+  const tags=tagsEl.style.display!=='none'?Array.from(tagsEl.querySelectorAll('span')).map(s=>s.textContent.replace('#','')).join(', '):'';
+  document.getElementById('edit-tags').value=tags;
+  const ruleEl=document.getElementById('detail-branch-rule');
+  const rule=ruleEl.style.display!=='none'?(ruleEl.querySelector('code')?.textContent||''):'';
+  document.getElementById('edit-branch-rule').value=rule;
+  document.getElementById('edit-meta-status').textContent='';
+  document.getElementById('edit-meta-btn').disabled=false;
+  document.getElementById('edit-meta-modal').style.display='flex';
+}
+
+function hideEditMeta(){
+  document.getElementById('edit-meta-modal').style.display='none';
+}
+
+async function doEditMeta(){
+  const name=currentRepo;
+  const description=document.getElementById('edit-desc').value||undefined;
+  const tags=(document.getElementById('edit-tags').value||'').split(',').map(s=>s.trim()).filter(Boolean)||undefined;
+  const branch_rule=document.getElementById('edit-branch-rule').value||undefined;
+
+  const statusEl=document.getElementById('edit-meta-status');
+  const btn=document.getElementById('edit-meta-btn');
+  btn.disabled=true;
+  statusEl.textContent='Updating...';
+
+  try{
+    const data=await api('/api/repo/'+encodeURIComponent(name),'PATCH',{description,tags,branch_rule});
+    if(data.error){
+      statusEl.textContent='Error: '+data.error;
+      btn.disabled=false;
+      return;
+    }
+    hideEditMeta();
+    toast(`"${name}" info updated, starting re-sync of all branches...`,'info');
+    // Re-sync all branches
+    const syncData=await api('/sync-all','POST',{name});
+    if(syncData.error){
+      toast('Sync error: '+syncData.error,'error');
+    }else{
+      toast(`Re-sync started for ${(syncData.branches||[]).length} branches`,'info');
+    }
+    openRepo(name);
+  }catch(e){
+    statusEl.textContent='Network error: '+e.message;
+    btn.disabled=false;
+  }
+}
+
 async function doRegister(){
   const url=document.getElementById('reg-url').value;
   if(!url){toast('URL is required','error');return;}
   const body={
     url:url,
     name:document.getElementById('reg-name').value||undefined,
+    description:document.getElementById('reg-desc').value||undefined,
+    tags:(document.getElementById('reg-tags').value||'').split(',').map(s=>s.trim()).filter(Boolean)||undefined,
     branch:document.getElementById('reg-branch').value||undefined,
+    branch_rule:document.getElementById('reg-branch-rule').value||undefined,
     token:document.getElementById('reg-token').value||undefined,
     username:document.getElementById('reg-username').value||undefined,
     password:document.getElementById('reg-password').value||undefined,
@@ -542,6 +653,16 @@ async function doRegister(){
     const taskId=data.task_id;
     const repoName=data.name;
     hideRegister();
+    // Clear form fields
+    document.getElementById('reg-url').value='';
+    document.getElementById('reg-name').value='';
+    document.getElementById('reg-desc').value='';
+    document.getElementById('reg-tags').value='';
+    document.getElementById('reg-branch').value='';
+    document.getElementById('reg-branch-rule').value='';
+    document.getElementById('reg-token').value='';
+    document.getElementById('reg-username').value='';
+    document.getElementById('reg-password').value='';
     toast(`"${repoName}" registration started`,'info');
     document.getElementById('reg-btn').disabled=false;
     const stepNames={queued:'Queued',git_clone:'Cloning repository',git_pull:'Updating repository',init:'Initializing config',parsing:'Parsing files',cross_ref:'Cross-referencing calls',describing_symbols:'Describing symbols',describing_modules:'Describing modules',writing_wiki:'Writing wiki',deep_enrichment:'Deep enrichment',embedding:'Generating embeddings',upserting:'Storing vectors',complete:'Complete',indexing:'Indexing',rebuild_init:'Re-initializing',detecting_files:'Detecting files'};

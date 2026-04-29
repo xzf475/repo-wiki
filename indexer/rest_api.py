@@ -244,6 +244,19 @@ class RepoRegistry:
     def list_names(self) -> list[str]:
         return sorted(self.repos.keys())
 
+    def update_meta(self, name: str, description: str | None = None, tags: list[str] | None = None, branch_rule: str | None = None):
+        if name not in self.repos:
+            raise ValueError(f"repo '{name}' not found")
+        info = self.repos[name]
+        if description is not None:
+            info["description"] = description
+        if tags is not None:
+            info["tags"] = tags
+        if branch_rule is not None:
+            info["branch_rule"] = branch_rule
+        self._save()
+        logger.info(f"Updated meta for repo '{name}'")
+
 
 registry = RepoRegistry()
 registry._load()
@@ -1328,12 +1341,40 @@ async def repo_detail(request: Request) -> JSONResponse:
         "path": str(root),
         "url": info.get("url", ""),
         "branches": info.get("branches", []),
+        "description": info.get("description", ""),
+        "tags": info.get("tags", []),
+        "branch_rule": info.get("branch_rule", ""),
         "webhook_url": webhook_url,
         "wiki_pages": wiki_pages,
         "manifest": manifest_data,
         "skill": skill_content,
         "has_vector_db": (root / cfg.vector_store.persist_dir).exists(),
         "last_synced_at": manifest_data.get("indexed_at", "") if manifest_data else "",
+    })
+
+
+async def update_repo_meta(request: Request) -> JSONResponse:
+    repo_name = request.path_params.get("name", "")
+    info = registry.get(repo_name)
+    if not info:
+        return JSONResponse({"error": f"repo '{repo_name}' not registered"}, status_code=404)
+
+    body = await _parse_body(request)
+    description = body.get("description")
+    tags = body.get("tags")
+    branch_rule = body.get("branch_rule")
+
+    if description is None and tags is None and branch_rule is None:
+        return JSONResponse({"error": "no fields to update (send description, tags, and/or branch_rule)"}, status_code=400)
+
+    registry.update_meta(repo_name, description=description, tags=tags, branch_rule=branch_rule)
+
+    return JSONResponse({
+        "name": repo_name,
+        "description": description if description is not None else info.get("description", ""),
+        "tags": tags if tags is not None else info.get("tags", []),
+        "branch_rule": branch_rule if branch_rule is not None else info.get("branch_rule", ""),
+        "updated": True,
     })
 
 
@@ -1592,6 +1633,7 @@ def create_app(repos: dict[str, Path] | None = None, repos_dir: Path | None = No
             Route("/rebuild-all", rebuild_all_branches, methods=["POST"]),
             Route("/webhook/{name}", webhook_by_name, methods=["POST"]),
             Route("/api/repo/{name}", repo_detail),
+            Route("/api/repo/{name}", update_repo_meta, methods=["PATCH"]),
             Route("/api/validate/{name}", validate_repo),
             Route("/api/task/{task_id}", task_status),
             Route("/skill", multi_repo_skill),

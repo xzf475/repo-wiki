@@ -1,6 +1,6 @@
 {
-  "last_indexed_commit": "e7850e36764e1724c1c97b7a4d497e9bded3e0a3",
-  "indexed_at": "2026-04-29T05:57:33.925455+00:00",
+  "last_indexed_commit": "02415dfb9ec17fdba069d385d052ce25d82caa8c",
+  "indexed_at": "2026-04-29T12:48:51.672035+00:00",
   "files": {
     "indexer/__init__.py": {
       "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -214,8 +214,8 @@
       ]
     },
     "indexer/rest_api.py": {
-      "hash": "sha256:829ab3186955c6b7f259f38edad2762b536cc4fa017e6dccffc793ea76941808",
-      "wiki_page": "wiki/indexer.md",
+      "hash": "sha256:81b98f8d2839e298d8b63e15043a7b06be7b6351e5838f571a714a4d94a3cea2",
+      "wiki_page": "wiki/root.md",
       "component_ids": [
         "indexer/rest_api.py::_get_repo_lock",
         "indexer/rest_api.py::TaskStore",
@@ -234,6 +234,7 @@
         "indexer/rest_api.py::RepoRegistry.unregister",
         "indexer/rest_api.py::RepoRegistry.get",
         "indexer/rest_api.py::RepoRegistry.list_names",
+        "indexer/rest_api.py::RepoRegistry.update_meta",
         "indexer/rest_api.py::register_repo",
         "indexer/rest_api.py::task_status",
         "indexer/rest_api.py::validate_repo",
@@ -253,6 +254,7 @@
         "indexer/rest_api.py::list_repos",
         "indexer/rest_api.py::health",
         "indexer/rest_api.py::repo_detail",
+        "indexer/rest_api.py::update_repo_meta",
         "indexer/rest_api.py::multi_repo_skill",
         "indexer/rest_api.py::_get_webhook_url",
         "indexer/rest_api.py::_webhook_sign",
