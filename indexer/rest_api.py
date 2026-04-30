@@ -139,8 +139,16 @@ def _detect_default_branch(repo_root: Path) -> str:
     return "main"
 
 
+def _match_branch_rule(branch_name: str, rule: str) -> bool:
+    """Check if a branch name matches a comma-separated branch rule.
+    Supports glob patterns via fnmatch, e.g. 'main,release/*,feature/*'."""
+    patterns = [p.strip() for p in rule.split(",")]
+    return any(fnmatch.fnmatch(branch_name, p) for p in patterns)
+
+
 def _discover_remote_branches(url: str, pattern: str) -> list[str]:
-    """Use git ls-remote to find remote branches matching a glob pattern."""
+    """Use git ls-remote to find remote branches matching a glob pattern.
+    Supports comma-separated multi-patterns (e.g. 'main,release/*,feature/*')."""
     try:
         result = subprocess.run(
             ["git", "ls-remote", "--heads", url],
@@ -155,7 +163,7 @@ def _discover_remote_branches(url: str, pattern: str) -> list[str]:
             ref = line.split("\t")[-1].strip()
             if ref.startswith("refs/heads/"):
                 branch_name = ref[len("refs/heads/"):]
-                if fnmatch.fnmatch(branch_name, pattern):
+                if _match_branch_rule(branch_name, pattern):
                     branches.append(branch_name)
         return branches
     except Exception as e:
@@ -1621,7 +1629,7 @@ async def webhook_by_name(request: Request) -> JSONResponse:
     if webhook_branch:
         if not repo_branches or webhook_branch in repo_branches:
             target_branch = webhook_branch
-        elif branch_rule and fnmatch.fnmatch(webhook_branch, branch_rule):
+        elif branch_rule and _match_branch_rule(webhook_branch, branch_rule):
             # New branch matching branch_rule — register it and sync
             target_branch = webhook_branch
             if target_branch not in repo_branches:

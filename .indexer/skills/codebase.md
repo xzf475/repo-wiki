@@ -20,19 +20,19 @@ The wiki captures structure, relationships, and constraints in a fraction of the
 
 ## Stats
 
-- **62 symbols** across **1 files** — indexed 2026-04-29 @ `3f01d066`
+- **63 symbols** across **1 files** — indexed 2026-04-30 @ `0a35b869`
 - Wiki: `wiki/` — 1 page(s)
 - Manifest: `.indexer/manifest.json` — maps every file to its wiki page and component IDs
 
 ## System Overview
 
-The system is a REST API (likely FastAPI) defined in `indexer/rest_api.py` for managing code repository indexing and synchronization. It exposes endpoints to register, unregister, sync, rebuild, and reindex repositories, with task management via `TaskStore` and persistent repo metadata via `RepoRegistry`. Request processing is layered with `_LoggingMiddleware` and `_AuthMiddleware` for audit and JWT authentication, and all heavy operations are dispatched as asynchronous tasks. The overall architecture centers on stateless route handlers that delegate to store and registry components, with status polling endpoints to track progress.
+The system is a REST API service for managing code repository indexing, built with aiohttp. The main module is `indexer/rest_api.py`, which provides endpoints for repository registration, synchronization, reindexing, and task tracking. Core components include `RepoRegistry` for persisting repo metadata (likely stored as JSON), `TaskStore` for tracking async operations (cleanup, create, get, update), and middleware for authentication (`_AuthMiddleware`) and logging (`_LoggingMiddleware`). These components interact via route handlers (e.g., `register_repo`, `sync_repo`) that orchestrate calls to Registry, TaskStore, and indexing logic.
 ## Key Request Flows
-- _AuthMiddleware.dispatch (JWT validation) → route handler (e.g., register_repo, list_repos, health)
-- register_repo → _run_register_task → TaskStore.create (task) → RepoRegistry.register (persist metadata) → task_status (polling)
-- sync_repo → TaskStore.create (sync task) → RepoRegistry.get (lookup repo) → _rebuild_all? → task_status
-- webhook_by_name → RepoRegistry.get (lookup webhook) → trigger sync or rebuild → task_status
-- health → simple response; also used by monitoring to verify auth/logging middleware is active
+- HTTP request → _AuthMiddleware → route handler → RepoRegistry.register → _run_register_task → TaskStore.create → _cleanup
+- HTTP request → _AuthMiddleware → route handler → sync_repo → RepoRegistry.get → sync_all_branches → rebuild_all_branches → _rebuild_all → _index_page → TaskStore.update
+- HTTP request → _AuthMiddleware → route handler → unregister_repo → RepoRegistry.unregister → RepoRegistry._save → TaskStore._cleanup
+- HTTP request → _AuthMiddleware → route handler → list_repos → RepoRegistry.list_names → return JSON response
+- HTTP request → _AuthMiddleware → route handler → health → return status (includes TaskStore, RepoRegistry state checks)
 
 ## Wiki Pages
 
