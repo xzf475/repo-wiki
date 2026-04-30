@@ -1402,11 +1402,58 @@ async def repo_detail(request: Request) -> JSONResponse:
         skill_content = skill_path.read_text(encoding="utf-8", errors="replace")
 
     webhook_url = _get_webhook_url(repo_name, request)
+
+    # Gather per-branch detail: commit hash + index status
+    branches = info.get("branches", [])
+    branches_detail = []
+    is_git = (root / ".git").exists()
+    # Pre-setup vector store client for branch status checks
+    vector_client = None
+    vector_collection = None
+    try:
+        from chromadb import PersistentClient
+        persist_path = str(root / cfg.vector_store.persist_dir)
+        if (root / cfg.vector_store.persist_dir).exists():
+            vector_client = PersistentClient(path=persist_path)
+            vector_collection = vector_client.get_or_create_collection(cfg.vector_store.collection_name)
+    except Exception:
+        pass
+
+    for b in branches:
+        commit_hash = ""
+        if is_git:
+            try:
+                r = subprocess.run(
+                    ["git", "rev-parse", "refs/remotes/origin/" + b],
+                    cwd=root, capture_output=True, text=True, timeout=10,
+                )
+                if r.returncode == 0:
+                    commit_hash = r.stdout.strip()
+            except Exception:
+                pass
+
+        # Check vector store for this branch
+        has_branch_vectors = False
+        if vector_collection is not None:
+            try:
+                if vector_collection.count() > 0:
+                    branch_chunk = vector_collection.get(where={"branch": b}, limit=1)
+                    has_branch_vectors = bool(branch_chunk and branch_chunk.get("ids"))
+            except Exception:
+                pass
+
+        branches_detail.append({
+            "name": b,
+            "commit": commit_hash,
+            "indexed": has_branch_vectors,
+        })
+
     return JSONResponse({
         "name": repo_name,
         "path": str(root),
         "url": info.get("url", ""),
         "branches": info.get("branches", []),
+        "branches_detail": branches_detail,
         "description": info.get("description", ""),
         "tags": info.get("tags", []),
         "branch_rule": info.get("branch_rule", ""),
