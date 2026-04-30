@@ -20,19 +20,19 @@ The wiki captures structure, relationships, and constraints in a fraction of the
 
 ## Stats
 
-- **63 symbols** across **1 files** — indexed 2026-04-30 @ `25af1b81`
+- **63 symbols** across **1 files** — indexed 2026-04-30 @ `5faef9c2`
 - Wiki: `wiki/` — 1 page(s)
 - Manifest: `.indexer/manifest.json` — maps every file to its wiki page and component IDs
 
 ## System Overview
 
-The system is a FastAPI-based REST API service for indexing and managing code repositories, located in indexer/rest_api.py. It relies on two core components: TaskStore for asynchronous task orchestration (create, get, update, cleanup) and RepoRegistry for persisting repository metadata (name, branches, status). API endpoints (register_repo, sync_repo, reindex_repo, etc.) interact with these components, while _AuthMiddleware and _LoggingMiddleware provide cross-cutting authentication and request logging.
+The system is a REST API built with a lightweight framework (likely FastAPI) that manages the lifecycle of repository indexing tasks. Its core components are the `TaskStore` class, which handles creation, retrieval, and cleanup of tasks via an in-memory or persistent store, and the `RepoRegistry` class, which manages repository metadata (register, unregister, update, list). Route handlers such as `register_repo`, `unregister_repo`, `sync_repo`, and `rebuild_repo` orchestrate these components, often pushing work to background tasks. Middleware classes `_AuthMiddleware` and `_LoggingMiddleware` add authentication and request logging across all endpoints. The entire API is defined in `indexer/rest_api.py`.
 ## Key Request Flows
-- register_repo → RepoRegistry.register → _run_register_task → TaskStore.create → async indexing task
-- sync_repo → RepoRegistry.get → TaskStore.create (sync task) → RepoRegistry.update_meta
-- _AuthMiddleware.dispatch → JWT validation → route handler (e.g., repo_detail, update_repo_meta)
-- webhook_by_name → RepoRegistry.get → webhook payload handling → TaskStore.create (reindex/rebuild)
-- rebuild_all_branches → RepoRegistry.list_names → _rebuild_all → TaskStore.create per branch → RepoRegistry.update_meta
+- HTTP request → _AuthMiddleware (token validation) → route handler (e.g., register_repo) → TaskStore.create → response with task_id
+- register_repo → validate_repo (repo URL/credentials) → RepoRegistry.register → _run_register_task (background) → TaskStore.update status
+- sync_repo → RepoRegistry.get (repo config) → TaskStore.create → background worker runs sync_all_branches → RepoRegistry.update_meta
+- webhook_by_name → RepoRegistry.get (by name) → validate_repo → sync_repo / reindex_repo → TaskStore.create → return task object
+- unregister_repo → RepoRegistry.unregister → TaskStore._cleanup (remove related tasks) → response confirmation
 
 ## Wiki Pages
 

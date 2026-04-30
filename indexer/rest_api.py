@@ -455,6 +455,17 @@ async def sync_repo(request: Request) -> JSONResponse:
     if not info:
         return JSONResponse({"error": f"repo '{name}' not registered"}, status_code=404)
 
+    # If branch is not in the registered list, auto-register it first
+    if branch:
+        existing_branches = info.get("branches", [])
+        if branch not in existing_branches:
+            existing_branches.append(branch)
+            registry.register(name, info["root"], url=info.get("url", ""),
+                              branches=existing_branches,
+                              branch_rule=info.get("branch_rule", ""),
+                              description=info.get("description", ""),
+                              tags=info.get("tags", []))
+
     task_id = tasks.create(name, info.get("url", ""))
 
     loop = asyncio.get_running_loop()
@@ -479,6 +490,17 @@ async def rebuild_repo(request: Request) -> JSONResponse:
     info = registry.get(name)
     if not info:
         return JSONResponse({"error": f"repo '{name}' not registered"}, status_code=404)
+
+    # If branch is not in the registered list, auto-register it first
+    if branch:
+        existing_branches = info.get("branches", [])
+        if branch not in existing_branches:
+            existing_branches.append(branch)
+            registry.register(name, info["root"], url=info.get("url", ""),
+                              branches=existing_branches,
+                              branch_rule=info.get("branch_rule", ""),
+                              description=info.get("description", ""),
+                              tags=info.get("tags", []))
 
     task_id = tasks.create(name, info.get("url", ""))
 
@@ -1405,7 +1427,34 @@ async def repo_detail(request: Request) -> JSONResponse:
 
     # Gather per-branch detail: commit hash + index status
     branches = info.get("branches", [])
+    branch_rule = info.get("branch_rule", "")
     branches_detail = []
+    branches_missing = []
+
+    # If branch_rule is set, discover what's on remote vs what's registered
+    if branch_rule and info.get("url"):
+        try:
+            discovered = _discover_remote_branches(info["url"], branch_rule)
+            registered_set = set(branches)
+            for br in discovered:
+                if br not in registered_set:
+                    branches_missing.append({"name": br, "commit": ""})
+            # Also get commit for missing branches
+            is_git = (root / ".git").exists()
+            if is_git:
+                for br in branches_missing:
+                    try:
+                        r = subprocess.run(
+                            ["git", "ls-remote", info["url"], f"refs/heads/{br['name']}"],
+                            capture_output=True, text=True, timeout=15,
+                        )
+                        if r.returncode == 0 and r.stdout.strip():
+                            br["commit"] = r.stdout.strip().split("\t")[0]
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.warning("Failed to discover branches for %s: %s", repo_name, e)
+
     is_git = (root / ".git").exists()
     # Pre-setup vector store client for branch status checks
     vector_client = None
@@ -1436,9 +1485,22 @@ async def repo_detail(request: Request) -> JSONResponse:
         has_branch_vectors = False
         if vector_collection is not None:
             try:
-                if vector_collection.count() > 0:
-                    branch_chunk = vector_collection.get(where={"branch": b}, limit=1)
+                total_count = vector_collection.count()
+                if total_count > 0:
+                    # Try exact branch match
+                    branch_chunk = vector_collection.get(
+                        where={"branch": b}, limit=1, include=["metadatas"],
+                    )
                     has_branch_vectors = bool(branch_chunk and branch_chunk.get("ids"))
+                    # Fallback: if no branch metadata found, check if this is old-style
+                    # data (no branch field in any vector). If so, treat as indexed
+                    # since the data IS there, just without branch discrimination.
+                    if not has_branch_vectors:
+                        any_sample = vector_collection.get(limit=1, include=["metadatas"])
+                        if any_sample and any_sample.get("metadatas"):
+                            first_meta = any_sample["metadatas"][0]
+                            if "branch" not in first_meta or not first_meta["branch"]:
+                                has_branch_vectors = True
             except Exception:
                 pass
 
@@ -1454,6 +1516,7 @@ async def repo_detail(request: Request) -> JSONResponse:
         "url": info.get("url", ""),
         "branches": info.get("branches", []),
         "branches_detail": branches_detail,
+        "branches_missing": branches_missing,
         "description": info.get("description", ""),
         "tags": info.get("tags", []),
         "branch_rule": info.get("branch_rule", ""),
