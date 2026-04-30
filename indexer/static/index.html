@@ -386,6 +386,75 @@ function backToRepos(){
   loadRepos();
 }
 
+function startTaskPolling(taskId, label, callback){
+  const stepNames={queued:'Queued',git_clone:'Cloning repository',git_pull:'Updating repository',init:'Initializing config',parsing:'Parsing files',cross_ref:'Cross-referencing calls',describing_symbols:'Describing symbols',describing_modules:'Describing modules',writing_wiki:'Writing wiki',deep_enrichment:'Deep enrichment',embedding:'Generating embeddings',upserting:'Storing vectors',complete:'Complete',indexing:'Indexing',rebuild_init:'Re-initializing',detecting_files:'Detecting files'};
+  const pb=document.getElementById('progress-bar');
+  const pn=document.getElementById('progress-name');
+  const pp=document.getElementById('progress-pct');
+  const pf=document.getElementById('progress-fill');
+  const ps=document.getElementById('progress-step');
+  pb.style.display='block';
+  pn.textContent=label;
+  const poll=async()=>{
+    const task=await api('/api/task/'+taskId);
+    const step=stepNames[task.step]||task.step||'...';
+    pp.textContent=task.progress+'%';
+    pf.style.width=task.progress+'%';
+    ps.textContent=task.detail||step;
+    if(task.status==='done'||task.status==='failed'){
+      pb.style.display='none';
+      callback(task);
+      return;
+    }
+    setTimeout(poll,2000);
+  };
+  poll();
+}
+
+async function syncBranch(branch){
+  const name=currentRepo;
+  const data=await api('/sync','POST',{name,branch});
+  if(data.error){toast('Sync error: '+data.error,'error');return;}
+  startTaskPolling(data.task_id, name+' @ '+branch, (task)=>{
+    if(task.status==='done'){
+      toast(`"${name}" @ ${branch} synced`);
+      openRepo(name);
+    }else{
+      toast('Sync failed: '+(task.error||'unknown'),'error');
+    }
+  });
+}
+
+async function rebuildBranch(branch){
+  const name=currentRepo;
+  if(!confirm(`Rebuild ${name} @ ${branch}? This will clear and re-index all code for this branch.`))return;
+  const data=await api('/rebuild','POST',{name,branch,confirm:name});
+  if(data.error){toast('Rebuild error: '+data.error,'error');return;}
+  startTaskPolling(data.task_id, name+' @ '+branch, (task)=>{
+    if(task.status==='done'){
+      toast(`"${name}" @ ${branch} rebuilt`);
+      openRepo(name);
+    }else{
+      toast('Rebuild failed: '+(task.error||'unknown'),'error');
+    }
+  });
+}
+
+async function registerMissingBranch(branch){
+  const name=currentRepo;
+  if(!confirm(`Register and index new branch "${branch}" for ${name}? This will fetch and index the branch.`))return;
+  const data=await api('/rebuild','POST',{name,branch,confirm:name});
+  if(data.error){toast('Error: '+data.error,'error');return;}
+  startTaskPolling(data.task_id, name+' @ '+branch, (task)=>{
+    if(task.status==='done'){
+      toast(`"${branch}" registered and indexed`);
+      openRepo(name);
+    }else{
+      toast('Register failed: '+(task.error||'unknown'),'error');
+    }
+  });
+}
+
 function switchTab(tab){
   currentTab=tab;
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.tab===tab));
@@ -735,35 +804,16 @@ async function doRegister(){
     toast(`"${repoName}" registration started`,'info');
     document.getElementById('reg-btn').disabled=false;
     const stepNames={queued:'Queued',git_clone:'Cloning repository',git_pull:'Updating repository',init:'Initializing config',parsing:'Parsing files',cross_ref:'Cross-referencing calls',describing_symbols:'Describing symbols',describing_modules:'Describing modules',writing_wiki:'Writing wiki',deep_enrichment:'Deep enrichment',embedding:'Generating embeddings',upserting:'Storing vectors',complete:'Complete',indexing:'Indexing',rebuild_init:'Re-initializing',detecting_files:'Detecting files'};
-    const pb=document.getElementById('progress-bar');
-    const pn=document.getElementById('progress-name');
-    const pp=document.getElementById('progress-pct');
-    const pf=document.getElementById('progress-fill');
-    const ps=document.getElementById('progress-step');
-    if(!pb||!pn||!pp||!pf||!ps){console.warn('progress bar elements missing');}
-    pb.style.display='block';
-    pn.textContent=repoName;
-    const poll=async()=>{
-      const task=await api('/api/task/'+taskId);
-      const step=stepNames[task.step]||task.step||'...';
-      pp.textContent=task.progress+'%';
-      pf.style.width=task.progress+'%';
-      ps.textContent=task.detail||step;
+    startTaskPolling(taskId, repoName, (task)=>{
+      pb.style.display='none';
       if(task.status==='done'){
-        pb.style.display='none';
-        toast(`"${repoName}" registered with ${task.result.symbol_count} symbols`);
-        loadRepos();
-        return;
-      }
-      if(task.status==='failed'){
-        pb.style.display='none';
-        toast('Registration failed: '+task.error,'error');
-        return;
+        const sc=task.result&&task.result.symbol_count;
+        toast(`"${repoName}" ready${sc?` (${sc} symbols)`:''}`);
+      }else{
+        toast('Failed: '+(task.error||'unknown error'),'error');
       }
       loadRepos();
-      setTimeout(poll,5000);
-    };
-    poll();
+    });
   }catch(e){
     toast('Network error: '+e.message,'error');
     document.getElementById('reg-btn').disabled=false;
