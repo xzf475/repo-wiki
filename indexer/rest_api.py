@@ -1457,13 +1457,20 @@ async def repo_detail(request: Request) -> JSONResponse:
 
     is_git = (root / ".git").exists()
     # Pre-setup vector store client for branch status checks
-    vector_client = None
     vector_collection = None
+    persist_dir_path = root / cfg.vector_store.persist_dir
+    has_vector_files = persist_dir_path.exists() and any(
+        f.suffix in (".sqlite3", ".bin", ".pkl") or
+        (f.is_dir() and f.name.startswith("chroma"))
+        for f in persist_dir_path.iterdir()
+    ) if persist_dir_path.exists() else False
+    if not has_vector_files:
+        has_vector_files = persist_dir_path.exists() and len(list(persist_dir_path.iterdir())) > 0
+
     try:
         from chromadb import PersistentClient
-        persist_path = str(root / cfg.vector_store.persist_dir)
-        if (root / cfg.vector_store.persist_dir).exists():
-            vector_client = PersistentClient(path=persist_path)
+        if persist_dir_path.exists():
+            vector_client = PersistentClient(path=str(persist_dir_path))
             vector_collection = vector_client.get_or_create_collection(cfg.vector_store.collection_name)
     except Exception:
         pass
@@ -1503,6 +1510,9 @@ async def repo_detail(request: Request) -> JSONResponse:
                                 has_branch_vectors = True
             except Exception:
                 pass
+        # Fallback: if chroma failed but vector files exist on disk, trust the filesystem
+        if not has_branch_vectors and has_vector_files:
+            has_branch_vectors = True
 
         branches_detail.append({
             "name": b,
