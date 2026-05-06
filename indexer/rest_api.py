@@ -842,6 +842,15 @@ def _run_rebuild_task_inner(task_id: str, name: str, root: Path, skip_deep: bool
             if r.returncode != 0:
                 tasks.update(task_id, status="failed", progress=15, step="git_checkout", error=f"git checkout failed: {r.stderr.strip()}")
                 return
+            # Reset any local changes that would block pull
+            subprocess.run(
+                ["git"] + git_cfg + ["reset", "--hard"],
+                cwd=root, capture_output=True, text=True, timeout=30, env=git_env,
+            )
+            subprocess.run(
+                ["git"] + git_cfg + ["clean", "-fd"],
+                cwd=root, capture_output=True, text=True, timeout=30, env=git_env,
+            )
             r = subprocess.run(
                 ["git"] + git_cfg + ["pull", "--rebase"],
                 cwd=root, capture_output=True, text=True, timeout=60, env=git_env,
@@ -928,6 +937,15 @@ def _run_sync_task(task_id: str, name: str, root: Path, skip_deep: bool, branch:
             if r.returncode != 0:
                 tasks.update(task_id, status="failed", progress=10, step="git_checkout", error=f"git checkout failed: {r.stderr.strip()}")
                 return
+            # Reset any local changes that would block pull
+            subprocess.run(
+                ["git"] + git_cfg + ["reset", "--hard"],
+                cwd=root, capture_output=True, text=True, timeout=30, env=git_env,
+            )
+            subprocess.run(
+                ["git"] + git_cfg + ["clean", "-fd"],
+                cwd=root, capture_output=True, text=True, timeout=30, env=git_env,
+            )
         r = subprocess.run(
             ["git"] + git_cfg + ["pull", "--rebase"],
             cwd=root, capture_output=True, text=True, timeout=60, env=git_env,
@@ -1131,6 +1149,14 @@ def _run_register_task_inner(
                 if r.returncode != 0:
                     tasks.update(task_id, status="failed", progress=10, step="git_checkout", error=_sanitize_error(r.stderr, url, username, password, token))
                     return
+                subprocess.run(
+                    ["git"] + git_cfg + ["reset", "--hard"],
+                    cwd=clone_dir, capture_output=True, text=True, timeout=30, env=git_env,
+                )
+                subprocess.run(
+                    ["git"] + git_cfg + ["clean", "-fd"],
+                    cwd=clone_dir, capture_output=True, text=True, timeout=30, env=git_env,
+                )
             r = subprocess.run(
                 ["git"] + git_cfg + ["pull", "--rebase"],
                 cwd=clone_dir, capture_output=True, text=True, timeout=60, env=git_env,

@@ -20,41 +20,33 @@ The wiki captures structure, relationships, and constraints in a fraction of the
 
 ## Stats
 
-- **351 symbols** across **21 files** — indexed 2026-05-06 @ `23da6a82`
-- Wiki: `wiki/` — 2 page(s)
+- **66 symbols** across **1 files** — indexed 2026-05-06 @ `fe25e877`
+- Wiki: `wiki/` — 1 page(s)
 - Manifest: `.indexer/manifest.json` — maps every file to its wiki page and component IDs
 
 ## System Overview
 
-This system is a code indexing and semantic search platform that parses source code across multiple languages (Python, Java, JavaScript, Ruby, Rust) using AST parsers in `indexer/ast_parser.py`, `java_parser.py`, `js_parser.py`, `ruby_parser.py`, and others. Extracted symbols, calls, and relationships are enriched with embeddings via `indexer/embedding.py` and stored in a vector store (`indexer/vector_store.py`) alongside a manifest (`indexer/manifest.py`) for incremental updates. The system exposes a REST API (`indexer/rest_api.py`) and an MCP server (`indexer/mcp_server.py`) for search, trace, and code context tools, with background tasks managed by a `TaskStore` and repo state tracked by a `RepoRegistry`. It integrates with Git (via `indexer/git.py` and hooks in `indexer/hooks.py`) to monitor file changes and trigger reindexing.
+The system is a REST API for managing and indexing code repositories, implemented in `indexer/rest_api.py`. It uses `RepoRegistry` to persist repository metadata and `TaskStore` to manage indexing tasks via an asynchronous task queue. Endpoints like `register_repo`, `sync_repo`, and `reindex_repo` trigger task creation and orchestrate repository validation, syncing, and rebuilding. Middleware classes `_LoggingMiddleware` and `_AuthMiddleware` provide request logging and JWT-based authentication for all API routes.
 ## Key Request Flows
-- Git hook → hooks.py → git.py (diff detection) → indexing.py (reindex) → AST parsers → embedding.py → vector_store.py → manifest.py update
-- REST API request (/search) → rest_api.py → retrieval.py (embed query) → vector_store.py (nearest neighbors) → return results to API
-- MCP tool call (search_symbols) → mcp_server.py → retrieval.py → vector_store.py + AST parsers for source context → return tool response
-- CLI init → cli.py → config.py (load settings) → indexer initialization → embedding model load → vector store create → manifest check
-- REST API async task (register repo) → rest_api.py → TaskStore.create → background worker → indexing.py (clone/checkout via git.py) → AST parse → embedding → vector_store insert → manifest record → TaskStore.update(finished)
+- POST /repos → register_repo → RepoRegistry.register → _run_register_task → TaskStore.create
+- POST /sync/{name} → sync_repo → RepoRegistry.get → _run_all → TaskStore.create (sync task)
+- POST /reindex/{name} → reindex_repo → RepoRegistry.get → _run_all → TaskStore.create (reindex task)
+- POST /webhook/{name} → webhook_by_name → _index_page → TaskStore.create (partial index)
+- GET /health → health → RepoRegistry.list_names (liveness check)
 
 ## Wiki Pages
 
 | Page | Covers | Key Entry Points |
 |------|--------|-----------------|
-| [indexer](../wiki/indexer.md) | indexer/ast_parser.py, indexer/cli.py, indexer/config.py, indexer/embedding.py, indexer/git.py, indexer/grouper.py, indexer/hooks.py, indexer/indexing.py, indexer/java_parser.py, indexer/js_parser.py, indexer/llm.py, indexer/manifest.py, indexer/mcp_server.py, indexer/rest_api.py, indexer/retrieval.py, indexer/ruby_parser.py, indexer/utils.py, indexer/vector_store.py, indexer/wiki.py | main, init, status, hook, hook_install |
-| [tests](../wiki/tests.md) | tests/test_ast_parser.py, tests/test_p1_fixes.py | test_parse_returns_nodes, test_function_node, test_method_node, test_class_node, test_docstring_extracted |
+| [root](../wiki/root.md) | indexer/rest_api.py | TaskStore.__init__, TaskStore._cleanup, TaskStore.create, TaskStore.get, TaskStore.update |
 ## Critical Constraints (read before editing)
-**indexer**
-- Parsing is cached by truncating file SHA256 to first 8 hex chars; cache miss only on content change, not timestamp.
-- Language-specific parsers are switched by file extension/name string matching inside `ast_parser.parse_file`, not by config or heuristics beyond the provided patterns.
-- The pre-commit hook runs `indexer run` on every commit; if indexing fails, the commit still proceeds (hook is non-blocking).
-- API key for embeddings is resolved in order: `OPENAI_API_KEY` env var > `.env` file in repo root > `config.toml`; missing key silences embedding but indexing proceeds.
-- Vector store dimension must match embedding model output dimension; mismatch causes silent insert failures (no validation at config load).
-- The manifest (`manifest.json`) is the source of truth for which files have been indexed; stale files are detected by comparing current git hash vs stored hash, not by file mtime.
-**tests**
-- Language detection is based on file extension; parsing a file with an unsupported extension may return an empty list (this is untested here but implied by the fixture-only approach).
-- Cache serialization uses temporary directories; nodes must be JSON-serializable or picklable; the test only compares length, not deep equality.
-- Docstring extraction heuristics differ per language: Python uses triple-quoted strings, Rust uses `///` comments, Java uses `/** */` blocks, Ruby uses `=begin`/`=end` or `#` comments—tests assert extraction for each.
-- Import extraction returns a list of strings; for Java it includes package declarations, for Rust `use` statements, for Python `import`/`from`, for Ruby `require`/`include`—tested via `isinstance` and `len`.
-- Node identity checks rely on `any` and `endswith` for name matching, implying nodes have a `.name` attribute that includes a type suffix or exact filename-derived name.
-- The parser must handle multi-language files (e.g., Rust traits with method signatures, Ruby modules) consistently; tests for Rust trait method specs confirm that empty-bodies or signatures are still parsed as nodes.
+**root**
+- Concurrency per repo is strictly serialized: _get_repo_lock returns a threading.Lock local to the module, not shared across processes, so only one indexing task per repo can run inside a single worker.
+- TaskStore._cleanup runs on every create() call (not on a timer), removing tasks older than a fixed expiry threshold; thus stale tasks are only purged coincident with new task creation.
+- RepoRegistry persists as JSON to a temp directory (via gettempdir) under a subfolder '.indexify/registry'; the file is written atomically by writing to a temp suffix and then replacing the original.
+- Branch pattern matching in _match_branch_rule uses Python's fnmatch on comma-separated globs, but each pattern is stripped; no support for negated patterns or regex.
+- Default branch detection (_detect_default_branch) uses `git ls-remote --symref <url> HEAD` and parses the first line; relies on git being installed and network access at registration time.
+- register_repo blocks the web thread for clone (via run_in_executor); synchronous file operations may cause timeouts if git clone is slow, but there is no explicit timeout exposed.
 
 ## Workflow — How to Answer Questions About This Codebase
 
