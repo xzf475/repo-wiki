@@ -1,18 +1,23 @@
 from __future__ import annotations
+import json
 from pathlib import Path
 from indexer.config import VectorStoreConfig
 
+_client_cache: dict[str, object] = {}
+
 
 def _get_client(persist_dir: str):
-    import chromadb
-    return chromadb.PersistentClient(path=persist_dir)
+    if persist_dir not in _client_cache:
+        import chromadb
+        _client_cache[persist_dir] = chromadb.PersistentClient(path=persist_dir)
+    return _client_cache[persist_dir]
 
 
 def _get_or_create_collection(client, name: str, dim: int = 1024):
     import chromadb
     return client.get_or_create_collection(
         name=name,
-        metadata={"hnsw:space": "cosine", "hnsw:M": 16, "hnsw:construction_ef": 100},
+        metadata={"hnsw:space": "cosine", "hnsw:M": 16, "hnsw:construction_ef": 100, "dim": dim},
     )
 
 
@@ -29,10 +34,8 @@ def upsert_nodes(
     client = _get_client(persist_path)
     collection = _get_or_create_collection(client, cfg.collection_name, dim=dim)
 
-    if branch:
-        existing = collection.get(where={"branch": branch}, include=["ids"])
-        if existing and existing["ids"]:
-            collection.delete(ids=existing["ids"])
+    existing = collection.get(where={"branch": branch}, include=["ids"])
+    old_ids = set(existing["ids"]) if existing and existing["ids"] else set()
 
     valid = [(n, vectors[n.id]) for n in nodes if n.id in vectors and vectors[n.id] is not None]
     if not valid:
@@ -51,6 +54,11 @@ def upsert_nodes(
             documents=documents[i:i + batch_size],
             metadatas=metadatas[i:i + batch_size],
         )
+
+    all_new_ids = {n.id for n in nodes}
+    stale_ids = old_ids - all_new_ids
+    if stale_ids:
+        collection.delete(ids=list(stale_ids))
 
     return len(ids)
 
@@ -149,6 +157,19 @@ def _build_doc(node, descriptions: dict[str, str]) -> str:
     return " | ".join(parts)
 
 
+def _truncate_list(obj: list, max_json_len: int = 4000) -> str:
+    s = json_dumps_compact(obj)
+    if len(s) <= max_json_len:
+        return s
+    while len(obj) > 1:
+        obj = obj[:len(obj) // 2]
+        s = json_dumps_compact(obj)
+        if len(s) <= max_json_len:
+            return s
+    s = json_dumps_compact(obj[:1])
+    return s[:max_json_len] if len(s) > max_json_len else s
+
+
 def _build_meta(node, branch: str = "") -> dict:
     meta: dict = {
         "type": node.type,
@@ -156,17 +177,15 @@ def _build_meta(node, branch: str = "") -> dict:
         "line_start": node.line_start,
         "line_end": node.line_end,
     }
-    if branch:
-        meta["branch"] = branch
+    meta["branch"] = branch
     if node.calls:
-        meta["calls"] = json_dumps_compact(node.calls)
+        meta["calls"] = _truncate_list(node.calls)
     if node.called_by:
-        meta["called_by"] = json_dumps_compact(node.called_by)
+        meta["called_by"] = _truncate_list(node.called_by)
     if node.imports:
-        meta["imports"] = json_dumps_compact(node.imports)
+        meta["imports"] = _truncate_list(node.imports)
     return meta
 
 
 def json_dumps_compact(obj) -> str:
-    import json
     return json.dumps(obj, separators=(",", ":"))

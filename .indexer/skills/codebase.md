@@ -20,25 +20,41 @@ The wiki captures structure, relationships, and constraints in a fraction of the
 
 ## Stats
 
-- **63 symbols** across **1 files** — indexed 2026-05-04 @ `ab8fae12`
-- Wiki: `wiki/` — 1 page(s)
+- **351 symbols** across **21 files** — indexed 2026-05-06 @ `23da6a82`
+- Wiki: `wiki/` — 2 page(s)
 - Manifest: `.indexer/manifest.json` — maps every file to its wiki page and component IDs
 
 ## System Overview
 
-The codebase implements a REST API service for managing and indexing Git repositories, defined entirely within `indexer/rest_api.py`. Core components are `TaskStore` (async task queue), `RepoRegistry` (persistent repository metadata), and two middleware classes (`_LoggingMiddleware`, `_AuthMiddleware`) for request logging and Auth0 JWT authentication. API endpoints such as `register_repo`, `sync_repo`, `reindex_repo`, and `webhook_by_name` orchestrate operations by delegating to `TaskStore` for background execution and `RepoRegistry` for state management.
+This system is a code indexing and semantic search platform that parses source code across multiple languages (Python, Java, JavaScript, Ruby, Rust) using AST parsers in `indexer/ast_parser.py`, `java_parser.py`, `js_parser.py`, `ruby_parser.py`, and others. Extracted symbols, calls, and relationships are enriched with embeddings via `indexer/embedding.py` and stored in a vector store (`indexer/vector_store.py`) alongside a manifest (`indexer/manifest.py`) for incremental updates. The system exposes a REST API (`indexer/rest_api.py`) and an MCP server (`indexer/mcp_server.py`) for search, trace, and code context tools, with background tasks managed by a `TaskStore` and repo state tracked by a `RepoRegistry`. It integrates with Git (via `indexer/git.py` and hooks in `indexer/hooks.py`) to monitor file changes and trigger reindexing.
 ## Key Request Flows
-- POST /register -> register_repo -> RepoRegistry.register -> _run_register_task (background) -> validate_repo -> sync_repo
-- POST /sync?repo_name -> sync_repo -> RepoRegistry.get -> TaskStore.create -> sync_repo (background task)
-- POST /rebuild_all -> rebuild_all_branches -> TaskStore.create -> _rebuild_all (background) -> reindex each repo
-- POST /webhook?name -> webhook_by_name -> rep.trigger (reindex / sync) -> TaskStore.create -> corresponding background task
-- Any request -> _AuthMiddleware.dispatch (JWT validation) -> route handler -> optional _LoggingMiddleware.dispatch
+- Git hook → hooks.py → git.py (diff detection) → indexing.py (reindex) → AST parsers → embedding.py → vector_store.py → manifest.py update
+- REST API request (/search) → rest_api.py → retrieval.py (embed query) → vector_store.py (nearest neighbors) → return results to API
+- MCP tool call (search_symbols) → mcp_server.py → retrieval.py → vector_store.py + AST parsers for source context → return tool response
+- CLI init → cli.py → config.py (load settings) → indexer initialization → embedding model load → vector store create → manifest check
+- REST API async task (register repo) → rest_api.py → TaskStore.create → background worker → indexing.py (clone/checkout via git.py) → AST parse → embedding → vector_store insert → manifest record → TaskStore.update(finished)
 
 ## Wiki Pages
 
 | Page | Covers | Key Entry Points |
 |------|--------|-----------------|
-| [root](../wiki/root.md) | indexer/rest_api.py | TaskStore, TaskStore.__init__, TaskStore._cleanup, TaskStore.create, TaskStore.get |
+| [indexer](../wiki/indexer.md) | indexer/ast_parser.py, indexer/cli.py, indexer/config.py, indexer/embedding.py, indexer/git.py, indexer/grouper.py, indexer/hooks.py, indexer/indexing.py, indexer/java_parser.py, indexer/js_parser.py, indexer/llm.py, indexer/manifest.py, indexer/mcp_server.py, indexer/rest_api.py, indexer/retrieval.py, indexer/ruby_parser.py, indexer/utils.py, indexer/vector_store.py, indexer/wiki.py | main, init, status, hook, hook_install |
+| [tests](../wiki/tests.md) | tests/test_ast_parser.py, tests/test_p1_fixes.py | test_parse_returns_nodes, test_function_node, test_method_node, test_class_node, test_docstring_extracted |
+## Critical Constraints (read before editing)
+**indexer**
+- Parsing is cached by truncating file SHA256 to first 8 hex chars; cache miss only on content change, not timestamp.
+- Language-specific parsers are switched by file extension/name string matching inside `ast_parser.parse_file`, not by config or heuristics beyond the provided patterns.
+- The pre-commit hook runs `indexer run` on every commit; if indexing fails, the commit still proceeds (hook is non-blocking).
+- API key for embeddings is resolved in order: `OPENAI_API_KEY` env var > `.env` file in repo root > `config.toml`; missing key silences embedding but indexing proceeds.
+- Vector store dimension must match embedding model output dimension; mismatch causes silent insert failures (no validation at config load).
+- The manifest (`manifest.json`) is the source of truth for which files have been indexed; stale files are detected by comparing current git hash vs stored hash, not by file mtime.
+**tests**
+- Language detection is based on file extension; parsing a file with an unsupported extension may return an empty list (this is untested here but implied by the fixture-only approach).
+- Cache serialization uses temporary directories; nodes must be JSON-serializable or picklable; the test only compares length, not deep equality.
+- Docstring extraction heuristics differ per language: Python uses triple-quoted strings, Rust uses `///` comments, Java uses `/** */` blocks, Ruby uses `=begin`/`=end` or `#` comments—tests assert extraction for each.
+- Import extraction returns a list of strings; for Java it includes package declarations, for Rust `use` statements, for Python `import`/`from`, for Ruby `require`/`include`—tested via `isinstance` and `len`.
+- Node identity checks rely on `any` and `endswith` for name matching, implying nodes have a `.name` attribute that includes a type suffix or exact filename-derived name.
+- The parser must handle multi-language files (e.g., Rust traits with method signatures, Ruby modules) consistently; tests for Rust trait method specs confirm that empty-bodies or signatures are still parsed as nodes.
 
 ## Workflow — How to Answer Questions About This Codebase
 

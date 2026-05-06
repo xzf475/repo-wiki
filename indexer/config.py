@@ -1,9 +1,11 @@
 from __future__ import annotations
+import logging
 import os
 import tomllib
-import tomli_w
 from dataclasses import dataclass, field
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from indexer.utils import load_env_file
 
@@ -60,12 +62,19 @@ def _env(key: str, default: str | None = None) -> str | None:
     return default
 
 
+def _apply_env_field(env_val: str | None, current: str) -> str:
+    if env_val is not None and env_val != "":
+        return env_val
+    return current
+
+
 def _env_int(key: str, default: int) -> int:
     env_name = _ENV_MAP.get(key)
     if env_name and env_name in os.environ:
         try:
             return int(os.environ[env_name])
         except ValueError:
+            logger.warning("Invalid int value for %s=%r, using default %d", env_name, os.environ[env_name], default)
             return default
     return default
 
@@ -108,20 +117,27 @@ def load_config(repo_root: Path) -> Config:
             collection_name=vs.get("collection_name", vs_defaults.collection_name),
         ),
     )
-    return _apply_env(cfg)
+    cfg = _apply_env(cfg)
+    if cfg.max_tokens_per_batch < 1:
+        logger.warning("max_tokens_per_batch must be >= 1, got %d; resetting to 8000", cfg.max_tokens_per_batch)
+        cfg.max_tokens_per_batch = 8000
+    if cfg.embedding.dimensions < 1:
+        logger.warning("embedding.dimensions must be >= 1, got %d; resetting to 1024", cfg.embedding.dimensions)
+        cfg.embedding.dimensions = 1024
+    return cfg
 
 
 def _apply_env(cfg: Config) -> Config:
-    cfg.provider = _env("llm_provider", cfg.provider) or cfg.provider
-    cfg.api_key_env = _env("llm_api_key_env", cfg.api_key_env) or cfg.api_key_env
-    cfg.base_url = _env("llm_base_url", cfg.base_url) or cfg.base_url
-    cfg.embedding.provider = _env("embedding_provider", cfg.embedding.provider) or cfg.embedding.provider
-    cfg.embedding.api_key_env = _env("embedding_api_key_env", cfg.embedding.api_key_env) or cfg.embedding.api_key_env
-    cfg.embedding.base_url = _env("embedding_base_url", cfg.embedding.base_url) or cfg.embedding.base_url
+    cfg.provider = _apply_env_field(_env("llm_provider", None), cfg.provider)
+    cfg.api_key_env = _apply_env_field(_env("llm_api_key_env", None), cfg.api_key_env)
+    cfg.base_url = _apply_env_field(_env("llm_base_url", None), cfg.base_url)
+    cfg.embedding.provider = _apply_env_field(_env("embedding_provider", None), cfg.embedding.provider)
+    cfg.embedding.api_key_env = _apply_env_field(_env("embedding_api_key_env", None), cfg.embedding.api_key_env)
+    cfg.embedding.base_url = _apply_env_field(_env("embedding_base_url", None), cfg.embedding.base_url)
     cfg.embedding.dimensions = _env_int("embedding_dimensions", cfg.embedding.dimensions)
-    cfg.vector_store.backend = _env("vector_backend", cfg.vector_store.backend) or cfg.vector_store.backend
-    cfg.vector_store.persist_dir = _env("vector_persist_dir", cfg.vector_store.persist_dir) or cfg.vector_store.persist_dir
-    cfg.vector_store.collection_name = _env("vector_collection_name", cfg.vector_store.collection_name) or cfg.vector_store.collection_name
+    cfg.vector_store.backend = _apply_env_field(_env("vector_backend", None), cfg.vector_store.backend)
+    cfg.vector_store.persist_dir = _apply_env_field(_env("vector_persist_dir", None), cfg.vector_store.persist_dir)
+    cfg.vector_store.collection_name = _apply_env_field(_env("vector_collection_name", None), cfg.vector_store.collection_name)
     return cfg
 
 
@@ -133,5 +149,10 @@ def save_config(repo_root: Path, cfg: Config) -> None:
         "embedding": {"provider": cfg.embedding.provider, "api_key_env": cfg.embedding.api_key_env, "base_url": cfg.embedding.base_url, "dimensions": cfg.embedding.dimensions},
         "vector_store": {"backend": cfg.vector_store.backend, "persist_dir": cfg.vector_store.persist_dir, "collection_name": cfg.vector_store.collection_name},
     }
-    with open(repo_root / FILENAME, "wb") as f:
+    import tempfile
+    import tomli_w
+    target = repo_root / FILENAME
+    with tempfile.NamedTemporaryFile(dir=str(repo_root), suffix=".toml.tmp", delete=False) as f:
         tomli_w.dump(data, f)
+        tmp_path = f.name
+    os.replace(tmp_path, str(target))

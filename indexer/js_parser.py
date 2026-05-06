@@ -24,7 +24,7 @@ def _extract_jsdoc(node, source: bytes) -> Optional[str]:
     if prev and prev.type == "comment":
         text = _node_text(prev, source).strip()
         if text.startswith("/**"):
-            lines = text[3:-2].splitlines()
+            lines = text.removeprefix("/**").removesuffix("*/").splitlines()
             cleaned = []
             for line in lines:
                 line = line.strip().lstrip("*").strip()
@@ -36,7 +36,6 @@ def _extract_jsdoc(node, source: bytes) -> Optional[str]:
 
 def _extract_imports(tree, source: bytes) -> list[str]:
     imports = []
-    cursor = tree.walk()
 
     def visit(node):
         if node.type in ("import_statement", "import_declaration"):

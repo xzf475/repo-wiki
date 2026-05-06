@@ -60,15 +60,15 @@ def parse_file(path: Path, repo_root: Path) -> list[ASTNode]:
         from indexer.go_parser import parse_go_file
         return parse_go_file(path, repo_root)
     
-    if suffix in {".rs"}:
+    if suffix == ".rs":
         from indexer.rust_parser import parse_rust_file
         return parse_rust_file(path, repo_root)
-    
-    if suffix in {".java"}:
+
+    if suffix == ".java":
         from indexer.java_parser import parse_java_file
         return parse_java_file(path, repo_root)
-    
-    if suffix in {".rb"}:
+
+    if suffix == ".rb":
         from indexer.ruby_parser import parse_ruby_file
         return parse_ruby_file(path, repo_root)
     
@@ -124,7 +124,10 @@ def parse_file(path: Path, repo_root: Path) -> list[ASTNode]:
 
 
 def compute_hash_short(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+    except OSError:
+        return ""
 
 
 def load_cached_nodes(repo_root: Path, file_hash: str) -> Optional[list[ASTNode]]:

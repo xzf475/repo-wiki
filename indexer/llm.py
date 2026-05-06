@@ -1,5 +1,14 @@
 from __future__ import annotations
-import json, os, time, logging
+
+class _EmptyResponseError(Exception):
+    pass
+
+
+import json
+import os
+import random
+import time
+import logging
 from indexer.ast_parser import ASTNode
 from indexer.config import Config
 
@@ -40,7 +49,6 @@ def _litellm_kwargs(cfg: Config, api_key: str | None) -> dict:
 
 def _litellm_completion(cfg: Config, api_key: str | None, messages: list[dict], max_tokens: int = 1024) -> str:
     import litellm
-    import random
 
     if not api_key:
         logger.warning("LLM call skipped: no API key configured (provider=%s, api_key_env=%s)", cfg.provider, cfg.api_key_env)
@@ -53,51 +61,65 @@ def _litellm_completion(cfg: Config, api_key: str | None, messages: list[dict], 
                 messages=messages,
                 max_tokens=max_tokens,
             )
-            return response.choices[0].message.content
+            if not response.choices:
+                raise _EmptyResponseError("Empty choices from litellm")
+            content = response.choices[0].message.content
+            return content if content is not None else ""
         except Exception as e:
             is_rate_limit = isinstance(e, litellm.RateLimitError)
-            is_fatal = isinstance(e, (TypeError, AttributeError, ImportError))
+            is_fatal = isinstance(e, (TypeError, AttributeError, ValueError, ImportError))
             last_attempt = attempt >= _RETRY_ATTEMPTS - 1
             if last_attempt or is_fatal:
                 raise
 
             if is_rate_limit:
-                delay = 5.0 * (5 ** attempt) + random.uniform(0, 2)
+                delay = 5.0 * (2 ** attempt) + random.uniform(0, 2)
             else:
                 delay = _RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
             logger.warning("litellm call failed (attempt %d/%d), retrying in %.1fs: %s", attempt + 1, _RETRY_ATTEMPTS, delay, e)
             time.sleep(delay)
 
 
-def _anthropic_completion(model: str, system: str, user: str, api_key: str) -> str:
+_anthropic_client = None
+_anthropic_client_key = ""
+
+
+def _get_anthropic_client(api_key: str):
+    global _anthropic_client, _anthropic_client_key
     import anthropic
-    import random
+    if _anthropic_client is None or _anthropic_client_key != api_key:
+        _anthropic_client = anthropic.Anthropic(api_key=api_key)
+        _anthropic_client_key = api_key
+    return _anthropic_client
+
+
+def _anthropic_completion(model: str, system: str, user: str, api_key: str, max_tokens: int = 1024) -> str:
 
     bare_model = model.removeprefix("anthropic/")
-    client = anthropic.Anthropic(api_key=api_key)
+    client = _get_anthropic_client(api_key)
 
     for attempt in range(_RETRY_ATTEMPTS):
         try:
             response = client.messages.create(
                 model=bare_model,
-                max_tokens=1024,
+                max_tokens=max_tokens,
                 system=system,
                 messages=[{"role": "user", "content": user}],
             )
             if not response.content:
-                raise ValueError("Empty response from Anthropic")
+                raise _EmptyResponseError("Empty response from Anthropic")
             text_blocks = [b for b in response.content if getattr(b, "type", None) == "text"]
             if not text_blocks:
-                raise ValueError("No text block in Anthropic response")
+                raise _EmptyResponseError("No text block in Anthropic response")
             return text_blocks[0].text
         except anthropic.RateLimitError as e:
             if attempt >= _RETRY_ATTEMPTS - 1:
                 raise
-            delay = 5.0 * (5 ** attempt) + random.uniform(0, 2)
+            delay = 5.0 * (2 ** attempt) + random.uniform(0, 2)
             logger.warning("Anthropic API rate limited (attempt %d/%d), retrying in %.1fs: %s", attempt + 1, _RETRY_ATTEMPTS, delay, e)
             time.sleep(delay)
         except Exception as e:
-            is_fatal = isinstance(e, (TypeError, AttributeError))
+            is_fatal = isinstance(e, (TypeError, AttributeError, ValueError, ImportError))
             if attempt >= _RETRY_ATTEMPTS - 1 or is_fatal:
                 raise
             delay = _RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
@@ -159,10 +181,10 @@ def describe_nodes_batch(nodes: list[ASTNode], cfg: Config) -> dict[str, str]:
     user = json.dumps(prompt_items)
 
     try:
+        max_tokens = min(max(512, len(nodes) * 50), 4096)
         if use_sdk:
-            raw = _anthropic_completion(cfg.provider, system, user, api_key)
+            raw = _anthropic_completion(cfg.provider, system, user, api_key, max_tokens=max_tokens)
         else:
-            max_tokens = max(512, len(nodes) * 50)
             raw = _litellm_completion(cfg, api_key, [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -177,7 +199,15 @@ def describe_nodes_batch(nodes: list[ASTNode], cfg: Config) -> dict[str, str]:
             return {n.id: "" for n in nodes}
 
         if isinstance(result, list):
-            result = {item["id"]: item.get("description", item.get("desc", "")) for item in result if isinstance(item, dict) and "id" in item}
+            converted = {}
+            for item in result:
+                if not isinstance(item, dict):
+                    continue
+                if "id" not in item:
+                    logger.warning("LLM list response item missing 'id' key: %s", list(item.keys()))
+                    continue
+                converted[item["id"]] = item.get("description", item.get("desc", ""))
+            result = converted
         return {n.id: result.get(n.id, "") for n in nodes}
     except Exception as e:
         if isinstance(e, (TypeError, AttributeError, ImportError, NameError)):
@@ -198,6 +228,8 @@ def describe_nodes(batches: list[list[ASTNode]], cfg: Config, max_workers: int =
                 result = future.result()
                 descriptions.update(result)
             except Exception as e:
+                if isinstance(e, (TypeError, AttributeError, NameError, ImportError, ValueError)):
+                    raise
                 logger.warning("Batch description failed: %s", e)
                 for n in batch:
                     descriptions[n.id] = ""
@@ -232,10 +264,10 @@ def describe_files(file_nodes: dict[str, list[ASTNode]], cfg: Config) -> dict[st
     user = json.dumps(prompt_items)
 
     try:
+        max_tokens = min(max(512, len(file_nodes) * 40), 4096)
         if use_sdk:
-            raw = _anthropic_completion(cfg.provider, system, user, api_key)
+            raw = _anthropic_completion(cfg.provider, system, user, api_key, max_tokens=max_tokens)
         else:
-            max_tokens = max(512, len(file_nodes) * 40)
             raw = _litellm_completion(cfg, api_key, [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -297,7 +329,7 @@ def deep_enrich_page(
 
     try:
         if use_sdk:
-            raw = _anthropic_completion(cfg.provider, system, user, api_key)
+            raw = _anthropic_completion(cfg.provider, system, user, api_key, max_tokens=2048)
         else:
             raw = _litellm_completion(cfg, api_key, [
                 {"role": "system", "content": system},
@@ -310,8 +342,8 @@ def deep_enrich_page(
             return empty
         return {
             "narrative": result.get("narrative", ""),
-            "data_flows": result.get("data_flows", []),
-            "constraints": result.get("constraints", []),
+            "data_flows": result.get("data_flows", []) if isinstance(result.get("data_flows"), list) else [],
+            "constraints": result.get("constraints", []) if isinstance(result.get("constraints"), list) else [],
         }
     except Exception as e:
         if isinstance(e, (TypeError, AttributeError, ImportError, NameError)):
@@ -333,7 +365,10 @@ def deep_enrich_pages(pages_args: list[tuple], cfg: Config, max_workers: int = 3
             group_label = futures[future]
             try:
                 page_enrichments[group_label] = future.result()
-            except Exception:
+            except Exception as e:
+                if isinstance(e, (TypeError, AttributeError, NameError, ImportError, ValueError)):
+                    raise
+                logger.warning("Deep enrich failed for %s: %s", group_label, e)
                 page_enrichments[group_label] = {"narrative": "", "data_flows": [], "constraints": []}
 
     return page_enrichments
@@ -366,12 +401,12 @@ def deep_enrich_index(
 
     try:
         if use_sdk:
-            raw = _anthropic_completion(cfg.provider, system, user, api_key)
+            raw = _anthropic_completion(cfg.provider, system, user, api_key, max_tokens=2048)
         else:
             raw = _litellm_completion(cfg, api_key, [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
-            ])
+            ], max_tokens=2048)
 
         result = _parse_llm_json(raw)
         if result is None:
@@ -379,7 +414,7 @@ def deep_enrich_index(
             return empty
         return {
             "overview": result.get("overview", ""),
-            "flows": result.get("flows", []),
+            "flows": result.get("flows", []) if isinstance(result.get("flows"), list) else [],
         }
     except Exception as e:
         if isinstance(e, (TypeError, AttributeError, ImportError, NameError)):
@@ -408,19 +443,20 @@ def rewrite_query(query: str, cfg: Config) -> list[str]:
     try:
         use_sdk = _should_use_anthropic_sdk(cfg, api_key)
         if use_sdk:
-            raw = _anthropic_completion(cfg.provider, system, user, api_key)
+            raw = _anthropic_completion(cfg.provider, system, user, api_key, max_tokens=256)
         else:
             raw = _litellm_completion(cfg, api_key, [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ], max_tokens=256)
 
-        raw = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-        result = json.loads(raw)
+        result = _parse_llm_json(raw)
         if isinstance(result, list) and all(isinstance(s, str) for s in result):
-            return [query] + [s for s in result if s != query]
+            return list(dict.fromkeys([query] + result))
         return [query]
     except Exception as e:
+        if isinstance(e, (TypeError, AttributeError, ImportError, NameError)):
+            raise
         logger.warning("Query rewrite failed: %s", e)
         return [query]
 
@@ -437,12 +473,12 @@ def synthesize_commit_message(changed_files: list[str], descriptions: dict[str, 
 
     try:
         if use_sdk:
-            raw = _anthropic_completion(cfg.provider, system, user, api_key)
+            raw = _anthropic_completion(cfg.provider, system, user, api_key, max_tokens=128)
         else:
             raw = _litellm_completion(cfg, api_key, [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
-            ])
+            ], max_tokens=128)
 
         return raw.strip()[:72]
     except Exception as e:

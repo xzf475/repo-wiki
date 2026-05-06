@@ -83,5 +83,6 @@ def remove_hook(repo_root: Path) -> None:
 
     if result and result != "#!/bin/sh":
         hook_path.write_text(result + "\n")
+        hook_path.chmod(0o755)
     else:
         hook_path.unlink()

@@ -3,7 +3,7 @@ from collections import defaultdict
 from pathlib import Path
 
 
-def density_group(files: list[str], merge_threshold: int = 6) -> dict[str, str]:
+def density_group(files: list[str], merge_threshold: int = 2) -> dict[str, str]:
     if not files:
         return {}
 

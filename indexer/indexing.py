@@ -4,9 +4,11 @@ from pathlib import Path
 
 from indexer.ast_parser import ASTNode, parse_file, load_cached_nodes, save_cached_nodes, compute_hash_short
 from indexer.config import Config
+from indexer.embedding import embed_nodes
 from indexer.grouper import density_group
 from indexer.llm import describe_nodes, describe_files, deep_enrich_pages, deep_enrich_index
 from indexer.manifest import Manifest, FileEntry, compute_hash, load_manifest, save_manifest
+from indexer.vector_store import upsert_nodes as vs_upsert, delete_by_files as vs_delete
 from indexer.wiki import (
     PageContext, IndexEntry, TEMPLATES_DIR,
     build_page, build_index, write_page, write_index,
@@ -17,12 +19,20 @@ from indexer.git import all_tracked_files, current_commit, is_git_repo, changed_
 
 def cross_reference(all_nodes: list[ASTNode]) -> None:
     call_index: dict[str, list[str]] = {}
+    file_call_index: dict[tuple[str, str], list[str]] = {}
     for node in all_nodes:
         for callee_name in node.calls:
             call_index.setdefault(callee_name, []).append(node.id)
+            file_call_index.setdefault((node.file, callee_name), []).append(node.id)
     for node in all_nodes:
         bare_name = node.id.split("::")[-1]
-        node.called_by = call_index.get(bare_name, [])
+        same_file_callers = file_call_index.get((node.file, bare_name), [])
+        global_callers = call_index.get(bare_name, [])
+        if same_file_callers:
+            seen = set(same_file_callers)
+            node.called_by = same_file_callers + [c for c in global_callers if c not in seen]
+        else:
+            node.called_by = global_callers
 
 
 def load_existing_nodes(root: Path, manifest: Manifest, cfg: Config) -> list[ASTNode]:
@@ -71,9 +81,10 @@ def parse_candidates(
 def build_batches(all_nodes: list[ASTNode], cfg: Config) -> list[list[ASTNode]]:
     batch, batch_size = [], 0
     batches = []
+    char_budget = cfg.max_tokens_per_batch * 3
     for node in all_nodes:
-        node_size = len(node.docstring or "") + len(" ".join(node.calls)) + 50
-        if batch_size + node_size > cfg.max_tokens_per_batch and batch:
+        node_size = len(node.id) + len(node.type) + len(node.docstring or "") + len(" ".join(node.calls[:15])) + 80
+        if batch_size + node_size > char_budget and batch:
             batches.append(batch)
             batch, batch_size = [], 0
         batch.append(node)
@@ -121,6 +132,7 @@ def write_wiki_pages(
             path=str(page_path.relative_to(root)),
             covers=", ".join(sorted({n.file for n in nodes})),
             entry_points=entry_points,
+            group_label=group_label,
         ))
 
     return index_entries, groups
@@ -149,11 +161,11 @@ def write_index_and_skill(
     env = Environment(loader=FileSystemLoader(str(TEMPLATES_DIR)), trim_blocks=True, lstrip_blocks=True)
     skill_pages = [
         {
-            "label": e.path.split("/")[-1].replace(".md", ""),
+            "label": Path(e.path).stem,
             "path": e.path,
             "covers": e.covers,
             "entry_points": e.entry_points[:5],
-            "enrichment": page_enrichments.get(e.path.split("/")[-1].replace(".md", ""), {}),
+            "enrichment": page_enrichments.get(e.group_label, {}),
         }
         for e in index_entries
     ]
@@ -180,6 +192,9 @@ def update_manifest(
 ) -> None:
     commit = current_commit(root) or "unknown"
     now = datetime.now(timezone.utc).isoformat()
+    file_to_nodes: dict[str, list[str]] = {}
+    for n in all_nodes:
+        file_to_nodes.setdefault(n.file, []).append(n.id)
     for rel_path in candidates:
         abs_path = root / rel_path
         if abs_path.exists():
@@ -189,7 +204,7 @@ def update_manifest(
             manifest.files[rel_path] = FileEntry(
                 hash=file_hash,
                 wiki_page=f"{cfg.wiki_dir}/{safe_group}.md",
-                component_ids=[n.id for n in all_nodes if n.file == rel_path],
+                component_ids=file_to_nodes.get(rel_path, []),
             )
     manifest.last_indexed_commit = commit
     manifest.indexed_at = now
@@ -212,11 +227,12 @@ def upsert_vectors(
     removed_files: list[str] | None = None,
     branch: str = "",
 ) -> None:
-    from indexer.embedding import embed_nodes
-    from indexer.vector_store import upsert_nodes as vs_upsert, delete_by_files as vs_delete
-
     if removed_files is None:
-        removed_files = manifest.removed_files(root, all_tracked_files(root) if is_git_repo(root) else [])
+        if is_git_repo(root):
+            tracked = all_tracked_files(root)
+        else:
+            tracked = [str(p.relative_to(root)) for p in root.rglob("*") if p.is_file() and not str(p).startswith(".")]
+        removed_files = manifest.removed_files(root, tracked)
     if removed_files:
         vs_delete(removed_files, cfg.vector_store, root, branch=branch)
 

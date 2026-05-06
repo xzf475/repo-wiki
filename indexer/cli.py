@@ -1,9 +1,14 @@
 # indexer/cli.py
 from __future__ import annotations
+import logging
 import os
 import subprocess
+import warnings
 from datetime import datetime, timezone
+from fnmatch import fnmatch
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 import click
 
@@ -84,15 +89,21 @@ def run(staged: bool, force: bool, skip_deep: bool):
 
     _ensure_cache_gitignore(root)
 
+    all_git_files = all_tracked_files(root) if is_git_repo(root) else []
+    tracked_files = [f for f in all_git_files if _is_indexable(f, cfg)]
+
     if staged:
         candidates = staged_files(root)
     elif force or manifest.last_indexed_commit is None:
-        candidates = [f for f in all_tracked_files(root) if _is_indexable(f, cfg)]
+        candidates = tracked_files
     else:
-        git_changed = changed_files_since(root, manifest.last_indexed_commit) if is_git_repo(root) else []
-        all_files = [f for f in all_tracked_files(root) if _is_indexable(f, cfg)]
-        stale = manifest.stale_files(root, all_files)
-        candidates = list(set(git_changed + stale))
+        try:
+            git_changed = changed_files_since(root, manifest.last_indexed_commit) if is_git_repo(root) else []
+        except ValueError:
+            logger.warning("Last indexed commit %s is no longer valid, falling back to full index", manifest.last_indexed_commit)
+            git_changed = all_git_files
+        stale = manifest.stale_files(root, tracked_files)
+        candidates = list(dict.fromkeys(git_changed + stale))
 
     candidates = [f for f in candidates if _is_indexable(f, cfg)]
 
@@ -124,6 +135,7 @@ def run(staged: bool, force: bool, skip_deep: bool):
 
     if not all_nodes:
         click.echo("\n  No symbols found.")
+        update_manifest(root, cfg, manifest, candidates, all_nodes, {})
         return
 
     total_symbols = len(all_nodes)
@@ -157,8 +169,8 @@ def run(staged: bool, force: bool, skip_deep: bool):
     # ── Phase 5: Deep enrichment + wiki pages ─────────────────────────────────
     page_enrichments: dict[str, dict] = {}
     if not skip_deep:
-        click.echo(f"\n  Deep enrichment  ({len(density_group(candidates, merge_threshold=cfg.merge_threshold))} pages, concurrent)  —  narrative + flows + constraints")
         groups = density_group(candidates, merge_threshold=cfg.merge_threshold)
+        click.echo(f"\n  Deep enrichment  ({len(groups)} pages, concurrent)  —  narrative + flows + constraints")
         group_nodes: dict[str, list] = {}
         for node in all_nodes:
             group = groups.get(node.file, node.file)
@@ -192,7 +204,7 @@ def run(staged: bool, force: bool, skip_deep: bool):
     if not skip_deep:
         click.echo("\n  Deep enrichment  (INDEX overview)  ...", nl=False)
         skill_pages_for_deep = [
-            {"label": e.path.split("/")[-1].replace(".md", ""), "covers": e.covers, "entry_points": e.entry_points}
+            {"label": Path(e.path).stem, "covers": e.covers, "entry_points": e.entry_points}
             for e in index_entries
         ]
         idx_enrichment = deep_enrich_index(skill_pages_for_deep, cfg)
@@ -208,20 +220,25 @@ def run(staged: bool, force: bool, skip_deep: bool):
     click.echo(f"    ✓  .indexer/skills/codebase.md")
 
     # ── Update manifest ────────────────────────────────────────────────────────
-    removed = manifest.removed_files(root, all_tracked_files(root) if is_git_repo(root) else [])
+    removed = manifest.removed_files(root, all_git_files)
     update_manifest(root, cfg, manifest, candidates, all_nodes, groups)
 
     # ── Auto-stage ALL generated files (pre-commit hook) ──────────────────────
     if staged and is_git_repo(root):
-        subprocess.run(
+        r = subprocess.run(
             ["git", "add",
              cfg.wiki_dir,
              ".indexer/manifest.json",
              ".indexer/skills/codebase.md",
              ".gitignore"],
             cwd=root,
+            capture_output=True,
+            text=True,
         )
-        click.echo(f"\n  Staged wiki + manifest + skill file")
+        if r.returncode != 0:
+            click.echo(f"  Warning: git add failed: {r.stderr.strip()}", err=True)
+        else:
+            click.echo(f"\n  Staged wiki + manifest + skill file")
 
     # ── Commit message synthesis ───────────────────────────────────────────────
     if cfg.synthesize_commit_message and staged:
@@ -239,7 +256,6 @@ def run(staged: bool, force: bool, skip_deep: bool):
         upsert_vectors(root, cfg, manifest, all_nodes, descriptions, removed_files=removed, branch=branch)
         click.echo(f"    ✓  {total_symbols} vectors upserted")
     except Exception as e:
-        import warnings
         warnings.warn(f"Vector store indexing failed: {e}")
         click.echo(f"    ⚠  Skipped vector store (error: {e})")
 
@@ -390,7 +406,8 @@ def _ensure_cache_gitignore(root: Path, verbose: bool = False) -> None:
     gitignore = root / ".gitignore"
     if gitignore.exists():
         content = gitignore.read_text()
-        missing = [e for e in CACHE_GITIGNORE_ENTRIES if e not in content]
+        existing_lines = {line.strip() for line in content.splitlines()}
+        missing = [e for e in CACHE_GITIGNORE_ENTRIES if e not in existing_lines]
         if not missing:
             return
         updated = content.rstrip() + "\n\n# repo-wiki\n" + "\n".join(missing) + "\n"
@@ -406,7 +423,6 @@ def _ensure_cache_gitignore(root: Path, verbose: bool = False) -> None:
 
 
 def _is_indexable(path: str, cfg: Config) -> bool:
-    from fnmatch import fnmatch
     p = Path(path)
     if p.suffix not in {".py", ".js", ".ts", ".mjs", ".cjs", ".jsx", ".tsx", ".go", ".rs", ".java", ".rb"}:
         return False

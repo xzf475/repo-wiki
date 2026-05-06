@@ -129,6 +129,9 @@ def parse_java_file(path: Path, repo_root: Path) -> list[ASTNode]:
                 if class_name:
                     id_str = f"{rel_path}::{class_name}.{name}"
                     node_type = "method"
+                elif interface_name:
+                    id_str = f"{rel_path}::{interface_name}.{name}"
+                    node_type = "method"
                 else:
                     id_str = f"{rel_path}::{name}"
                     node_type = "function"

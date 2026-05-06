@@ -104,13 +104,14 @@ def parse_ruby_file(path: Path, repo_root: Path) -> list[ASTNode]:
                         visit(child, class_name=name, module_name=module_name)
             return
 
-        elif node.type == "method" and class_name:
+        elif node.type in ("method", "singleton_method") and (class_name or module_name):
             name = _get_name(node, source)
             if name:
                 body = node.child_by_field_name("body")
                 calls = _extract_calls(body, source) if body else []
+                parent = class_name or module_name
                 nodes.append(ASTNode(
-                    id=f"{rel_path}::{class_name}.{name}",
+                    id=f"{rel_path}::{parent}.{name}",
                     type="method",
                     file=rel_path,
                     line_start=node.start_point[0] + 1,
@@ -121,7 +122,7 @@ def parse_ruby_file(path: Path, repo_root: Path) -> list[ASTNode]:
                 ))
             return
 
-        elif node.type in ("singleton_method", "method") and not class_name:
+        elif node.type in ("singleton_method", "method") and not class_name and not module_name:
             name = _get_name(node, source)
             if name:
                 body = node.child_by_field_name("body")

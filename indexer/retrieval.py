@@ -15,7 +15,7 @@ def search_symbols(
     expand_depth: int = 1,
     branch: str = "",
 ) -> list[dict]:
-    top_k = min(top_k, 100)
+    top_k = max(1, min(top_k, 100))
     query_vector = embed_query(query, cfg.embedding)
     where_clause = {"branch": branch} if branch else None
     hits = search(query_vector, cfg.vector_store, repo_root, top_k=top_k, where=where_clause)
@@ -48,13 +48,14 @@ def trace_call(
     result_nodes = [seed[0]]
     visited = {symbol_id}
 
-    current_ids = set()
     if direction == "down":
         calls_raw = seed[0].get("metadata", {}).get("calls", "")
         current_ids = set(_parse_json_list(calls_raw))
     elif direction == "up":
         called_by_raw = seed[0].get("metadata", {}).get("called_by", "")
         current_ids = set(_parse_json_list(called_by_raw))
+    else:
+        raise ValueError(f"direction must be 'up' or 'down', got '{direction}'")
 
     for _ in range(max_depth):
         next_ids = set()
@@ -119,6 +120,7 @@ def _expand_with_call_graph(
     cfg: Config,
     repo_root: Path,
     depth: int = 1,
+    max_expanded: int = 50,
 ) -> list[dict]:
     expanded = list(hits)
     visited = {h["id"] for h in hits}
@@ -127,6 +129,8 @@ def _expand_with_call_graph(
     for _ in range(depth):
         next_frontier = []
         for hit in frontier:
+            if len(expanded) >= max_expanded:
+                return expanded
             meta = hit.get("metadata", {})
             related_ids = set()
             related_ids.update(_parse_json_list(meta.get("calls", "")))
@@ -136,6 +140,8 @@ def _expand_with_call_graph(
             if related_ids:
                 batch = get_by_ids(list(related_ids), cfg.vector_store, repo_root)
                 for node in batch:
+                    if len(expanded) >= max_expanded:
+                        return expanded
                     if node["id"] not in visited:
                         visited.add(node["id"])
                         expanded.append(node)

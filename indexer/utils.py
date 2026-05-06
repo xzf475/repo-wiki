@@ -30,13 +30,15 @@ def load_env_file() -> None:
         ]
         for env_path in candidates:
             if env_path.exists():
-                for line in env_path.read_text().splitlines():
+                for line in env_path.read_text(encoding="utf-8").splitlines():
                     line = line.strip()
                     if not line or line.startswith("#") or "=" not in line:
                         continue
                     key, value = line.split("=", 1)
                     key = key.strip()
                     value = value.strip()
+                    if len(value) >= 2 and ((value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'"))):
+                        value = value[1:-1]
                     if key and key not in os.environ:
                         os.environ[key] = value
                 break

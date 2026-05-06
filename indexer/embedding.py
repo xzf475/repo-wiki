@@ -10,13 +10,31 @@ from indexer.utils import load_env_file
 logger = logging.getLogger(__name__)
 
 _MODELS_WITHOUT_DIMENSIONS = {"text-embedding-ada-002"}
+_openai_client = None
+_openai_client_base_url = ""
+
+
+def _get_openai_client(api_key: str, base_url: str) -> "OpenAI":
+    global _openai_client, _openai_client_base_url
+    from openai import OpenAI
+    if _openai_client is None or _openai_client.api_key != api_key or _openai_client_base_url != base_url:
+        _openai_client = OpenAI(api_key=api_key, base_url=base_url)
+        _openai_client_base_url = base_url
+    return _openai_client
+
+
+_EMBEDDING_KEY_ENVS = ["DASHSCOPE_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"]
 
 
 def _resolve_api_key(cfg: EmbeddingConfig) -> str | None:
     load_env_file()
     value = cfg.api_key_env
     if not value:
-        return os.environ.get("DASHSCOPE_API_KEY")
+        for env_name in _EMBEDDING_KEY_ENVS:
+            v = os.environ.get(env_name)
+            if v:
+                return v
+        return None
     if " " not in value and not value.isupper() and not value.replace("_", "").isupper():
         return value
     return os.environ.get(value)
@@ -75,9 +93,9 @@ def embed_nodes(
                     result[bid] = vec
             except Exception as e:
                 logger.warning("Embedding batch failed (%d ids): %s", len(batch_ids), e)
-                for bid in batch_ids:
-                    result[bid] = None
 
+    if len(result) < len(ids):
+        logger.error("Embedding incomplete: %d/%d nodes succeeded", len(result), len(ids))
     return result
 
 
@@ -87,6 +105,8 @@ def embed_query(query: str, cfg: EmbeddingConfig) -> list[float]:
         raise ValueError(f"Embedding API key not found. Set {cfg.api_key_env} env var")
 
     vectors = _call_embedding_api([query], cfg, api_key)
+    if not vectors:
+        raise ValueError(f"Embedding API returned empty result for query: {query[:50]}")
     return vectors[0]
 
 
@@ -95,21 +115,31 @@ def _call_embedding_api(
     cfg: EmbeddingConfig,
     api_key: str,
 ) -> list[list[float]]:
-    from openai import OpenAI
+    import random as _random
+    from openai import RateLimitError, APIConnectionError, APITimeoutError
 
-    client = OpenAI(
-        api_key=api_key,
-        base_url=cfg.base_url,
-    )
+    client = _get_openai_client(api_key, cfg.base_url)
 
-    model_name = cfg.provider.removeprefix("dashscope/")
+    model_name = cfg.provider.split("/", 1)[-1] if "/" in cfg.provider else cfg.provider
 
-    kwargs = dict(model=model_name, input=texts, encoding_format="float")
+    kwargs = dict(model=model_name, input=texts)
+    if model_name not in _MODELS_WITHOUT_DIMENSIONS:
+        kwargs["encoding_format"] = "float"
     if cfg.dimensions and model_name not in _MODELS_WITHOUT_DIMENSIONS:
         kwargs["dimensions"] = cfg.dimensions
-    response = client.embeddings.create(**kwargs)
 
-    vectors = []
-    for item in sorted(response.data, key=lambda x: x.index):
-        vectors.append(item.embedding)
-    return vectors
+    for attempt in range(3):
+        try:
+            response = client.embeddings.create(**kwargs)
+            vectors = []
+            for item in sorted(response.data, key=lambda x: x.index):
+                vectors.append(item.embedding)
+            return vectors
+        except (RateLimitError, APIConnectionError, APITimeoutError) as e:
+            if attempt >= 2:
+                raise
+            delay = 2.0 * (2 ** attempt) + _random.uniform(0, 1)
+            logger.warning("Embedding API retryable error (attempt %d): %s, retrying in %.1fs", attempt + 1, e, delay)
+            import time
+            time.sleep(delay)
+    return []

@@ -2,11 +2,17 @@
 from __future__ import annotations
 import asyncio
 import fnmatch
+import hmac
 import json
 import logging
 import os
 import re
+import shutil
+import subprocess
+import tempfile
 import threading
+import time
+import urllib.parse
 import uuid
 from pathlib import Path
 
@@ -16,15 +22,9 @@ try:
 except Exception:
     pass
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("repo-wiki-api")
 
-import subprocess
-import tempfile
-import urllib.parse
 from starlette.applications import Starlette
-
-logger = logging.getLogger(__name__)
 from starlette.routing import Route
 from starlette.responses import HTMLResponse, JSONResponse
 from starlette.requests import Request
@@ -39,8 +39,6 @@ from indexer.indexing import (
 )
 from indexer.grouper import density_group
 
-logger = logging.getLogger("repo-wiki-api")
-
 _repo_locks: dict[str, threading.Lock] = {}
 _locks_lock = threading.Lock()
 
@@ -53,14 +51,18 @@ def _get_repo_lock(name: str) -> threading.Lock:
 
 
 class TaskStore:
+    STATUS_PENDING = "pending"
+    STATUS_RUNNING = "running"
+    STATUS_COMPLETED = "completed"
+    STATUS_FAILED = "failed"
     _MAX_TASKS = 200
     _TTL_SECONDS = 3600
 
     def __init__(self):
         self.tasks: dict[str, dict] = {}
+        self._lock = threading.Lock()
 
     def _cleanup(self):
-        import time
         now = time.time()
         expired = [tid for tid, t in self.tasks.items()
                    if t.get("status") in ("completed", "failed")
@@ -68,37 +70,42 @@ class TaskStore:
         for tid in expired:
             del self.tasks[tid]
         if len(self.tasks) > self._MAX_TASKS:
-            oldest = sorted(self.tasks.items(), key=lambda x: x[1].get("_created_at", 0))
+            oldest = sorted(
+                ((tid, t) for tid, t in self.tasks.items()
+                 if t.get("status") not in ("pending", "running")),
+                key=lambda x: x[1].get("_created_at", 0),
+            )
             for tid, _ in oldest[:len(self.tasks) - self._MAX_TASKS]:
                 del self.tasks[tid]
 
     def create(self, name: str, url: str) -> str:
-        import time
-        self._cleanup()
-        task_id = uuid.uuid4().hex[:12]
-        self.tasks[task_id] = {
-            "id": task_id,
-            "name": name,
-            "url": url,
-            "status": "pending",
-            "progress": 0,
-            "step": "queued",
-            "detail": None,
-            "result": None,
-            "error": None,
-            "_created_at": time.time(),
-        }
-        return task_id
+        with self._lock:
+            self._cleanup()
+            task_id = uuid.uuid4().hex[:12]
+            self.tasks[task_id] = {
+                "id": task_id,
+                "name": name,
+                "url": url,
+                "status": "pending",
+                "progress": 0,
+                "step": "queued",
+                "detail": None,
+                "result": None,
+                "error": None,
+                "_created_at": time.time(),
+            }
+            return task_id
 
     def get(self, task_id: str) -> dict | None:
-        return self.tasks.get(task_id)
+        with self._lock:
+            return self.tasks.get(task_id)
 
     def update(self, task_id: str, **kwargs):
-        import time
-        if task_id in self.tasks:
-            if kwargs.get("status") in ("completed", "failed"):
-                kwargs["_finished_at"] = time.time()
-            self.tasks[task_id].update(kwargs)
+        with self._lock:
+            if task_id in self.tasks:
+                if kwargs.get("status") in ("completed", "failed"):
+                    kwargs["_finished_at"] = time.time()
+                self.tasks[task_id].update(kwargs)
 
 
 tasks = TaskStore()
@@ -146,13 +153,14 @@ def _match_branch_rule(branch_name: str, rule: str) -> bool:
     return any(fnmatch.fnmatch(branch_name, p) for p in patterns)
 
 
-def _discover_remote_branches(url: str, pattern: str) -> list[str]:
+def _discover_remote_branches(url: str, pattern: str, cwd: Path | None = None) -> list[str]:
     """Use git ls-remote to find remote branches matching a glob pattern.
     Supports comma-separated multi-patterns (e.g. 'main,release/*,feature/*')."""
     try:
+        git_env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
         result = subprocess.run(
-            ["git", "ls-remote", "--heads", url],
-            capture_output=True, text=True, timeout=30,
+            ["git", "-c", "http.followRedirects=true", "ls-remote", "--heads", url],
+            cwd=cwd, capture_output=True, text=True, timeout=30, env=git_env,
         )
         if result.returncode != 0:
             return []
@@ -177,6 +185,7 @@ class RepoRegistry:
         self.repos_dir = repos_dir or Path(tempfile.gettempdir()) / "repo_wiki_repos"
         self.repos_dir.mkdir(parents=True, exist_ok=True)
         self._registry_file = self.repos_dir / "repos_registry.json"
+        self._lock = threading.RLock()
 
     def _save(self):
         data = {
@@ -190,7 +199,9 @@ class RepoRegistry:
             }
             for name, info in self.repos.items()
         }
-        self._registry_file.write_text(json.dumps(data, indent=2))
+        tmp = self._registry_file.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2))
+        tmp.replace(self._registry_file)
 
     def _load(self):
         if not self._registry_file.exists():
@@ -226,44 +237,58 @@ class RepoRegistry:
         except (json.JSONDecodeError, OSError) as e:
             logger.warning("Failed to load repo registry: %s", e)
 
-    def register(self, name: str, repo_root: Path, url: str = "", branches: list[str] | None = None, branch_rule: str = "", description: str = "", tags: list[str] | None = None):
-        cfg = load_config(repo_root)
-        self.repos[name] = {
-            "root": repo_root,
-            "config": cfg,
-            "url": url,
-            "branches": branches or [],
-            "branch_rule": branch_rule,
-            "description": description,
-            "tags": tags or [],
-        }
-        self._save()
-        logger.info(f"Registered repo '{name}' at {repo_root}")
+    def register(self, name: str, repo_root: Path, url: str = "", branches: list[str] | None = None, branch_rule: str = "", description: str | None = None, tags: list[str] | None = None):
+        with self._lock:
+            existing = self.repos.get(name, {})
+            cfg = load_config(repo_root)
+            self.repos[name] = {
+                "root": repo_root,
+                "config": cfg,
+                "url": url,
+                "branches": branches or [],
+                "branch_rule": branch_rule,
+                "description": description if description is not None else existing.get("description", ""),
+                "tags": tags if tags is not None else existing.get("tags", []),
+            }
+            self._save()
+        logger.info("Registered repo '%s' at %s", name, repo_root)
 
     def unregister(self, name: str):
-        if name in self.repos:
-            del self.repos[name]
-            self._save()
-            logger.info(f"Unregistered repo '{name}'")
+        with self._lock:
+            if name in self.repos:
+                del self.repos[name]
+                self._save()
+            logger.info("Unregistered repo '%s'", name)
+        with _locks_lock:
+            lock = _repo_locks.get(name)
+            if lock and not lock.locked():
+                _repo_locks.pop(name, None)
 
     def get(self, name: str) -> dict | None:
-        return self.repos.get(name)
+        with self._lock:
+            return self.repos.get(name)
 
     def list_names(self) -> list[str]:
-        return sorted(self.repos.keys())
+        with self._lock:
+            return sorted(self.repos.keys())
+
+    def items(self) -> list[tuple[str, dict]]:
+        with self._lock:
+            return list(self.repos.items())
 
     def update_meta(self, name: str, description: str | None = None, tags: list[str] | None = None, branch_rule: str | None = None):
-        if name not in self.repos:
-            raise ValueError(f"repo '{name}' not found")
-        info = self.repos[name]
-        if description is not None:
-            info["description"] = description
-        if tags is not None:
-            info["tags"] = tags
-        if branch_rule is not None:
-            info["branch_rule"] = branch_rule
-        self._save()
-        logger.info(f"Updated meta for repo '{name}'")
+        with self._lock:
+            if name not in self.repos:
+                raise ValueError(f"repo '{name}' not found")
+            info = self.repos[name]
+            if description is not None:
+                info["description"] = description
+            if tags is not None:
+                info["tags"] = tags
+            if branch_rule is not None:
+                info["branch_rule"] = branch_rule
+            self._save()
+        logger.info("Updated meta for repo '%s'", name)
 
 
 registry = RepoRegistry()
@@ -280,15 +305,13 @@ async def register_repo(request: Request) -> JSONResponse:
     description = body.get("description", "")
     tags = body.get("tags", [])
     branch = body.get("branch", "")
-    branches = body.get("branches", body.get("branches", []))
+    branches = body.get("branches", [])
     branch_rule = body.get("branch_rule", "")
     skip_deep = body.get("skip_deep", True)
     force_reindex = body.get("force_reindex", False)
 
     if not branches and branch:
         branches = [branch]
-    if not branches:
-        branches = body.get("branches", [])
 
     # If a branch rule is specified, discover matching branches from remote
     if branch_rule and not branches:
@@ -301,6 +324,8 @@ async def register_repo(request: Request) -> JSONResponse:
         return JSONResponse({"error": "url is required"}, status_code=400)
 
     parsed_url = urllib.parse.urlparse(url)
+    if parsed_url.scheme == "http" and (username or password or token):
+        return JSONResponse({"error": "http URLs cannot be used with credentials; use https"}, status_code=400)
     if parsed_url.scheme not in ("https", "git", "ssh", "http"):
         return JSONResponse({"error": "only https/git/ssh URLs allowed"}, status_code=400)
 
@@ -310,21 +335,23 @@ async def register_repo(request: Request) -> JSONResponse:
             repo_name = repo_name[:-4]
         name = repo_name
 
-    if not re.match(r'^[a-zA-Z0-9._-]+$', name):
+    if not re.match(r'^[a-zA-Z0-9._-]+$', name) or name in (".", "..") or name.startswith("-"):
         return JSONResponse({"error": "name must contain only alphanumeric, dot, hyphen, underscore"}, status_code=400)
 
-    if registry.get(name) and not force_reindex:
-        return JSONResponse({
-            "error": f"repo '{name}' already registered",
-            "existing": str(registry.get(name)["root"]),
-        }, status_code=409)
+    with registry._lock:
+        existing = registry.get(name)
+        if existing and not force_reindex:
+            return JSONResponse({
+                "error": f"repo '{name}' already registered",
+                "existing": str(existing["root"]),
+            }, status_code=409)
 
-    task_id = tasks.create(name, url)
+        task_id = tasks.create(name, url)
 
-    clone_dir = registry.repos_dir / name
-    clone_dir.mkdir(parents=True, exist_ok=True)
-    branches_list = [branch] if branch else branches or ["main"]
-    registry.register(name, clone_dir, url=url, branches=branches_list, branch_rule=branch_rule, description=description, tags=tags)
+        clone_dir = registry.repos_dir / name
+        clone_dir.mkdir(parents=True, exist_ok=True)
+        branches_list = branches or ["main"]
+        registry.register(name, clone_dir, url=url, branches=branches_list, branch_rule=branch_rule, description=description, tags=tags)
 
     webhook_url = _get_webhook_url(name)
 
@@ -354,7 +381,7 @@ async def task_status(request: Request) -> JSONResponse:
     task = tasks.get(task_id)
     if not task:
         return JSONResponse({"error": f"task '{task_id}' not found"}, status_code=404)
-    return JSONResponse(task)
+    return JSONResponse({k: v for k, v in task.items() if not k.startswith("_")})
 
 
 async def validate_repo(request: Request) -> JSONResponse:
@@ -377,6 +404,10 @@ async def validate_repo(request: Request) -> JSONResponse:
     manifest_path = root / ".indexer" / "manifest.json"
     manifest_ok = manifest_path.exists()
     checks["manifest_file"] = manifest_ok
+    checks["last_indexed_commit"] = None
+    checks["indexed_at"] = None
+    checks["tracked_files"] = 0
+    checks["total_symbols"] = 0
 
     manifest_data = None
     if manifest_ok:
@@ -459,9 +490,9 @@ async def sync_repo(request: Request) -> JSONResponse:
     if branch:
         existing_branches = info.get("branches", [])
         if branch not in existing_branches:
-            existing_branches.append(branch)
+            updated_branches = list(existing_branches) + [branch]
             registry.register(name, info["root"], url=info.get("url", ""),
-                              branches=existing_branches,
+                              branches=updated_branches,
                               branch_rule=info.get("branch_rule", ""),
                               description=info.get("description", ""),
                               tags=info.get("tags", []))
@@ -495,9 +526,9 @@ async def rebuild_repo(request: Request) -> JSONResponse:
     if branch:
         existing_branches = info.get("branches", [])
         if branch not in existing_branches:
-            existing_branches.append(branch)
+            updated_branches = list(existing_branches) + [branch]
             registry.register(name, info["root"], url=info.get("url", ""),
-                              branches=existing_branches,
+                              branches=updated_branches,
                               branch_rule=info.get("branch_rule", ""),
                               description=info.get("description", ""),
                               tags=info.get("tags", []))
@@ -531,14 +562,24 @@ async def sync_all_branches(request: Request) -> JSONResponse:
             branches = discovered
             registry.register(name, info["root"], url=info.get("url", ""), branches=branches, branch_rule=branch_rule)
 
-    if len(branches) < 1:
+    if not branches:
         return JSONResponse({"error": f"no branches to sync for '{name}'"}, status_code=400)
 
     task_id = tasks.create(name, info.get("url", ""))
 
     def _run_all():
-        for br in branches:
-            _run_sync_task(task_id, name, info["root"], skip_deep, branch=br)
+        lock = _get_repo_lock(name)
+        if not lock.acquire(blocking=False):
+            tasks.update(task_id, status="failed", progress=0, step="locked", error="Another operation is running on this repo")
+            return
+        try:
+            for br in branches:
+                current = tasks.get(task_id)
+                if current and current.get("status") == "failed":
+                    break
+                _run_sync_task(task_id, name, info["root"], skip_deep, branch=br, _skip_lock=True)
+        finally:
+            lock.release()
 
     loop = asyncio.get_running_loop()
     loop.run_in_executor(None, _run_all)
@@ -574,22 +615,27 @@ async def reindex_repo(request: Request) -> JSONResponse:
         else:
             logger.warning("No branches matched branch_rule '%s' for repo %s", branch_rule, repo_name)
 
-    # 3. Rebuild all branches (no locking since we coordinate the sequence)
+    # 3. Rebuild all branches
     updated_info = registry.get(repo_name)
     branches_to_rebuild = updated_info.get("branches", []) if updated_info else []
     if not branches_to_rebuild:
         return JSONResponse({"error": f"no branches to rebuild for '{repo_name}'"}, status_code=400)
 
     task_id = tasks.create(repo_name, url)
-    root = info["root"]
 
-    def _rebuild_all():
-        for br in branches_to_rebuild:
-            _run_rebuild_task_inner(task_id, repo_name, root, skip_deep, branch=br, repo_url=url, repo_branches=branches_to_rebuild)
-        tasks.update(task_id, status="done", progress=100, step="complete", result={"branches": branches_to_rebuild})
+    def _run_all():
+        lock = _get_repo_lock(repo_name)
+        if not lock.acquire(blocking=False):
+            tasks.update(task_id, status="failed", progress=0, step="locked", error="Another operation is running on this repo")
+            return
+        try:
+            for br in branches_to_rebuild:
+                _run_rebuild_task_inner(task_id, repo_name, updated_info["root"], skip_deep, branch=br, repo_url=url, repo_branches=branches_to_rebuild)
+        finally:
+            lock.release()
 
     loop = asyncio.get_running_loop()
-    loop.run_in_executor(None, _rebuild_all)
+    loop.run_in_executor(None, _run_all)
 
     return JSONResponse({
         "task_id": task_id,
@@ -624,14 +670,24 @@ async def rebuild_all_branches(request: Request) -> JSONResponse:
             branches = discovered
             registry.register(name, info["root"], url=info.get("url", ""), branches=branches, branch_rule=branch_rule)
 
-    if len(branches) < 1:
+    if not branches:
         return JSONResponse({"error": f"no branches to rebuild for '{name}'"}, status_code=400)
 
     task_id = tasks.create(name, info.get("url", ""))
 
     def _run_all():
-        for br in branches:
-            _run_rebuild_task(task_id, name, info["root"], skip_deep, branch=br)
+        lock = _get_repo_lock(name)
+        if not lock.acquire(blocking=False):
+            tasks.update(task_id, status="failed", progress=0, step="locked", error="Another operation is running on this repo")
+            return
+        try:
+            for br in branches:
+                current = tasks.get(task_id)
+                if current and current.get("status") == "failed":
+                    break
+                _run_rebuild_task(task_id, name, info["root"], skip_deep, branch=br, _skip_lock=True)
+        finally:
+            lock.release()
 
     loop = asyncio.get_running_loop()
     loop.run_in_executor(None, _run_all)
@@ -727,9 +783,9 @@ def _run_indexing_pipeline(
     return total_symbols
 
 
-def _run_rebuild_task(task_id: str, name: str, root: Path, skip_deep: bool, branch: str = "") -> None:
+def _run_rebuild_task(task_id: str, name: str, root: Path, skip_deep: bool, branch: str = "", _skip_lock: bool = False) -> None:
     lock = _get_repo_lock(name)
-    if not lock.acquire(blocking=False):
+    if not _skip_lock and not lock.acquire(blocking=False):
         tasks.update(task_id, status="failed", progress=0, step="locked", error="Another operation is running on this repo")
         return
     try:
@@ -738,13 +794,12 @@ def _run_rebuild_task(task_id: str, name: str, root: Path, skip_deep: bool, bran
         repo_branches = existing.get("branches", []) if existing else []
         _run_rebuild_task_inner(task_id, name, root, skip_deep, branch=branch, repo_url=repo_url, repo_branches=repo_branches)
     finally:
-        lock.release()
+        if not _skip_lock:
+            lock.release()
 
 
 def _run_rebuild_task_inner(task_id: str, name: str, root: Path, skip_deep: bool, branch: str = "", repo_url: str = "", repo_branches: list[str] | None = None) -> None:
     repo_branch = branch or (repo_branches[0] if repo_branches else "")
-
-    import shutil
 
     try:
         tasks.update(task_id, status="running", progress=5, step="cleaning")
@@ -770,19 +825,30 @@ def _run_rebuild_task_inner(task_id: str, name: str, root: Path, skip_deep: bool
         from indexer.cli import _is_indexable
         from indexer.grouper import density_group
 
+        git_env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+        git_cfg = ["-c", "http.followRedirects=true"]
         if repo_branch and is_git_repo(root):
-            subprocess.run(
-                ["git", "checkout", repo_branch],
-                cwd=root, capture_output=True, text=True, timeout=30,
+            r = subprocess.run(
+                ["git"] + git_cfg + ["fetch", "--all"],
+                cwd=root, capture_output=True, text=True, timeout=60, env=git_env,
             )
-            subprocess.run(
-                ["git", "fetch", "--all"],
-                cwd=root, capture_output=True, text=True, timeout=60,
+            if r.returncode != 0:
+                tasks.update(task_id, status="failed", progress=15, step="git_fetch", error=f"git fetch failed: {r.stderr.strip()}")
+                return
+            r = subprocess.run(
+                ["git"] + git_cfg + ["checkout", repo_branch],
+                cwd=root, capture_output=True, text=True, timeout=30, env=git_env,
             )
-            subprocess.run(
-                ["git", "pull", "--rebase"],
-                cwd=root, capture_output=True, text=True, timeout=60,
+            if r.returncode != 0:
+                tasks.update(task_id, status="failed", progress=15, step="git_checkout", error=f"git checkout failed: {r.stderr.strip()}")
+                return
+            r = subprocess.run(
+                ["git"] + git_cfg + ["pull", "--rebase"],
+                cwd=root, capture_output=True, text=True, timeout=60, env=git_env,
             )
+            if r.returncode != 0:
+                tasks.update(task_id, status="failed", progress=15, step="git_pull", error=f"git pull failed: {r.stderr.strip()}")
+                return
 
         cfg = load_config(root)
         save_config(root, cfg)
@@ -797,65 +863,78 @@ def _run_rebuild_task_inner(task_id: str, name: str, root: Path, skip_deep: bool
         logger.info("Rebuild repo=%s branch=%s files=%d", name, repo_branch or "(default)", len(candidates))
 
         if not candidates:
-            tasks.update(task_id, status="done", progress=100, step="complete", detail="Nothing to index")
+            tasks.update(task_id, status="completed", progress=100, step="complete", detail="Nothing to index")
             return
 
         manifest = Manifest()
         total_symbols = _run_indexing_pipeline(task_id, name, root, skip_deep, candidates, cfg, manifest, branch=repo_branch)
 
         if total_symbols == 0:
-            tasks.update(task_id, status="done", progress=100, step="complete", detail="No symbols found")
+            tasks.update(task_id, status="completed", progress=100, step="complete", detail="No symbols found")
             registry.register(name, root, url=repo_url, branches=repo_branches)
             return
 
         registry.register(name, root, url=repo_url, branches=repo_branches)
         info = registry.get(name)
+        if not info:
+            tasks.update(task_id, status="failed", error="repo was unregistered during task")
+            return
         manifest_data = load_manifest(root)
         symbol_count = sum(len(entry.component_ids) for entry in manifest_data.files.values())
         webhook_url = _get_webhook_url(name)
 
-        tasks.update(task_id, status="done", progress=100, step="complete", result={
+        tasks.update(task_id, status="completed", progress=100, step="complete", result={
             "name": name, "path": str(root),
             "has_vector_db": (root / info["config"].vector_store.persist_dir).exists(),
             "symbol_count": symbol_count, "rebuilt": True,
             "webhook_url": webhook_url,
         })
     except Exception as e:
-        tasks.update(task_id, status="failed", progress=0, step="unknown", error=str(e))
+        tasks.update(task_id, status="failed", progress=0, step="unknown", error=_sanitize_error(str(e), repo_url, "", "", ""))
 
 
 
-def _run_sync_task(task_id: str, name: str, root: Path, skip_deep: bool, branch: str = "") -> None:
+def _run_sync_task(task_id: str, name: str, root: Path, skip_deep: bool, branch: str = "", _skip_lock: bool = False) -> None:
     logger.info("Sync task started: repo=%s branch=%s", name, branch or "(any)")
     lock = _get_repo_lock(name)
-    if not lock.acquire(blocking=False):
+    if not _skip_lock and not lock.acquire(blocking=False):
         logger.warning("Sync task skipped: repo=%s lock held by another operation", name)
         tasks.update(task_id, status="failed", progress=0, step="locked", error="Another operation is running on this repo")
         return
-    existing = registry.get(name)
-    repo_url = existing.get("url", "") if existing else ""
-    repo_branches = existing.get("branches", []) if existing else []
-    repo_branch = branch or (repo_branches[0] if repo_branches else "")
-    git_env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
-    git_cfg = ["-c", "http.followRedirects=true"]
-
-    from indexer.git import is_git_repo, all_tracked_files, current_commit, changed_files_since
 
     try:
+        existing = registry.get(name)
+        repo_url = existing.get("url", "") if existing else ""
+        repo_branches = existing.get("branches", []) if existing else []
+        repo_branch = branch or (repo_branches[0] if repo_branches else "")
+        git_env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+        git_cfg = ["-c", "http.followRedirects=true"]
+
+        from indexer.git import is_git_repo, all_tracked_files, current_commit, changed_files_since
+
         tasks.update(task_id, status="running", progress=10, step="git_pull")
-        if repo_branch and is_git_repo(root):
-            subprocess.run(
-                ["git"] + git_cfg + ["checkout", repo_branch],
-                cwd=root, capture_output=True, text=True, timeout=30, env=git_env,
-            )
-        subprocess.run(
+        r = subprocess.run(
             ["git"] + git_cfg + ["fetch", "--all"],
             cwd=root, capture_output=True, text=True, timeout=60, env=git_env,
         )
-        subprocess.run(
+        if r.returncode != 0:
+            tasks.update(task_id, status="failed", progress=10, step="git_fetch", error=f"git fetch failed: {r.stderr.strip()}")
+            return
+        if repo_branch and is_git_repo(root):
+            r = subprocess.run(
+                ["git"] + git_cfg + ["checkout", repo_branch],
+                cwd=root, capture_output=True, text=True, timeout=30, env=git_env,
+            )
+            if r.returncode != 0:
+                tasks.update(task_id, status="failed", progress=10, step="git_checkout", error=f"git checkout failed: {r.stderr.strip()}")
+                return
+        r = subprocess.run(
             ["git"] + git_cfg + ["pull", "--rebase"],
             cwd=root, capture_output=True, text=True, timeout=60, env=git_env,
         )
+        if r.returncode != 0:
+            tasks.update(task_id, status="failed", progress=10, step="git_pull", error=f"git pull failed: {r.stderr.strip()}")
+            return
 
         from indexer.config import Config, load_config, save_config
         from indexer.manifest import load_manifest, save_manifest, compute_hash, FileEntry
@@ -924,7 +1003,7 @@ def _run_sync_task(task_id: str, name: str, root: Path, skip_deep: bool, branch:
         need_regen_meta = (wiki_index_missing or skill_missing) and not candidates
 
         if not candidates and not need_regen_meta:
-            tasks.update(task_id, status="done", progress=100, step="complete", detail="Nothing to sync")
+            tasks.update(task_id, status="completed", progress=100, step="complete", detail="Nothing to sync")
             return
 
         if need_regen_meta and not candidates:
@@ -958,7 +1037,7 @@ def _run_sync_task(task_id: str, name: str, root: Path, skip_deep: bool, branch:
                 write_index_and_skill(root, cfg, index_entries, {}, "", [], 0, 0)
             webhook_url = _get_webhook_url(name)
             registry.register(name, root, url=repo_url, branches=repo_branches)
-            tasks.update(task_id, status="done", progress=100, step="complete", result={
+            tasks.update(task_id, status="completed", progress=100, step="complete", result={
                 "name": name, "path": str(root),
                 "has_vector_db": (root / cfg.vector_store.persist_dir).exists(),
                 "symbol_count": sum(len(e.component_ids) for e in manifest.files.values()),
@@ -972,10 +1051,13 @@ def _run_sync_task(task_id: str, name: str, root: Path, skip_deep: bool, branch:
         webhook_url = _get_webhook_url(name)
         registry.register(name, root, url=repo_url, branches=repo_branches)
         info = registry.get(name)
+        if not info:
+            tasks.update(task_id, status="failed", error="repo was unregistered during task")
+            return
         manifest_data = load_manifest(root)
         symbol_count = sum(len(entry.component_ids) for entry in manifest_data.files.values())
 
-        tasks.update(task_id, status="done", progress=100, step="complete", result={
+        tasks.update(task_id, status="completed", progress=100, step="complete", result={
             "name": name, "path": str(root),
             "has_vector_db": (root / info["config"].vector_store.persist_dir).exists(),
             "symbol_count": symbol_count, "synced": True,
@@ -985,9 +1067,10 @@ def _run_sync_task(task_id: str, name: str, root: Path, skip_deep: bool, branch:
     except subprocess.TimeoutExpired:
         tasks.update(task_id, status="failed", progress=10, step="git_pull", error="git pull timed out")
     except Exception as e:
-        tasks.update(task_id, status="failed", progress=0, step="unknown", error=str(e))
+        tasks.update(task_id, status="failed", progress=0, step="unknown", error=_sanitize_error(str(e), repo_url, "", "", ""))
     finally:
-        lock.release()
+        if not _skip_lock:
+            lock.release()
 
 
 def _run_register_task(
@@ -1033,23 +1116,32 @@ def _run_register_task_inner(
     try:
         if clone_dir.exists() and (clone_dir / ".git").exists():
             tasks.update(task_id, status="running", progress=10, step="git_pull")
-            subprocess.run(
+            r = subprocess.run(
                 ["git"] + git_cfg + ["fetch", "--all"],
                 cwd=clone_dir, capture_output=True, text=True, timeout=60, env=git_env,
             )
+            if r.returncode != 0:
+                tasks.update(task_id, status="failed", progress=10, step="git_fetch", error=_sanitize_error(r.stderr, url, username, password, token))
+                return
             if branch:
-                subprocess.run(
+                r = subprocess.run(
                     ["git"] + git_cfg + ["checkout", branch],
                     cwd=clone_dir, capture_output=True, text=True, timeout=30, env=git_env,
                 )
-            subprocess.run(
+                if r.returncode != 0:
+                    tasks.update(task_id, status="failed", progress=10, step="git_checkout", error=_sanitize_error(r.stderr, url, username, password, token))
+                    return
+            r = subprocess.run(
                 ["git"] + git_cfg + ["pull", "--rebase"],
                 cwd=clone_dir, capture_output=True, text=True, timeout=60, env=git_env,
             )
+            if r.returncode != 0:
+                tasks.update(task_id, status="failed", progress=10, step="git_pull", error=_sanitize_error(r.stderr, url, username, password, token))
+                registry.unregister(name)
+                return
         else:
             tasks.update(task_id, status="running", progress=10, step="git_clone")
             if clone_dir.exists():
-                import shutil
                 shutil.rmtree(clone_dir)
 
             clone_cmd = ["git", "-c", "http.followRedirects=true", "clone"]
@@ -1062,6 +1154,7 @@ def _run_register_task_inner(
             if result.returncode != 0:
                 safe_err = _sanitize_error(result.stderr, url, username, password, token)
                 tasks.update(task_id, status="failed", progress=10, step="git_clone", error=safe_err)
+                registry.unregister(name)
                 return
 
         _store_credentials(clone_dir, url, username, password, token)
@@ -1106,14 +1199,20 @@ def _run_register_task_inner(
                          step=f"checkout_{current_branch}")
 
             # Checkout the branch
-            subprocess.run(
+            r = subprocess.run(
                 ["git"] + git_cfg + ["checkout", current_branch],
                 cwd=root, capture_output=True, text=True, timeout=30, env=git_env,
             )
-            subprocess.run(
+            if r.returncode != 0:
+                tasks.update(task_id, status="failed", progress=40, step=f"checkout_{current_branch}", error=_sanitize_error(r.stderr, url, username, password, token))
+                return
+            r = subprocess.run(
                 ["git"] + git_cfg + ["pull", "--rebase", "origin", current_branch],
                 cwd=root, capture_output=True, text=True, timeout=60, env=git_env,
             )
+            if r.returncode != 0:
+                tasks.update(task_id, status="failed", progress=40, step=f"pull_{current_branch}", error=_sanitize_error(r.stderr, url, username, password, token))
+                return
 
             # Index this branch
             manifest = load_manifest(root)
@@ -1132,15 +1231,17 @@ def _run_register_task_inner(
 
         webhook_url = _get_webhook_url(name)
         info = registry.get(name)
-        has_vectors = (clone_dir / info["config"].vector_store.persist_dir).exists()
+        if not info:
+            tasks.update(task_id, status="failed", error="repo was unregistered during task")
+            return
         manifest_data = load_manifest(root)
         symbol_count = sum(len(entry.component_ids) for entry in manifest_data.files.values())
 
-        tasks.update(task_id, status="done", progress=100, step="complete", result={
+        tasks.update(task_id, status="completed", progress=100, step="complete", result={
             "name": name,
             "path": str(clone_dir),
             "url": url,
-            "has_vector_db": has_vectors,
+            "has_vector_db": (clone_dir / info["config"].vector_store.persist_dir).exists(),
             "symbol_count": symbol_count,
             "indexed": True,
             "webhook_url": webhook_url,
@@ -1150,7 +1251,7 @@ def _run_register_task_inner(
         cmd = e.cmd[0] if hasattr(e, 'cmd') else "git"
         tasks.update(task_id, status="failed", progress=0, step=cmd, error=f"timeout: {cmd} took too long")
     except Exception as e:
-        tasks.update(task_id, status="failed", progress=0, step="unknown", error=str(e))
+        tasks.update(task_id, status="failed", progress=0, step="unknown", error=_sanitize_error(str(e), url, username, password, token))
 
 
 async def unregister_repo(request: Request) -> JSONResponse:
@@ -1173,7 +1274,7 @@ async def search_symbols(request: Request) -> JSONResponse:
     body = await _parse_body(request)
     query = body.get("query", "")
     repo = body.get("repo")
-    top_k = min(body.get("top_k", 10), 100)
+    top_k = max(1, min(body.get("top_k", 10), 100))
     expand_depth = body.get("expand_depth", 1)
     rewrite = body.get("rewrite", True)
 
@@ -1212,6 +1313,8 @@ async def search_symbols(request: Request) -> JSONResponse:
             if len(repo_branches) > 1:
                 branch_conditions = [{"branch": b} for b in repo_branches]
                 where_clause = {"$or": branch_conditions} if branch_conditions else None
+            elif len(repo_branches) == 1:
+                where_clause = {"branch": repo_branches[0]}
             else:
                 where_clause = None
             for qv in all_query_vectors:
@@ -1244,6 +1347,9 @@ async def search_symbols(request: Request) -> JSONResponse:
                     expanded_ids.add(h["id"])
                     expanded.append(h)
         all_hits = expanded
+
+    all_hits.sort(key=lambda h: h.get("distance", 1.0))
+    all_hits = all_hits[:top_k]
 
     return JSONResponse({
         "results": all_hits,
@@ -1279,10 +1385,13 @@ async def trace_call(request: Request) -> JSONResponse:
 async def get_source_context(request: Request) -> JSONResponse:
     body = await _parse_body(request)
     file_path = body.get("file_path", "")
-    line_start = body.get("line_start", 1)
-    line_end = body.get("line_end", 1)
+    try:
+        line_start = int(body.get("line_start", 1))
+        line_end = int(body.get("line_end", 1))
+        padding = min(int(body.get("padding", 5)), 50)
+    except (ValueError, TypeError):
+        return JSONResponse({"error": "line_start, line_end, and padding must be integers"}, status_code=400)
     repo = body.get("repo")
-    padding = min(body.get("padding", 5), 50)
 
     if not file_path or not repo:
         return JSONResponse({"error": "file_path and repo are required"}, status_code=400)
@@ -1347,7 +1456,6 @@ async def list_repos(request: Request) -> JSONResponse:
                 from indexer.git import current_commit
                 commit = current_commit(root)
                 if commit:
-                    import subprocess
                     out = subprocess.run(
                         ["git", "log", "-1", "--format=%cI", commit],
                         cwd=root, capture_output=True, text=True, timeout=10,
@@ -1375,7 +1483,7 @@ async def list_repos(request: Request) -> JSONResponse:
 
 
 async def health(request: Request) -> JSONResponse:
-    return JSONResponse({"status": "ok", "repos": len(registry.repos)})
+    return JSONResponse({"status": "ok", "repos": len(registry.list_names())})
 
 
 async def repo_detail(request: Request) -> JSONResponse:
@@ -1459,19 +1567,24 @@ async def repo_detail(request: Request) -> JSONResponse:
     # Pre-setup vector store client for branch status checks
     vector_collection = None
     persist_dir_path = root / cfg.vector_store.persist_dir
-    has_vector_files = persist_dir_path.exists() and any(
-        f.suffix in (".sqlite3", ".bin", ".pkl") or
-        (f.is_dir() and f.name.startswith("chroma"))
-        for f in persist_dir_path.iterdir()
-    ) if persist_dir_path.exists() else False
-    if not has_vector_files:
-        has_vector_files = persist_dir_path.exists() and len(list(persist_dir_path.iterdir())) > 0
+    has_vector_files = False
+    if persist_dir_path.exists():
+        has_vector_files = any(
+            f.suffix in (".sqlite3", ".bin", ".pkl") or
+            (f.is_dir() and f.name.startswith("chroma"))
+            for f in persist_dir_path.iterdir()
+        )
+        if not has_vector_files:
+            has_vector_files = len(list(persist_dir_path.iterdir())) > 0
 
     try:
-        from chromadb import PersistentClient
+        from indexer.vector_store import _get_client
         if persist_dir_path.exists():
-            vector_client = PersistentClient(path=str(persist_dir_path))
-            vector_collection = vector_client.get_or_create_collection(cfg.vector_store.collection_name)
+            vector_client = _get_client(str(persist_dir_path))
+            try:
+                vector_collection = vector_client.get_collection(cfg.vector_store.collection_name)
+            except Exception:
+                vector_collection = None
     except Exception:
         pass
 
@@ -1570,7 +1683,7 @@ async def multi_repo_skill(request: Request) -> JSONResponse:
     from indexer.manifest import load_manifest
 
     all_repos = []
-    for name, info in registry.repos.items():
+    for name, info in registry.items():
         root = info["root"]
         cfg = info["config"]
         manifest = load_manifest(root)
@@ -1704,7 +1817,7 @@ def _webhook_sign(name: str) -> str:
     secret = os.environ.get("WEBHOOK_SECRET", "")
     if not secret:
         return ""
-    import hashlib, hmac
+    import hashlib
     return hmac.new(secret.encode(), name.encode(), hashlib.sha256).hexdigest()
 
 
@@ -1712,11 +1825,7 @@ def _verify_webhook_sign(name: str, sign: str) -> bool:
     expected = _webhook_sign(name)
     if not expected:
         return True
-    import hmac
     return hmac.compare_digest(expected, sign)
-
-
-_WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 
 
 async def webhook_by_name(request: Request) -> JSONResponse:
@@ -1726,7 +1835,7 @@ async def webhook_by_name(request: Request) -> JSONResponse:
 
     body = await request.body()
 
-    if _WEBHOOK_SECRET:
+    if os.environ.get("WEBHOOK_SECRET", ""):
         sign = request.query_params.get("sign", "")
         if not sign or not _verify_webhook_sign(name, sign):
             return JSONResponse({"error": "invalid sign"}, status_code=401)
@@ -1736,7 +1845,7 @@ async def webhook_by_name(request: Request) -> JSONResponse:
     branch_rule = info.get("branch_rule", "")
 
     try:
-        payload = json.loads(body)
+        payload = json.loads(body) if body else {}
     except json.JSONDecodeError:
         payload = {}
 
@@ -1753,7 +1862,7 @@ async def webhook_by_name(request: Request) -> JSONResponse:
             # New branch matching branch_rule — register it and sync
             target_branch = webhook_branch
             if target_branch not in repo_branches:
-                repo_branches.append(target_branch)
+                repo_branches = list(repo_branches) + [target_branch]
                 registry.register(name, info["root"], url=info.get("url", ""), branches=repo_branches, branch_rule=branch_rule)
     logger.info("Webhook triggered: repo=%s branch=%s", name, target_branch or webhook_branch or "(any)")
     task_id = tasks.create(name, info.get("url", ""))
@@ -1773,6 +1882,7 @@ async def webhook_by_name(request: Request) -> JSONResponse:
 def create_app(repos: dict[str, Path] | None = None, repos_dir: Path | None = None) -> Starlette:
     if repos_dir:
         registry.repos_dir = repos_dir
+        registry._registry_file = repos_dir / "repos_registry.json"
         registry.repos_dir.mkdir(parents=True, exist_ok=True)
 
     if repos:
@@ -1790,7 +1900,6 @@ def create_app(repos: dict[str, Path] | None = None, repos_dir: Path | None = No
     # Request logging middleware (IP + method + path + duration)
     class _LoggingMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):
-            import time
             start = time.time()
             client_ip = request.client.host if request.client else "unknown"
             response = await call_next(request)
@@ -1807,14 +1916,20 @@ def create_app(repos: dict[str, Path] | None = None, repos_dir: Path | None = No
                 path = request.url.path
                 if path in ("/health", "/", "/static") or path.startswith(("/webhook/", "/static/")):
                     return await call_next(request)
-                token = request.headers.get("Authorization", "").removeprefix("Bearer ")
-                if token != api_key:
+                token = request.headers.get("Authorization", "")
+                if token.lower().startswith("bearer "):
+                    token = token[7:]
+                if not hmac.compare_digest(token.encode(), api_key.encode()):
                     return JSONResponse({"error": "unauthorized"}, status_code=401)
                 return await call_next(request)
         middleware.append(Middleware(_AuthMiddleware))
 
+    async def _invalid_body_handler(request, exc):
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
     app = Starlette(
         middleware=middleware,
+        exception_handlers={_InvalidBodyError: _invalid_body_handler},
         routes=[
             Route("/health", health),
             Route("/repos", list_repos),
@@ -1849,7 +1964,8 @@ def _index_page(request: Request):
     html = index_path.read_text(encoding="utf-8")
     api_key = os.environ.get("REPO_WIKI_API_KEY", "")
     if api_key:
-        script = f'<script>window._apiKey={json.dumps(api_key)};</script>'
+        safe_json = json.dumps(api_key).replace("<", "\\u003c").replace(">", "\\u003e").replace("/", "\\/")
+        script = f'<script>window._apiKey={safe_json};</script>'
         html = html.replace("</head>", script + "</head>")
     return HTMLResponse(html)
 
@@ -1860,6 +1976,8 @@ def _inject_credentials(
     password: str,
     token: str,
 ) -> str:
+    if not url or url.startswith("git@") or "://" not in url:
+        return url
     parsed = urllib.parse.urlparse(url)
     if token:
         netloc = f"x-access-token:{urllib.parse.quote(token, safe='')}@{parsed.hostname}"
@@ -1878,7 +1996,9 @@ def _inject_credentials(
 
 def _sanitize_error(error_msg: str, url: str, username: str, password: str, token: str) -> str:
     safe = error_msg
-    safe = safe.replace(url, "<REDACTED_URL>")
+    safe = re.sub(r'https?://[^\s@]+@[^\s]+', '<REDACTED_URL>', safe)
+    if url:
+        safe = safe.replace(url, "<REDACTED_URL>")
     if username:
         safe = safe.replace(username, "<REDACTED_USER>")
     if password:
@@ -1901,12 +2021,15 @@ def _store_credentials(
     if parsed.port:
         host = f"{host}:{parsed.port}"
 
-    subprocess.run(
+    r = subprocess.run(
         ["git", "remote", "set-url", "origin", url],
         cwd=clone_dir,
         capture_output=True,
         text=True,
+        timeout=15,
     )
+    if r.returncode != 0:
+        logger.warning("git remote set-url failed: %s", r.stderr.strip())
 
     if not (username or password or token):
         return
@@ -1915,7 +2038,7 @@ def _store_credentials(
     cred_store_path = str(credential_file)
 
     subprocess.run(
-        ["git", "config", "credential.helper", f"store --file='{cred_store_path}'"],
+        ["git", "config", "credential.helper", f"store --file={cred_store_path}"],
         cwd=clone_dir,
         capture_output=True,
         text=True,
@@ -1932,17 +2055,10 @@ def _store_credentials(
     if credential_file.exists():
         existing = credential_file.read_text()
     if cred_line not in existing:
-        credential_file.write_text(existing.rstrip("\n") + "\n" + cred_line + "\n")
+        tmp = credential_file.with_suffix(".tmp")
+        tmp.write_text((existing.rstrip("\n") + "\n" + cred_line if existing.strip() else cred_line) + "\n")
+        tmp.replace(credential_file)
         os.chmod(credential_file, 0o600)
-
-    gitignore = clone_dir / ".gitignore"
-    cred_gitignore_entry = ".git/credentials"
-    if gitignore.exists():
-        content = gitignore.read_text()
-        if cred_gitignore_entry not in content:
-            gitignore.write_text(content.rstrip() + "\n" + cred_gitignore_entry + "\n")
-    else:
-        gitignore.write_text(cred_gitignore_entry + "\n")
 
 
 def _resolve_repos(repo: str | None) -> list[tuple[str, dict]]:
@@ -1951,7 +2067,7 @@ def _resolve_repos(repo: str | None) -> list[tuple[str, dict]]:
         if not info:
             return []
         return [(repo, info)]
-    return list(registry.repos.items())
+    return registry.items()
 
 
 def _trace_call_impl(
@@ -1974,6 +2090,8 @@ def _trace_call_impl(
         current_ids = set(_parse_json_list(meta.get("calls", "")))
     elif direction == "up":
         current_ids = set(_parse_json_list(meta.get("called_by", "")))
+    else:
+        current_ids = set()
 
     for _ in range(max_depth):
         next_ids = set()
@@ -2008,21 +2126,28 @@ def _expand_with_call_graph(
 ) -> list[dict]:
     expanded = list(hits)
     visited = {h["id"] for h in hits}
+    frontier = list(hits)
 
-    for hit in hits:
-        meta = hit.get("metadata", {})
-        related_ids = set()
-        related_ids.update(_parse_json_list(meta.get("calls", "")))
-        related_ids.update(_parse_json_list(meta.get("called_by", "")))
-        related_ids -= visited
+    for _ in range(depth):
+        next_frontier = []
+        for hit in frontier:
+            meta = hit.get("metadata", {})
+            related_ids = set()
+            related_ids.update(_parse_json_list(meta.get("calls", "")))
+            related_ids.update(_parse_json_list(meta.get("called_by", "")))
+            related_ids -= visited
 
-        if related_ids:
-            batch = get_by_ids(list(related_ids), cfg.vector_store, repo_root)
-            for node in batch:
-                if node["id"] not in visited:
-                    visited.add(node["id"])
-                    node["repo"] = repo_name
-                    expanded.append(node)
+            if related_ids:
+                batch = get_by_ids(list(related_ids), cfg.vector_store, repo_root)
+                for node in batch:
+                    if node["id"] not in visited:
+                        visited.add(node["id"])
+                        node["repo"] = repo_name
+                        expanded.append(node)
+                        next_frontier.append(node)
+        if not next_frontier:
+            break
+        frontier = next_frontier
 
     return expanded
 
@@ -2036,11 +2161,15 @@ def _parse_json_list(raw: str) -> list[str]:
         return []
 
 
+class _InvalidBodyError(Exception):
+    pass
+
+
 async def _parse_body(request: Request) -> dict:
     try:
         body = await request.json()
     except Exception:
-        return {}
+        raise _InvalidBodyError("invalid JSON body")
     if not isinstance(body, dict):
-        return {}
+        raise _InvalidBodyError("request body must be a JSON object")
     return body

@@ -178,7 +178,7 @@ def test_ruby_module_node():
 def test_ruby_function_node():
     nodes = parse_file(RUBY_FIXTURE, repo_root=RUBY_FIXTURE.parent.parent.parent)
     ids = [n.id for n in nodes]
-    assert any(i.endswith("::parse") for i in ids)
+    assert any(i.endswith("::Parser.parse") for i in ids)
 
 def test_ruby_docstring_extracted():
     nodes = parse_file(RUBY_FIXTURE, repo_root=RUBY_FIXTURE.parent.parent.parent)

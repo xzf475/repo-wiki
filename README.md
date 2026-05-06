@@ -46,7 +46,7 @@ pip install repo-wiki
 从源码安装（未发布到 PyPI 时）：
 
 ```bash
-git clone https://github.com/your/repo-wiki.git
+git clone https://github.com/xzf475/repo-wiki.git
 cd repo-wiki
 pip install -e .
 ```
@@ -97,7 +97,7 @@ Web 仪表盘：[http://localhost:7654](http://localhost:7654)
 ## Docker 部署
 
 ```bash
-git clone https://github.com/your/repo-wiki.git && cd repo-wiki
+git clone https://github.com/xzf475/repo-wiki.git && cd repo-wiki
 cp .env.example .env          # 填入 API Key
 docker compose up -d          # 构建并启动
 docker compose logs -f        # 查看日志
@@ -307,6 +307,7 @@ LLM_API_KEY_ENV=DASHSCOPE_API_KEY
 # Embedding
 EMBEDDING_PROVIDER=dashscope/text-embedding-v4
 EMBEDDING_API_KEY_ENV=DASHSCOPE_API_KEY
+EMBEDDING_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 EMBEDDING_DIMENSIONS=1024
 
 # 向量数据库
@@ -315,6 +316,7 @@ VECTOR_PERSIST_DIR=.indexer/vector_db
 VECTOR_COLLECTION_NAME=repo_wiki_code
 
 # REST API
+API_PORT=7654
 REPO_WIKI_API_KEY=                     # API 认证密钥
 PUBLIC_DOMAIN=https://your-server.com  # 公开域名，用于 webhook URL
 WEBHOOK_SECRET=your-webhook-secret     # Webhook 签名密钥

@@ -1,18 +1,23 @@
 # indexer/mcp_server.py
 from __future__ import annotations
 import json
+import hmac
+import logging
 from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 from indexer.config import load_config
+
+logger = logging.getLogger(__name__)
 
 
 def _apply_mcp_auth(mcp: FastMCP, mcp_api_key: str | None) -> None:
     _orig_method = mcp.streamable_http_app
 
-    # Disable MCP's built-in TransportSecurityMiddleware which blocks external hosts
-    mcp.settings.transport_security.enable_dns_rebinding_protection = False
+    if mcp_api_key:
+        mcp.settings.transport_security.enable_dns_rebinding_protection = False
+        logger.warning("DNS rebinding protection disabled for MCP server (auth enabled)")
 
-    def _patched_method(_self=None):
+    def _patched_method():
         app = _orig_method()
 
         if mcp_api_key:
@@ -22,8 +27,8 @@ def _apply_mcp_auth(mcp: FastMCP, mcp_api_key: str | None) -> None:
             class _MCPAuthMiddleware(BaseHTTPMiddleware):
                 async def dispatch(self, request, call_next):
                     auth = request.headers.get("Authorization", "")
-                    token = auth.removeprefix("Bearer ")
-                    if not token or token != mcp_api_key:
+                    token = auth[7:] if auth.lower().startswith("bearer ") else auth
+                    if not token or not hmac.compare_digest(token, mcp_api_key):
                         return JSONResponse({"error": "unauthorized"}, status_code=401)
                     return await call_next(request)
             app = _MCPAuthMiddleware(app)
@@ -84,6 +89,8 @@ def create_server(repo_root: Path | None = None, mcp_api_key: str | None = None)
             direction: "down" (follow calls this symbol makes) or "up" (follow callers of this symbol)
             max_depth: Maximum hops in the call graph (default 3)
         """
+        if direction not in ("up", "down"):
+            return f"Invalid direction '{direction}'. Must be 'up' or 'down'."
         from indexer.retrieval import trace_call
         nodes = trace_call(symbol_id, cfg, repo_root, direction=direction, max_depth=max_depth)
         if not nodes:
@@ -116,6 +123,10 @@ def create_server(repo_root: Path | None = None, mcp_api_key: str | None = None)
             line_end: End line number
             padding: Extra lines to include before and after the range (default 5)
         """
+        if line_start < 1 or line_end < 1 or line_end < line_start:
+            return f"Invalid line range: line_start={line_start}, line_end={line_end}. Must be >= 1 and line_end >= line_start."
+        if padding < 0 or padding > 50:
+            return f"Invalid padding: {padding}. Must be 0-50."
         from indexer.retrieval import get_source_context
         return get_source_context(file_path, line_start, line_end, repo_root, padding=padding)
 
@@ -124,39 +135,37 @@ def create_server(repo_root: Path | None = None, mcp_api_key: str | None = None)
 
 
 def create_api_server(api_url: str, api_key: str | None = None, mcp_api_key: str | None = None) -> FastMCP:
+    if not api_url or not api_url.startswith(("http://", "https://")):
+        raise ValueError(f"api_url must start with http:// or https://, got: {api_url!r}")
     import urllib.request
     import urllib.error
 
     mcp = FastMCP("repo-wiki-rag")
 
-    def _api_get(path: str) -> dict:
+    def _api_request(path: str, method: str = "GET", body: dict | None = None, timeout: int = 30) -> dict:
         url = f"{api_url.rstrip('/')}{path}"
+        data = json.dumps(body or {}).encode() if method == "POST" else None
         headers = {"Accept": "application/json"}
+        if method == "POST":
+            headers["Content-Type"] = "application/json"
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
-        req = urllib.request.Request(url, headers=headers)
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return json.loads(resp.read())
+        except json.JSONDecodeError:
+            return {"error": "Invalid JSON response from API"}
         except urllib.error.HTTPError as e:
             return {"error": f"HTTP {e.code}: {e.reason}"}
         except urllib.error.URLError as e:
             return {"error": f"Connection error: {e.reason}"}
 
+    def _api_get(path: str) -> dict:
+        return _api_request(path, method="GET")
+
     def _api_post(path: str, body: dict | None = None) -> dict:
-        url = f"{api_url.rstrip('/')}{path}"
-        data = json.dumps(body or {}).encode()
-        headers = {"Content-Type": "application/json", "Accept": "application/json"}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-        req = urllib.request.Request(url, data=data, headers=headers)
-        try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                return json.loads(resp.read())
-        except urllib.error.HTTPError as e:
-            return {"error": f"HTTP {e.code}: {e.reason}"}
-        except urllib.error.URLError as e:
-            return {"error": f"Connection error: {e.reason}"}
+        return _api_request(path, method="POST", body=body, timeout=60)
 
     @mcp.tool()
     def list_repos() -> str:
@@ -249,6 +258,10 @@ def create_api_server(api_url: str, api_key: str | None = None, mcp_api_key: str
             direction: "down" (follow calls this symbol makes) or "up" (follow callers of this symbol)
             max_depth: Maximum hops in the call graph (default 3)
         """
+        if direction not in ("up", "down"):
+            return f"Invalid direction '{direction}'. Must be 'up' or 'down'."
+        if not repo:
+            return "repo is required"
         body = {
             "symbol_id": symbol_id,
             "repo": repo,
@@ -291,6 +304,12 @@ def create_api_server(api_url: str, api_key: str | None = None, mcp_api_key: str
             line_end: End line number
             padding: Extra lines to include before and after the range (default 5)
         """
+        if not repo:
+            return "repo is required"
+        if line_start < 1 or line_end < 1 or line_end < line_start:
+            return f"Invalid line range: line_start={line_start}, line_end={line_end}. Must be >= 1 and line_end >= line_start."
+        if padding < 0 or padding > 50:
+            return f"Invalid padding: {padding}. Must be 0-50."
         body = {
             "file_path": file_path,
             "repo": repo,

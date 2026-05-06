@@ -26,17 +26,23 @@ class IndexEntry:
     path: str
     covers: str
     entry_points: list[str]
-    # deep enrichment fields (populated only with --deep)
+    group_label: str = ""
     overview: str = ""
     flows: list[str] = field(default_factory=list)
 
 
+_JINJA_ENV = None
+
+
 def _jinja_env() -> Environment:
-    return Environment(
-        loader=FileSystemLoader(str(TEMPLATES_DIR)),
-        trim_blocks=True,
-        lstrip_blocks=True,
-    )
+    global _JINJA_ENV
+    if _JINJA_ENV is None:
+        _JINJA_ENV = Environment(
+            loader=FileSystemLoader(str(TEMPLATES_DIR)),
+            trim_blocks=True,
+            lstrip_blocks=True,
+        )
+    return _JINJA_ENV
 
 
 def build_page(ctx: PageContext) -> str:
@@ -86,6 +92,8 @@ def sanitize_group_label(group_label: str) -> str:
     s = group_label.replace("/", "_")
     s = re.sub(r'[:*?<>|"\s]', '_', s)
     s = s.strip("_").strip(".")
+    if len(s) > 200:
+        s = s[:200]
     return s or "root"
 
 def write_page(wiki_dir: Path, group_label: str, content: str) -> Path:
