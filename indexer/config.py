@@ -121,6 +121,9 @@ def load_config(repo_root: Path) -> Config:
     if cfg.max_tokens_per_batch < 1:
         logger.warning("max_tokens_per_batch must be >= 1, got %d; resetting to 8000", cfg.max_tokens_per_batch)
         cfg.max_tokens_per_batch = 8000
+    if cfg.merge_threshold < 1:
+        logger.warning("merge_threshold must be >= 1, got %d; resetting to 2", cfg.merge_threshold)
+        cfg.merge_threshold = 2
     if cfg.embedding.dimensions < 1:
         logger.warning("embedding.dimensions must be >= 1, got %d; resetting to 1024", cfg.embedding.dimensions)
         cfg.embedding.dimensions = 1024

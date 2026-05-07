@@ -3,8 +3,6 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
-import warnings
-from datetime import datetime, timezone
 from fnmatch import fnmatch
 from pathlib import Path
 
@@ -13,15 +11,14 @@ logger = logging.getLogger(__name__)
 import click
 
 from indexer.config import Config, load_config, save_config
-from indexer.manifest import load_manifest, save_manifest, compute_hash, FileEntry
+from indexer.manifest import load_manifest, save_manifest
 from indexer.git import (
     staged_files, all_tracked_files, current_commit, current_branch,
     changed_files_since, is_git_repo
 )
 from indexer.ast_parser import parse_file, load_cached_nodes, save_cached_nodes, compute_hash_short
-from indexer.llm import describe_nodes, describe_files, deep_enrich_page, deep_enrich_pages, deep_enrich_index, synthesize_commit_message
+from indexer.llm import describe_nodes, describe_files, deep_enrich_pages, deep_enrich_index, synthesize_commit_message
 from indexer.grouper import density_group
-from indexer.wiki import build_page, build_index, write_page, write_index, PageContext, IndexEntry, TEMPLATES_DIR
 from indexer.hooks import install_hook, remove_hook
 from indexer.indexing import (
     cross_reference, load_existing_nodes, parse_candidates,
@@ -89,7 +86,14 @@ def run(staged: bool, force: bool, skip_deep: bool):
 
     _ensure_cache_gitignore(root)
 
-    all_git_files = all_tracked_files(root) if is_git_repo(root) else []
+    if is_git_repo(root):
+        all_git_files = all_tracked_files(root)
+    else:
+        all_git_files = [
+            str(p.relative_to(root))
+            for p in root.rglob("*")
+            if p.is_file() and not any(part.startswith(".") for part in p.relative_to(root).parts)
+        ]
     tracked_files = [f for f in all_git_files if _is_indexable(f, cfg)]
 
     if staged:
@@ -225,6 +229,7 @@ def run(staged: bool, force: bool, skip_deep: bool):
 
     # ── Auto-stage ALL generated files (pre-commit hook) ──────────────────────
     if staged and is_git_repo(root):
+        git_env_cli = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
         r = subprocess.run(
             ["git", "add",
              cfg.wiki_dir,
@@ -234,6 +239,8 @@ def run(staged: bool, force: bool, skip_deep: bool):
             cwd=root,
             capture_output=True,
             text=True,
+            timeout=30,
+            env=git_env_cli,
         )
         if r.returncode != 0:
             click.echo(f"  Warning: git add failed: {r.stderr.strip()}", err=True)
@@ -256,7 +263,7 @@ def run(staged: bool, force: bool, skip_deep: bool):
         upsert_vectors(root, cfg, manifest, all_nodes, descriptions, removed_files=removed, branch=branch)
         click.echo(f"    ✓  {total_symbols} vectors upserted")
     except Exception as e:
-        warnings.warn(f"Vector store indexing failed: {e}")
+        logger.error("Vector store indexing failed: %s", e)
         click.echo(f"    ⚠  Skipped vector store (error: {e})")
 
     click.echo(f"\n  Done  —  {len(index_entries)} wiki page(s)  —  {total_symbols} symbols indexed\n")

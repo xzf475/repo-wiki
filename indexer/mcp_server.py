@@ -60,6 +60,8 @@ def create_server(repo_root: Path | None = None, mcp_api_key: str | None = None)
             expand_depth: How many hops in the call graph to expand (0=no expansion, 1=direct callers/callees)
         """
         from indexer.retrieval import search_symbols
+        top_k = max(1, min(top_k, 100))
+        expand_depth = max(0, min(expand_depth, 5))
         hits = search_symbols(query, cfg, repo_root, top_k=top_k, expand_depth=expand_depth)
         if not hits:
             return "No matching symbols found. Try a different query or ensure the repo has been indexed with `repo-wiki run`."
@@ -78,6 +80,7 @@ def create_server(repo_root: Path | None = None, mcp_api_key: str | None = None)
 
     @mcp.tool()
     def trace_call_tool(symbol_id: str, direction: str = "down", max_depth: int = 3) -> str:
+        max_depth = max(1, min(max_depth, 8))
         """Trace the call graph from a symbol. Follows calls (down) or callers (up) up to max_depth hops.
 
         Use this when: understanding how a bug propagates through the codebase, tracing an end-to-end
@@ -153,7 +156,7 @@ def create_api_server(api_url: str, api_key: str | None = None, mcp_api_key: str
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return json.loads(resp.read())
+                return json.loads(resp.read(10 * 1024 * 1024))
         except json.JSONDecodeError:
             return {"error": "Invalid JSON response from API"}
         except urllib.error.HTTPError as e:
@@ -247,6 +250,7 @@ def create_api_server(api_url: str, api_key: str | None = None, mcp_api_key: str
 
     @mcp.tool()
     def trace_call_tool(symbol_id: str, repo: str, direction: str = "down", max_depth: int = 3) -> str:
+        max_depth = max(1, min(max_depth, 8))
         """Trace the call graph from a symbol. Follows calls (down) or callers (up) up to max_depth hops.
 
         Use this when: understanding how a bug propagates through the codebase, tracing an end-to-end

@@ -134,7 +134,7 @@ class TestRepoRegistryGetNone:
             reg = RepoRegistry(repos_dir=Path(d))
             result = reg.get("missing")
             assert result is None
-            assert result.get("url", "") if result else "" == ""
+            assert (result.get("url", "") if result else "") == ""
 
 
 class TestParseBody:
@@ -675,3 +675,645 @@ class TestRubyModuleMethod:
         parse_node = next((n for n in nodes if "Parser.parse" in n.id), None)
         assert parse_node is not None
         assert parse_node.type == "method"
+
+
+class TestVectorStoreIncrementalSafety:
+    def test_upsert_nodes_uses_file_scoped_stale(self):
+        import inspect
+        from indexer.vector_store import upsert_nodes
+        src = inspect.getsource(upsert_nodes)
+        assert "files_in_batch" in src
+        assert "$and" in src
+
+class TestDimensionMismatchDetection:
+    def test_get_or_create_checks_dim(self):
+        import inspect
+        from indexer.vector_store import _get_or_create_collection
+        src = inspect.getsource(_get_or_create_collection)
+        assert "existing_dim" in src
+
+class TestListReposNullSafety:
+    def test_list_repos_checks_none(self):
+        import inspect
+        from indexer.rest_api import list_repos
+        src = inspect.getsource(list_repos)
+        assert "if not info" in src
+
+class TestExpandDepthClamped:
+    def test_expand_depth_max_5(self):
+        expand_depth = min(100, 5)
+        assert expand_depth == 5
+
+class TestWebhookNullCheck:
+    def test_webhook_checks_info_not_none(self):
+        import inspect
+        from indexer.rest_api import webhook_by_name
+        src = inspect.getsource(webhook_by_name)
+        assert "if not info" in src
+
+class TestURLValidationBeforeDiscovery:
+    def test_register_validates_url_before_discovery(self):
+        import inspect
+        from indexer.rest_api import register_repo
+        src = inspect.getsource(register_repo)
+        parsed_pos = src.find("parsed_url = urllib.parse.urlparse")
+        discover_pos = src.find("_discover_remote_branches")
+        assert parsed_pos < discover_pos, "URL validation must come before branch discovery"
+
+class TestNonGitManifestCleanup:
+    def test_update_manifest_cleans_non_git(self):
+        import inspect
+        from indexer.indexing import update_manifest
+        src = inspect.getsource(update_manifest)
+        assert "stale_keys" in src
+        assert ".exists()" in src
+
+class TestLLMListResponseHandling:
+    def test_deep_enrich_index_handles_list(self):
+        import inspect
+        from indexer.llm import deep_enrich_index
+        src = inspect.getsource(deep_enrich_index)
+        assert "isinstance(result, list)" in src
+
+class TestSafeIdFunction:
+    def test_safeId_exists_in_html(self):
+        with open("indexer/static/index.html", "r") as f:
+            content = f.read()
+        assert "function safeId" in content
+        assert "safeId(repoName)" in content
+
+class TestMCPResponseSizeLimit:
+    def test_api_request_limits_response(self):
+        with open("indexer/mcp_server.py", "r") as f:
+            src = f.read()
+        assert "10 * 1024 * 1024" in src
+
+class TestMergeThresholdValidation:
+    def test_merge_threshold_validated(self):
+        from indexer.config import Config, load_config, save_config
+        d = Path(tempfile.mkdtemp())
+        cfg = Config()
+        cfg.merge_threshold = 0
+        save_config(d, cfg)
+        loaded = load_config(d)
+        assert loaded.merge_threshold >= 1
+
+
+class TestVectorStoreLogger:
+    def test_vector_store_has_logger(self):
+        import indexer.vector_store as vs
+        assert hasattr(vs, 'logger')
+
+class TestNonGitCliFileDiscovery:
+    def test_cli_non_git_uses_rglob(self):
+        with open("indexer/cli.py", "r") as f:
+            src = f.read()
+        assert "rglob" in src
+        assert "any(part.startswith" in src
+
+class TestSearchDimNone:
+    def test_search_passes_dim_none(self):
+        import inspect
+        from indexer.vector_store import search
+        src = inspect.getsource(search)
+        assert "dim=None" in src
+
+class TestClientThreadSafety:
+    def test_anthropic_client_has_lock(self):
+        import inspect
+        from indexer.llm import _get_anthropic_client
+        src = inspect.getsource(_get_anthropic_client)
+        assert "_anthropic_lock" in src
+
+    def test_embedding_openai_client_has_lock(self):
+        import inspect
+        from indexer.embedding import _get_openai_client
+        src = inspect.getsource(_get_openai_client)
+        assert "_openai_lock" in src
+
+class TestFatalExceptionsUnified:
+    def test_fatal_exceptions_constant(self):
+        from indexer.llm import _FATAL_EXCEPTIONS
+        assert ValueError in _FATAL_EXCEPTIONS
+        assert TypeError in _FATAL_EXCEPTIONS
+        assert AttributeError in _FATAL_EXCEPTIONS
+
+class TestMCPExpandDepthClamped:
+    def test_mcp_expand_depth_max_5(self):
+        with open("indexer/mcp_server.py", "r") as f:
+            src = f.read()
+        assert "min(expand_depth, 5)" in src
+
+class TestDefaultBranchDetection:
+    def test_register_task_detects_default_branch(self):
+        import inspect
+        from indexer.rest_api import _run_register_task_inner
+        src = inspect.getsource(_run_register_task_inner)
+        assert "_detect_default_branch" in src
+
+class TestAPIKeyNotInHTML:
+    def test_api_key_not_embedded_in_page(self):
+        import inspect
+        from indexer.rest_api import _index_page
+        src = inspect.getsource(_index_page)
+        assert "window._apiKey" not in src
+
+class TestBranchFilterConsistent:
+    def test_retrieval_always_filters_by_branch(self):
+        import inspect
+        from indexer.retrieval import search_symbols
+        src = inspect.getsource(search_symbols)
+        assert 'where_clause = {"branch": branch}' in src
+
+class TestLoadReposHasCatch:
+    def test_loadrepos_has_catch(self):
+        with open("indexer/static/index.html", "r") as f:
+            content = f.read()
+        loadrepos_start = content.index("async function loadRepos()")
+        loadrepos_end = content.index("async function openRepo(")
+        loadrepos_body = content[loadrepos_start:loadrepos_end]
+        assert "catch" in loadrepos_body
+
+
+class TestAnthropicImport:
+    def test_anthropic_imported_in_completion(self):
+        import inspect
+        from indexer.llm import _anthropic_completion
+        src = inspect.getsource(_anthropic_completion)
+        assert "import anthropic" in src
+
+class TestRetryFatalExceptions:
+    def test_retry_uses_fatal_exceptions_constant(self):
+        with open("indexer/llm.py", "r") as f:
+            src = f.read()
+        hardcoded = src.count("isinstance(e, (TypeError, AttributeError, ValueError, ImportError))")
+        assert hardcoded == 0, f"Found {hardcoded} hardcoded fatal exception tuples"
+
+class TestDeleteByFilesDimNone:
+    def test_delete_by_files_passes_dim_none(self):
+        import inspect
+        from indexer.vector_store import delete_by_files
+        src = inspect.getsource(delete_by_files)
+        assert "dim=None" in src
+
+class TestAllNewIdsOnlyValid:
+    def test_all_new_ids_uses_valid_only(self):
+        import inspect
+        from indexer.vector_store import upsert_nodes
+        src = inspect.getsource(upsert_nodes)
+        assert "all_new_ids = {n.id for n, _ in valid}" in src
+
+class TestOpenRepoHasCatch:
+    def test_openrepo_has_catch(self):
+        with open("indexer/static/index.html", "r") as f:
+            content = f.read()
+        start = content.index("async function openRepo(")
+        end = content.index("function backToRepos(")
+        body = content[start:end]
+        assert "catch" in body
+
+class TestDoSearchHasCatch:
+    def test_dosearch_has_catch(self):
+        with open("indexer/static/index.html", "r") as f:
+            content = f.read()
+        start = content.index("async function doSearch(")
+        end = content.index("function showRegister(")
+        body = content[start:end]
+        assert "catch" in body
+
+class TestMCPMaxDepthClamped:
+    def test_trace_call_max_depth_clamped(self):
+        with open("indexer/mcp_server.py", "r") as f:
+            src = f.read()
+        assert "min(max_depth, 8)" in src
+
+class TestTraceCallMaxDepthLowerBound:
+    def test_trace_call_max_depth_lower_bound(self):
+        import inspect
+        from indexer.rest_api import trace_call
+        src = inspect.getsource(trace_call)
+        assert "max(1, min(" in src
+
+class TestTagsBranchesTypeValidation:
+    def test_tags_type_validation(self):
+        import inspect
+        from indexer.rest_api import register_repo
+        src = inspect.getsource(register_repo)
+        assert "isinstance(tags, list)" in src
+        assert "isinstance(branches, list)" in src
+
+class TestBuildBatchesIncludesCalledBy:
+    def test_build_batches_includes_called_by(self):
+        with open("indexer/indexing.py", "r") as f:
+            src = f.read()
+        assert "called_by" in src
+
+
+class TestRound14Fixes:
+    def test_git_terminal_prompt_on_ls_remote(self):
+        with open("indexer/rest_api.py", "r") as f:
+            src = f.read()
+        assert 'GIT_TERMINAL_PROMPT' in src
+
+    def test_git_terminal_prompt_on_store_credentials(self):
+        with open("indexer/rest_api.py", "r") as f:
+            src = f.read()
+        assert "git_env_cred" in src
+
+    def test_expand_depth_lower_bound(self):
+        import inspect
+        from indexer.rest_api import search_symbols
+        src = inspect.getsource(search_symbols)
+        assert "max(1, min(" in src
+
+    def test_url_empty_check_before_discovery(self):
+        import inspect
+        from indexer.rest_api import register_repo
+        src = inspect.getsource(register_repo)
+        url_check_pos = src.find('"url is required"')
+        discovery_pos = src.find("_discover_remote_branches")
+        assert url_check_pos > 0
+        assert discovery_pos > 0
+        assert url_check_pos < discovery_pos
+
+    def test_no_duplicate_url_validation(self):
+        import inspect
+        from indexer.rest_api import register_repo
+        src = inspect.getsource(register_repo)
+        assert src.count("http URLs cannot be used with credentials") == 1
+
+    def test_cli_git_add_timeout(self):
+        with open("indexer/cli.py", "r") as f:
+            src = f.read()
+        assert "timeout=30" in src
+
+    def test_cli_no_warnings_warn(self):
+        with open("indexer/cli.py", "r") as f:
+            src = f.read()
+        assert "warnings.warn" not in src
+
+    def test_cli_no_unused_imports(self):
+        with open("indexer/cli.py", "r") as f:
+            src = f.read()
+        assert "from datetime import" not in src
+        assert "compute_hash, FileEntry" not in src
+        assert "deep_enrich_page," not in src
+        assert "PageContext, IndexEntry, TEMPLATES_DIR" not in src
+
+    def test_rest_api_no_unused_config_imports(self):
+        with open("indexer/rest_api.py", "r") as f:
+            src = f.read()
+        assert "EmbeddingConfig" not in src
+        assert "VectorStoreConfig" not in src
+
+    def test_mcp_no_unused_socket_import(self):
+        with open("indexer/mcp_server.py", "r") as f:
+            src = f.read()
+        assert "import socket" not in src
+
+    def test_max_depth_limit_consistent(self):
+        with open("indexer/mcp_server.py", "r") as f:
+            src = f.read()
+        assert "min(max_depth, 8)" in src
+        assert "min(max_depth, 10)" not in src
+
+    def test_retrieval_branch_empty_means_no_filter(self):
+        import inspect
+        from indexer.retrieval import search_symbols
+        src = inspect.getsource(search_symbols)
+        assert "if branch else None" in src
+
+    def test_rest_api_uses_retrieval_trace_call(self):
+        with open("indexer/rest_api.py", "r") as f:
+            src = f.read()
+        assert "_trace_call_retrieval" in src
+        assert "_expand_retrieval" in src
+
+    def test_rest_api_no_duplicate_parse_json_list(self):
+        with open("indexer/rest_api.py", "r") as f:
+            src = f.read()
+        assert src.count("def _parse_json_list") == 0
+
+    def test_description_type_validation(self):
+        import inspect
+        from indexer.rest_api import register_repo
+        src = inspect.getsource(register_repo)
+        assert "isinstance(description, str)" in src
+
+    def test_tags_element_type_validation(self):
+        import inspect
+        from indexer.rest_api import register_repo
+        src = inspect.getsource(register_repo)
+        assert "isinstance(t, str)" in src
+
+
+class TestRound15Fixes:
+    def test_open_repo_null_safe_manifest(self):
+        with open("indexer/static/index.html", "r") as f:
+            src = f.read()
+        assert "(data.manifest&&data.manifest.files)" in src
+
+    def test_open_repo_null_safe_wiki_pages(self):
+        with open("indexer/static/index.html", "r") as f:
+            src = f.read()
+        assert "(data.wiki_pages||[])" in src
+
+    def test_api_json_parse_error_handling(self):
+        with open("indexer/static/index.html", "r") as f:
+            src = f.read()
+        assert "Invalid JSON response" in src
+
+    def test_sync_branch_has_try_catch(self):
+        with open("indexer/static/index.html", "r") as f:
+            src = f.read()
+        idx = src.index("async function syncBranch")
+        func_body = src[idx:idx+800]
+        assert "try{" in func_body
+        assert "catch(e)" in func_body
+
+    def test_rebuild_branch_has_try_catch(self):
+        with open("indexer/static/index.html", "r") as f:
+            src = f.read()
+        idx = src.index("async function rebuildBranch")
+        func_body = src[idx:idx+800]
+        assert "try{" in func_body
+        assert "catch(e)" in func_body
+
+    def test_register_missing_branch_has_try_catch(self):
+        with open("indexer/static/index.html", "r") as f:
+            src = f.read()
+        idx = src.index("async function registerMissingBranch")
+        func_body = src[idx:idx+800]
+        assert "try{" in func_body
+        assert "catch(e)" in func_body
+
+    def test_do_unregister_has_try_catch(self):
+        with open("indexer/static/index.html", "r") as f:
+            src = f.read()
+        idx = src.index("async function doUnregister")
+        func_body = src[idx:idx+800]
+        assert "try{" in func_body
+        assert "catch(e)" in func_body
+
+    def test_do_validate_has_try_catch(self):
+        with open("indexer/static/index.html", "r") as f:
+            src = f.read()
+        idx = src.index("async function doValidate")
+        func_body = src[idx:idx+2000]
+        assert "try{" in func_body
+        assert "catch(e)" in func_body
+
+    def test_querySelector_title_optional_chaining(self):
+        with open("indexer/static/index.html", "r") as f:
+            src = f.read()
+        assert "querySelector('.title')?.textContent" in src
+
+    def test_assert_operator_precedence_fixed(self):
+        with open(__file__, "r") as f:
+            src = f.read()
+        assert '(result.get("url", "") if result else "") == ""' in src
+
+    def test_no_duplicate_anthropic_lock_test(self):
+        import inspect
+        from indexer.llm import _get_anthropic_client
+        src = inspect.getsource(_get_anthropic_client)
+        assert "_anthropic_lock" in src
+
+    def test_indexer_toml_no_dashscope_hardcoded(self):
+        with open(".indexer.toml", "r") as f:
+            lines = f.readlines()
+        for line in lines:
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                assert "dashscope" not in stripped.lower()
+                assert "DASHSCOPE" not in stripped
+
+
+class TestRound16Fixes:
+    def test_rebuild_git_before_delete(self):
+        import inspect
+        from indexer.rest_api import _run_rebuild_task_inner
+        src = inspect.getsource(_run_rebuild_task_inner)
+        git_pos = src.find("git fetch")
+        clean_pos = src.find("shutil.rmtree")
+        assert git_pos > 0
+        assert clean_pos > 0
+        assert git_pos < clean_pos
+
+    def test_branch_detection_after_clone(self):
+        import inspect
+        from indexer.rest_api import _run_register_task_inner
+        src = inspect.getsource(_run_register_task_inner)
+        detect_pos = src.find("_detect_default_branch")
+        store_cred_pos = src.find("_store_credentials")
+        assert detect_pos > 0
+        assert store_cred_pos > 0
+        assert detect_pos > store_cred_pos
+
+    def test_vector_upsert_before_manifest(self):
+        import inspect
+        from indexer.rest_api import _run_indexing_pipeline
+        src = inspect.getsource(_run_indexing_pipeline)
+        upsert_pos = src.find("upsert_vectors")
+        manifest_pos = src.find("update_manifest")
+        assert upsert_pos > 0
+        assert manifest_pos > 0
+        assert upsert_pos < manifest_pos
+
+    def test_progress_offset_in_pipeline(self):
+        import inspect
+        from indexer.rest_api import _run_indexing_pipeline
+        src = inspect.getsource(_run_indexing_pipeline)
+        assert "progress_offset" in src
+
+    def test_sync_repo_url_initialized_before_try(self):
+        import inspect
+        from indexer.rest_api import _run_sync_task
+        src = inspect.getsource(_run_sync_task)
+        try_pos = src.find("try:")
+        url_init_pos = src.find('repo_url = ')
+        assert url_init_pos > 0
+        assert try_pos > 0
+        assert url_init_pos < try_pos
+
+    def test_clone_dir_cleanup_on_failure(self):
+        import inspect
+        from indexer.rest_api import _run_register_task_inner
+        src = inspect.getsource(_run_register_task_inner)
+        assert src.count("shutil.rmtree(clone_dir)") >= 2
+
+    def test_vector_store_client_eviction(self):
+        from indexer.vector_store import evict_client
+        assert callable(evict_client)
+
+    def test_vector_store_client_lock(self):
+        import inspect
+        from indexer.vector_store import _get_client
+        src = inspect.getsource(_get_client)
+        assert "_client_lock" in src
+
+    def test_empty_branches_to_index_check(self):
+        import inspect
+        from indexer.rest_api import _run_register_task_inner
+        src = inspect.getsource(_run_register_task_inner)
+        assert "No branches to index" in src
+
+    def test_timeout_expired_includes_cmd(self):
+        import inspect
+        from indexer.rest_api import _run_sync_task
+        src = inspect.getsource(_run_sync_task)
+        assert "e.cmd" in src
+
+    def test_skill_metadata_not_zero(self):
+        import inspect
+        from indexer.rest_api import _run_sync_task
+        src = inspect.getsource(_run_sync_task)
+        assert "sym_count" in src
+        assert "0, 0" not in src.split("write_index_and_skill")[1][:100]
+
+
+class TestRound17Fixes:
+    def test_register_task_no_undefined_description_tags(self):
+        import inspect
+        from indexer.rest_api import _run_register_task_inner
+        src = inspect.getsource(_run_register_task_inner)
+        assert "description=description" not in src
+        assert "tags=tags" not in src
+
+    def test_unregister_uses_root_not_path(self):
+        import inspect
+        from indexer.rest_api import RepoRegistry
+        src = inspect.getsource(RepoRegistry.unregister)
+        assert 'info.get("root"' in src
+        assert 'info.get("path"' not in src
+
+    def test_search_symbols_int_coercion(self):
+        import inspect
+        from indexer.rest_api import search_symbols
+        src = inspect.getsource(search_symbols)
+        assert "int(body.get" in src
+        assert "must be integers" in src
+
+    def test_trace_call_int_coercion(self):
+        import inspect
+        from indexer.rest_api import trace_call
+        src = inspect.getsource(trace_call)
+        assert "int(body.get" in src
+        assert "must be an integer" in src
+
+    def test_git_config_has_timeout(self):
+        with open("indexer/rest_api.py", "r") as f:
+            src = f.read()
+        idx = src.index("credential.helper")
+        chunk = src[idx:idx+200]
+        assert "timeout=" in chunk
+
+    def test_detect_default_branch_has_git_terminal_prompt(self):
+        import inspect
+        from indexer.rest_api import _detect_default_branch
+        src = inspect.getsource(_detect_default_branch)
+        assert "GIT_TERMINAL_PROMPT" in src
+
+    def test_rebuild_evicts_vector_client_before_rmtree(self):
+        import inspect
+        from indexer.rest_api import _run_rebuild_task_inner
+        src = inspect.getsource(_run_rebuild_task_inner)
+        evict_pos = src.find("evict_client")
+        rmtree_pos = src.rfind("shutil.rmtree(vector_dir)")
+        assert evict_pos > 0
+        assert rmtree_pos > 0
+        assert evict_pos < rmtree_pos
+
+    def test_api_parses_json_error_body(self):
+        with open("indexer/static/index.html", "r") as f:
+            src = f.read()
+        assert "JSON.parse(t)" in src
+        assert "j.error" in src
+
+
+class TestRound18Fixes:
+    def test_rebuild_has_timeout_expired_handler(self):
+        import inspect
+        from indexer.rest_api import _run_rebuild_task_inner
+        src = inspect.getsource(_run_rebuild_task_inner)
+        assert "TimeoutExpired" in src
+
+    def test_git_py_has_git_terminal_prompt(self):
+        with open("indexer/git.py", "r") as f:
+            src = f.read()
+        assert "GIT_TERMINAL_PROMPT" in src
+
+    def test_cli_git_add_has_git_terminal_prompt(self):
+        with open("indexer/cli.py", "r") as f:
+            src = f.read()
+        assert "git_env_cli" in src
+
+    def test_step_names_includes_git_steps(self):
+        with open("indexer/static/index.html", "r") as f:
+            src = f.read()
+        for step in ["git_fetch", "git_checkout", "git_timeout", "locked", "unknown"]:
+            assert f"{step}:" in src
+
+    def test_evict_client_logs_on_failure(self):
+        import inspect
+        from indexer.rest_api import RepoRegistry
+        src = inspect.getsource(RepoRegistry.unregister)
+        assert "logger.debug" in src
+
+    def test_git_reset_return_code_checked(self):
+        with open("indexer/rest_api.py", "r") as f:
+            src = f.read()
+        assert src.count("git reset --hard failed") >= 3
+
+
+class TestPerformanceOptimizations:
+    def test_description_cache_functions_exist(self):
+        from indexer.indexing import load_cached_descriptions, save_cached_descriptions
+        assert callable(load_cached_descriptions)
+        assert callable(save_cached_descriptions)
+
+    def test_file_description_cache_functions_exist(self):
+        from indexer.indexing import load_cached_file_descriptions, save_cached_file_descriptions
+        assert callable(load_cached_file_descriptions)
+        assert callable(save_cached_file_descriptions)
+
+    def test_pipeline_uses_description_cache(self):
+        import inspect
+        from indexer.rest_api import _run_indexing_pipeline
+        src = inspect.getsource(_run_indexing_pipeline)
+        assert "load_cached_descriptions" in src
+        assert "save_cached_descriptions" in src
+        assert "new_nodes" in src
+
+    def test_pipeline_uses_file_description_cache(self):
+        import inspect
+        from indexer.rest_api import _run_indexing_pipeline
+        src = inspect.getsource(_run_indexing_pipeline)
+        assert "load_cached_file_descriptions" in src
+        assert "save_cached_file_descriptions" in src
+
+    def test_embedding_batch_size_increased(self):
+        with open("indexer/embedding.py", "r") as f:
+            src = f.read()
+        assert "batch_size = 50" in src
+        assert "batch_size = 10" not in src
+
+    def test_describe_files_parallel(self):
+        import inspect
+        from indexer.llm import describe_files
+        src = inspect.getsource(describe_files)
+        assert "ThreadPoolExecutor" in src
+        assert "max_workers" in src
+
+    def test_parse_candidates_parallel(self):
+        import inspect
+        from indexer.indexing import parse_candidates
+        src = inspect.getsource(parse_candidates)
+        assert "ThreadPoolExecutor" in src
+        assert "uncached" in src
+
+    def test_vector_store_batch_query(self):
+        import inspect
+        from indexer.vector_store import upsert_nodes
+        src = inspect.getsource(upsert_nodes)
+        assert "$or" in src

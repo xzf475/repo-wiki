@@ -253,9 +253,10 @@ footer{border-top:1px solid var(--border);padding:16px 32px;text-align:center;fo
 <footer>repo-wiki &mdash; Your codebase, understood by any LLM.</footer>
 
 <script>
-const STEP_NAMES={queued:'Queued',git_clone:'Cloning repository',git_pull:'Updating repository',init:'Initializing config',cleaning:'Cleaning old data',rebuild_init:'Re-initializing',detecting_files:'Detecting files',parsing:'Parsing files',cross_ref:'Cross-referencing calls',describing_symbols:'Describing symbols',describing_modules:'Describing modules',writing_wiki:'Writing wiki',deep_enrichment:'Deep enrichment',embedding:'Generating embeddings',upserting:'Storing vectors',complete:'Complete',indexing:'Indexing',already_indexed:'Already up to date'};
+const STEP_NAMES={queued:'Queued',git_clone:'Cloning repository',git_pull:'Updating repository',git_fetch:'Fetching repository',git_checkout:'Checking out branch',git_timeout:'Git operation timed out',locked:'Locked by another operation',init:'Initializing config',cleaning:'Cleaning old data',rebuild_init:'Re-initializing',detecting_files:'Detecting files',parsing:'Parsing files',cross_ref:'Cross-referencing calls',describing_symbols:'Describing symbols',describing_modules:'Describing modules',writing_wiki:'Writing wiki',deep_enrichment:'Deep enrichment',embedding:'Generating embeddings',upserting:'Storing vectors',complete:'Complete',indexing:'Indexing',already_indexed:'Already up to date',unknown:'Unknown error'};
 function esc(s){if(!s)return'';const d=document.createElement('div');d.textContent=String(s);return d.innerHTML;}
-function escAttr(s){return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'\\"').replace(/</g,'\\x3c').replace(/>/g,'\\x3e');}
+function safeId(s){return String(s).replace(/[^a-zA-Z0-9_-]/g,'_');}
+function escAttr(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 function fmtTime(iso){
   if(!iso)return'';
   try{
@@ -291,11 +292,12 @@ async function api(path,method='GET',body=null){
   if(body){opts.headers['Content-Type']='application/json';opts.body=JSON.stringify(body);}
   if(window._apiKey)opts.headers['Authorization']='Bearer '+window._apiKey;
   const r=await fetch(path,opts);
-  if(!r.ok){const t=await r.text();throw new Error(`HTTP ${r.status}: ${t}`);}
-  return r.json();
+  if(!r.ok){let t=await r.text();try{const j=JSON.parse(t);if(j.error)t=j.error;}catch(e){}throw new Error('HTTP '+r.status+': '+t);}
+  try{return await r.json();}catch(e){throw new Error('Invalid JSON response');}
 }
 
 async function loadRepos(){
+  try{
   const data=await api('/repos');
   const grid=document.getElementById('repos-grid');
   const empty=document.getElementById('repos-empty');
@@ -305,40 +307,41 @@ async function loadRepos(){
     return;
   }
   empty.style.display='none';
-  grid.innerHTML=data.repos.map(r=>`
-    <div class="repo-card">
-      <div class="status-dot ${r.has_vector_db?'ready':'empty'}"></div>
-      <div class="name" onclick="openRepo('${escAttr(r.name)}')">${esc(r.name)}</div>
-      <div class="path">${esc(r.path)}</div>
-      ${r.description?`<div style="font-size:12px;color:var(--text2);margin-top:2px">${esc(r.description)}</div>`:''}
-      ${r.tags&&r.tags.length?`<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:4px">${r.tags.map(t=>'<span style="font-size:10px;padding:1px 6px;background:var(--surface2);border-radius:3px;color:var(--accent2)">#'+esc(t)+'</span>').join('')}</div>`:''}
-      <div class="stats">
-        <span class="stat">&#9654; <span class="val">${r.symbol_count||0}</span> symbols</span>
-        <span class="stat">${r.has_vector_db?'&#10003; Vector DB':'&#10005; No vectors'}</span>
-      </div>
-      <div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:6px;align-items:center">
-        ${(r.branches||[]).map(b=>'<span style="font-size:10px;padding:2px 8px;border:1px solid var(--accent);border-radius:3px;color:var(--accent)">'+esc(b)+'</span>').join('')}
-        ${r.last_indexed_commit?'<code style="font-size:10px;color:var(--text3);margin-left:4px">@'+esc(r.last_indexed_commit)+'</code>':''}
-        ${r.last_synced_at?'<span style="font-size:10px;color:var(--text3);margin-left:auto">&#9200; '+fmtTime(r.last_synced_at)+'</span>':''}
-      </div>
-      ${r.webhook_url?`
-      <div style="margin-top:6px;display:flex;align-items:center;gap:4px">
-        <span style="font-size:10px;color:var(--text3);white-space:nowrap">Webhook:</span>
-        <code style="font-size:10px;color:var(--accent);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer" onclick="copyToClipboard('${escAttr(r.webhook_url)}')" title="Click to copy">${esc(r.webhook_url)}</code>
-        <span style="font-size:9px;color:var(--text3);cursor:pointer" onclick="copyToClipboard('${escAttr(r.webhook_url)}')">&#128203;</span>
-      </div>`:''}
-      <div style="display:flex;gap:6px;margin-top:10px">
-        <button onclick="doSync('${escAttr(r.name)}')" style="font-size:12px;padding:5px 12px">&#8635; Sync</button>
-        <button onclick="showRebuild('${escAttr(r.name)}')" style="font-size:12px;padding:5px 12px">&#9881; Rebuild</button>
-        <button onclick="doValidate('${escAttr(r.name)}')" style="font-size:12px;padding:5px 12px">&#9745; Check</button>
-        <button onclick="doUnregister('${escAttr(r.name)}')" style="font-size:12px;padding:5px 12px;border-color:var(--red);color:var(--red)">&#10005; Remove</button>
-      </div>
-      <div id="sync-status-${r.name.replace(/[^a-zA-Z0-9_-]/g,'_')}" style="font-size:11px;color:var(--text3);margin-top:4px"></div>
-    </div>
-  `).join('');
+  grid.innerHTML=data.repos.map(r=>{
+    let h='<div class="repo-card">';
+    h+='<div class="status-dot '+(r.has_vector_db?'ready':'empty')+'"></div>';
+    h+='<div class="name" onclick="openRepo(\x27'+escAttr(r.name)+'\x27)">'+esc(r.name)+'</div>';
+    h+='<div class="path">'+esc(r.path)+'</div>';
+    if(r.description) h+='<div style="font-size:12px;color:var(--text2);margin-top:2px">'+esc(r.description)+'</div>';
+    if(r.tags&&r.tags.length) h+='<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:4px">'+r.tags.map(t=>'<span style="font-size:10px;padding:1px 6px;background:var(--surface2);border-radius:3px;color:var(--accent2)">#'+esc(t)+'</span>').join('')+'</div>';
+    h+='<div class="stats"><span class="stat">&#9654; <span class="val">'+(r.symbol_count||0)+'</span> symbols</span><span class="stat">'+(r.has_vector_db?'&#10003; Vector DB':'&#10005; No vectors')+'</span></div>';
+    h+='<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:6px;align-items:center">';
+    h+=(r.branches||[]).map(b=>'<span style="font-size:10px;padding:2px 8px;border:1px solid var(--accent);border-radius:3px;color:var(--accent)">'+esc(b)+'</span>').join('');
+    if(r.last_indexed_commit) h+='<code style="font-size:10px;color:var(--text3);margin-left:4px">@'+esc(r.last_indexed_commit)+'</code>';
+    if(r.last_synced_at) h+='<span style="font-size:10px;color:var(--text3);margin-left:auto">&#9200; '+fmtTime(r.last_synced_at)+'</span>';
+    h+='</div>';
+    if(r.webhook_url){
+      h+='<div style="margin-top:6px;display:flex;align-items:center;gap:4px">';
+      h+='<span style="font-size:10px;color:var(--text3);white-space:nowrap">Webhook:</span>';
+      h+='<code style="font-size:10px;color:var(--accent);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer" onclick="copyToClipboard(\x27'+escAttr(r.webhook_url)+'\x27)" title="Click to copy">'+esc(r.webhook_url)+'</code>';
+      h+='<span style="font-size:9px;color:var(--text3);cursor:pointer" onclick="copyToClipboard(\x27'+escAttr(r.webhook_url)+'\x27)">&#128203;</span>';
+      h+='</div>';
+    }
+    h+='<div style="display:flex;gap:6px;margin-top:10px">';
+    h+='<button onclick="doSync(\x27'+escAttr(r.name)+'\x27)" style="font-size:12px;padding:5px 12px">&#8635; Sync</button>';
+    h+='<button onclick="showRebuild(\x27'+escAttr(r.name)+'\x27)" style="font-size:12px;padding:5px 12px">&#9881; Rebuild</button>';
+    h+='<button onclick="doValidate(\x27'+escAttr(r.name)+'\x27)" style="font-size:12px;padding:5px 12px">&#9745; Check</button>';
+    h+='<button onclick="doUnregister(\x27'+escAttr(r.name)+'\x27)" style="font-size:12px;padding:5px 12px;border-color:var(--red);color:var(--red)">&#10005; Remove</button>';
+    h+='</div>';
+    h+='<div id="sync-status-'+safeId(r.name)+'" style="font-size:11px;color:var(--text3);margin-top:4px"></div>';
+    h+='</div>';
+    return h;
+  }).join('');
+  }catch(e){toast('Failed to load repos: '+e.message,'error');}
 }
 
 async function openRepo(name){
+  try{
   currentRepo=name;
   currentWikiPage=null;
   currentTab='wiki';
@@ -347,7 +350,7 @@ async function openRepo(name){
   document.getElementById('repos-view').style.display='none';
   document.getElementById('repo-detail-view').style.display='block';
   document.getElementById('detail-name').textContent=data.name;
-  document.getElementById('detail-meta').textContent=data.path+' | '+data.wiki_pages.length+' wiki pages | '+Object.keys(data.manifest.files||{}).length+' tracked files';
+  document.getElementById('detail-meta').textContent=data.path+' | '+(data.wiki_pages||[]).length+' wiki pages | '+Object.keys((data.manifest&&data.manifest.files)||{}).length+' tracked files';
   const descEl=document.getElementById('detail-desc');
   const tagsEl=document.getElementById('detail-tags');
   if(data.description){
@@ -380,6 +383,7 @@ async function openRepo(name){
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
   document.querySelector('.tab[data-tab="wiki"]').classList.add('active');
   showTab('wiki');
+  }catch(e){toast('Failed to open repo: '+e.message,'error');backToRepos();}
 }
 
 function backToRepos(){
@@ -427,47 +431,53 @@ function startTaskPolling(taskId, label, callback){
 }
 
 async function syncBranch(branch){
+  try{
   const name=currentRepo;
   const data=await api('/sync','POST',{name,branch});
   if(data.error){toast('Sync error: '+data.error,'error');return;}
   startTaskPolling(data.task_id, name+' @ '+branch, (task)=>{
     if(task.status==='completed'){
-      toast(`"${name}" @ ${branch} synced`);
+      toast('"'+name+'" @ '+branch+' synced');
       openRepo(name);
     }else{
       toast('Sync failed: '+(task.error||'unknown'),'error');
     }
   });
+  }catch(e){toast('Sync failed: '+e.message,'error');}
 }
 
 async function rebuildBranch(branch){
+  try{
   const name=currentRepo;
-  if(!confirm(`Rebuild ${name} @ ${branch}? This will clear and re-index all code for this branch.`))return;
+  if(!confirm('Rebuild '+name+' @ '+branch+'? This will clear and re-index all code for this branch.'))return;
   const data=await api('/rebuild','POST',{name,branch,confirm:name});
   if(data.error){toast('Rebuild error: '+data.error,'error');return;}
   startTaskPolling(data.task_id, name+' @ '+branch, (task)=>{
     if(task.status==='completed'){
-      toast(`"${name}" @ ${branch} rebuilt`);
+      toast('"'+name+'" @ '+branch+' rebuilt');
       openRepo(name);
     }else{
       toast('Rebuild failed: '+(task.error||'unknown'),'error');
     }
   });
+  }catch(e){toast('Rebuild failed: '+e.message,'error');}
 }
 
 async function registerMissingBranch(branch){
+  try{
   const name=currentRepo;
-  if(!confirm(`Register and index new branch "${branch}" for ${name}? This will fetch and index the branch.`))return;
+  if(!confirm('Register and index new branch "'+branch+'" for '+name+'? This will fetch and index the branch.'))return;
   const data=await api('/rebuild','POST',{name,branch,confirm:name});
   if(data.error){toast('Error: '+data.error,'error');return;}
   startTaskPolling(data.task_id, name+' @ '+branch, (task)=>{
     if(task.status==='completed'){
-      toast(`"${branch}" registered and indexed`);
+      toast('"'+branch+'" registered and indexed');
       openRepo(name);
     }else{
       toast('Register failed: '+(task.error||'unknown'),'error');
     }
   });
+  }catch(e){toast('Register failed: '+e.message,'error');}
 }
 
 function switchTab(tab){
@@ -491,12 +501,13 @@ function renderWiki(pages){
     content.style.display='none';
     return;
   }
-  list.innerHTML=pages.map(p=>`
-    <div class="wiki-item${currentWikiPage===p.name?' active':''}" onclick="showWikiPage('${escAttr(p.name)}')">
-      <div class="title">${esc(p.name)}</div>
-      <div class="hint">${esc(p.path)}</div>
-    </div>
-  `).join('');
+  list.innerHTML=pages.map(p=>{
+    let h='<div class="wiki-item'+(currentWikiPage===p.name?' active':'')+'" onclick="showWikiPage(\x27'+escAttr(p.name)+'\x27)">';
+    h+='<div class="title">'+esc(p.name)+'</div>';
+    h+='<div class="hint">'+esc(p.path)+'</div>';
+    h+='</div>';
+    return h;
+  }).join('');
   if(!currentWikiPage)showWikiPage(pages[0].name);
 }
 
@@ -506,7 +517,7 @@ function showWikiPage(name){
   if(!data)return;
   const page=data.wiki_pages.find(p=>p.name===name);
   if(!page)return;
-  document.querySelectorAll('.wiki-item').forEach(i=>i.classList.toggle('active',i.querySelector('.title').textContent===name));
+  document.querySelectorAll('.wiki-item').forEach(i=>i.classList.toggle('active',i.querySelector('.title')?.textContent===name));
   const content=document.getElementById('wiki-content');
   content.style.display='block';
   content.textContent=page.content;
@@ -519,7 +530,7 @@ function renderManifest(manifest){
     return;
   }
   const files=Object.entries(manifest.files);
-  table.innerHTML=`<thead><tr><th>File</th><th>Wiki Page</th><th>Component IDs</th></tr></thead><tbody>${files.map(([f,v])=>`<tr><td>${esc(f)}</td><td>${esc(v.wiki_page)}</td><td>${(v.component_ids||[]).map(c=>`<span class="cid">${esc(c)}</span>`).join('')}</td></tr>`).join('')}</tbody>`;
+  table.innerHTML='<thead><tr><th>File</th><th>Wiki Page</th><th>Component IDs</th></tr></thead><tbody>'+files.map(([f,v])=>'<tr><td>'+esc(f)+'</td><td>'+esc(v.wiki_page)+'</td><td>'+(v.component_ids||[]).map(c=>'<span class="cid">'+esc(c)+'</span>').join('')+'</td></tr>').join('')+'</tbody>';
 }
 
 function renderBranches(branches, missing){
@@ -528,42 +539,30 @@ function renderBranches(branches, missing){
     table.innerHTML='<tr><td colspan="4" style="text-align:center;color:var(--text3)">No branches registered</td></tr>';
     return;
   }
-  const dot=(indexed)=>`<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${indexed?'var(--accent2)':'var(--text3)'};margin-right:6px"></span>`;
+  const dot=(indexed)=>'<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:'+(indexed?'var(--accent2)':'var(--text3)')+';margin-right:6px"></span>';
   const label=(indexed)=>indexed?'Indexed':'Not indexed';
   const rows=[];
   if(branches&&branches.length){
-    rows.push(`<tr style="background:var(--surface2)"><td colspan="4" style="font-size:11px;color:var(--text3);padding:6px 8px;font-weight:500">Registered &amp; Indexed</td></tr>`);
+    rows.push('<tr style="background:var(--surface2)"><td colspan="4" style="font-size:11px;color:var(--text3);padding:6px 8px;font-weight:500">Registered &amp; Indexed</td></tr>');
     branches.forEach(b=>{
       const n=esc(b.name);
-      rows.push(`<tr>
-        <td><code>${n}</code></td>
-        <td style="font-family:monospace;font-size:11px;color:var(--text3)">${b.commit?esc(b.commit.slice(0,12)):'—'}</td>
-        <td>${dot(b.indexed)}${label(b.indexed)}</td>
-        <td><div style="display:flex;gap:4px">
-          <button onclick="syncBranch('${escAttr(b.name)}')" class="btn-mini" title="Sync this branch">Sync</button>
-          <button onclick="rebuildBranch('${escAttr(b.name)}')" class="btn-mini" style="background:var(--amber-dim);color:var(--amber);border-color:var(--amber)" title="Full rebuild of this branch">Rebuild</button>
-        </div></td>
-      </tr>`);
+      rows.push('<tr><td><code>'+n+'</code></td><td style="font-family:monospace;font-size:11px;color:var(--text3)">'+(b.commit?esc(b.commit.slice(0,12)):'—')+'</td><td>'+dot(b.indexed)+label(b.indexed)+'</td><td><div style="display:flex;gap:4px"><button onclick="syncBranch(\x27'+escAttr(b.name)+'\x27)" class="btn-mini" title="Sync this branch">Sync</button><button onclick="rebuildBranch(\x27'+escAttr(b.name)+'\x27)" class="btn-mini" style="background:var(--amber-dim);color:var(--amber);border-color:var(--amber)" title="Full rebuild of this branch">Rebuild</button></div></td></tr>');
     });
   }
   if(missing&&missing.length){
-    rows.push(`<tr style="background:var(--amber-dim)"><td colspan="4" style="font-size:11px;color:var(--amber);padding:6px 8px;font-weight:500">Matching branch_rule — Not yet registered</td></tr>`);
+    rows.push('<tr style="background:var(--amber-dim)"><td colspan="4" style="font-size:11px;color:var(--amber);padding:6px 8px;font-weight:500">Matching branch_rule — Not yet registered</td></tr>');
     missing.forEach(b=>{
       const n=esc(b.name);
-      rows.push(`<tr>
-        <td><code>${n}</code></td>
-        <td style="font-family:monospace;font-size:11px;color:var(--text3)">${b.commit?esc(b.commit.slice(0,12)):'—'}</td>
-        <td style="color:var(--text3)">—</td>
-        <td><button onclick="registerMissingBranch('${escAttr(b.name)}')" class="btn-mini" style="background:var(--accent-dim);color:var(--accent);border-color:var(--accent)">Add &amp; Index</button></td>
-      </tr>`);
+      rows.push('<tr><td><code>'+n+'</code></td><td style="font-family:monospace;font-size:11px;color:var(--text3)">'+(b.commit?esc(b.commit.slice(0,12)):'—')+'</td><td style="color:var(--text3)">—</td><td><button onclick="registerMissingBranch(\x27'+escAttr(b.name)+'\x27)" class="btn-mini" style="background:var(--accent-dim);color:var(--accent);border-color:var(--accent)">Add &amp; Index</button></td></tr>');
     });
   }
-  table.innerHTML=`<thead><tr><th>Branch</th><th>Commit</th><th>Status</th><th>Actions</th></tr></thead><tbody>${rows.join('')}</tbody>`;
+  table.innerHTML='<thead><tr><th>Branch</th><th>Commit</th><th>Status</th><th>Actions</th></tr></thead><tbody>'+rows.join('')+'</tbody>';
 }
 
 async function doSearch(){
   const q=document.getElementById('search-query').value;
   if(!q)return;
+  try{
   const data=await api('/search','POST',{query:q,repo:currentRepo,top_k:10});
   const div=document.getElementById('search-results');
   if(!data.results||data.results.length===0){
@@ -572,18 +571,13 @@ async function doSearch(){
   }
   div.innerHTML=data.results.map(r=>{
     const m=r.metadata||{};
-    return `<div class="search-result">
-      <div class="id">${esc(r.id)}</div>
-      <div class="doc">${esc(r.document||'')}</div>
-      <div class="meta-row">
-        <span>distance: ${(r.distance||0).toFixed(4)}</span>
-        <span>type: ${esc(m.type||'?')}</span>
-        <span>file: ${esc(m.file||'?')}</span>
-        <span>lines: ${m.line_start||'?'}-${m.line_end||'?'}</span>
-        ${r.repo?`<span>repo: ${esc(r.repo)}</span>`:''}
-      </div>
-    </div>`;
+    let h='<div class="search-result"><div class="id">'+esc(r.id)+'</div><div class="doc">'+esc(r.document||'')+'</div><div class="meta-row">';
+    h+='<span>distance: '+(r.distance||0).toFixed(4)+'</span><span>type: '+esc(m.type||'?')+'</span><span>file: '+esc(m.file||'?')+'</span><span>lines: '+(m.line_start||'?')+'-'+(m.line_end||'?')+'</span>';
+    if(r.repo) h+='<span>repo: '+esc(r.repo)+'</span>';
+    h+='</div></div>';
+    return h;
   }).join('');
+  }catch(e){document.getElementById('search-results').innerHTML='<div class="empty-state"><p>Search failed: '+esc(e.message)+'</p></div>';}
 }
 
 function showRegister(){
@@ -615,9 +609,10 @@ async function doRebuild(){
   document.getElementById('rebuild-btn').disabled=true;
   const repoName=rebuildRepoName;
   hideRebuild();
-  const statusEl=document.getElementById('sync-status-'+repoName);
+  const statusEl=document.getElementById('sync-status-'+safeId(repoName));
   if(statusEl) statusEl.innerHTML='<span class="spinner"></span> Submitting rebuild...';
-  const data=await api('/rebuild-all','POST',{name:repoName,confirm:confirmInput,skip_deep:true});
+  try{
+    const data=await api('/rebuild-all','POST',{name:repoName,confirm:confirmInput,skip_deep:true});
   if(data.error){toast(data.error,'error');statusEl.innerHTML='&#10005; '+data.error;return;}
   const taskId=data.task_id;
   let attempts=0;
@@ -631,7 +626,7 @@ async function doRebuild(){
         statusEl.innerHTML='<span class="spinner"></span> &#9881; '+text+' <span style="color:var(--amber)">'+task.progress+'%</span>';
       }
       if(task.status==='completed'){
-        toast(`"${repoName}" rebuilt — ${task.result?.symbol_count||'?'} symbols`);
+        toast('"'+repoName+'" rebuilt — '+(task.result?.symbol_count||'?')+' symbols');
         if(statusEl) statusEl.innerHTML='&#10003; Rebuild complete';
         loadRepos();
         return;
@@ -652,13 +647,15 @@ async function doRebuild(){
     }
   };
   poll();
+  }catch(e){toast('Request failed: '+e.message,'error');if(statusEl)statusEl.innerHTML='&#10005; Failed';}
 }
 
 async function doSync(repoName){
+  try{
   const data=await api('/sync-all','POST',{name:repoName,skip_deep:true});
   if(data.error){toast(data.error,'error');return;}
   const taskId=data.task_id;
-  const statusEl=document.getElementById('sync-status-'+repoName);
+  const statusEl=document.getElementById('sync-status-'+safeId(repoName));
   let attempts=0;
   const poll=async()=>{
     try{
@@ -671,7 +668,7 @@ async function doSync(repoName){
       }
       if(task.status==='completed'){
         const repaired=task.result?.repaired;
-        toast(`"${repoName}" synced — ${task.result?.symbol_count||'?'} symbols`+(repaired?' (repaired)':''));
+        toast('"'+repoName+'" synced — '+(task.result?.symbol_count||'?')+' symbols'+(repaired?' (repaired)':''));
         if(statusEl) statusEl.innerHTML=repaired?'&#10003; Synced & repaired':'&#10003; Complete';
         loadRepos();
         return;
@@ -692,24 +689,28 @@ async function doSync(repoName){
     }
   };
   poll();
+  }catch(e){toast('Request failed: '+e.message,'error');if(statusEl)statusEl.innerHTML='&#10005; Failed';}
 }
 
 async function doUnregister(repoName){
-  if(!confirm(`Remove "${repoName}"? This will unregister the repo and delete its wiki data.`))return;
+  try{
+  if(!confirm('Remove "'+repoName+'"? This will unregister the repo and delete its wiki data.'))return;
   const data=await api('/unregister','POST',{name:repoName});
   if(data.error){toast(data.error,'error');return;}
-  toast(`Removed "${repoName}"`);
+  toast('Removed "'+repoName+'"');
   loadRepos();
+  }catch(e){toast('Unregister failed: '+e.message,'error');}
 }
 
 async function doValidate(repoName){
-  const statusEl=document.getElementById('sync-status-'+repoName);
+  try{
+  const statusEl=document.getElementById('sync-status-'+safeId(repoName));
   if(statusEl) statusEl.innerHTML='<span class="spinner"></span> Checking...';
   const data=await api('/api/validate/'+encodeURIComponent(repoName));
   if(data.error){toast(data.error,'error');return;}
   if(data.healthy){
     if(statusEl) statusEl.innerHTML='&#9745; Healthy — '+data.total_symbols+' symbols, '+data.tracked_files+' files';
-    toast(`"${repoName}" is healthy`);
+    toast('"'+repoName+'" is healthy');
   }else{
     const issues=[];
     if(!data.config_file) issues.push('Missing .indexer.toml');
@@ -724,6 +725,7 @@ async function doValidate(repoName){
     if(statusEl) statusEl.innerHTML='&#9745; Issues: '+text;
     toast(`"${repoName}" has issues: ${text}`,'warning');
   }
+  }catch(e){toast('Validate failed: '+e.message,'error');}
 }
 
 function showEditMeta(){
@@ -817,7 +819,7 @@ async function doRegister(){
     startTaskPolling(taskId, repoName, (task)=>{
       if(task.status==='completed'){
         const sc=task.result&&task.result.symbol_count;
-        toast(`"${repoName}" ready${sc?` (${sc} symbols)`:''}`);
+        toast('"'+repoName+'" ready'+(sc?' ('+sc+' symbols)':''));
       }else{
         toast('Failed: '+(task.error||'unknown error'),'error');
       }

@@ -2,6 +2,7 @@ from __future__ import annotations
 import os
 import json
 import logging
+import threading
 from pathlib import Path
 from indexer.ast_parser import ASTNode
 from indexer.config import EmbeddingConfig
@@ -11,16 +12,17 @@ logger = logging.getLogger(__name__)
 
 _MODELS_WITHOUT_DIMENSIONS = {"text-embedding-ada-002"}
 _openai_client = None
-_openai_client_base_url = ""
-
+_openai_client_base_url: str | None = None
+_openai_lock = threading.Lock()
 
 def _get_openai_client(api_key: str, base_url: str) -> "OpenAI":
     global _openai_client, _openai_client_base_url
-    from openai import OpenAI
-    if _openai_client is None or _openai_client.api_key != api_key or _openai_client_base_url != base_url:
-        _openai_client = OpenAI(api_key=api_key, base_url=base_url)
-        _openai_client_base_url = base_url
-    return _openai_client
+    with _openai_lock:
+        from openai import OpenAI
+        if _openai_client is None or _openai_client.api_key != api_key or _openai_client_base_url != base_url:
+            _openai_client = OpenAI(api_key=api_key, base_url=base_url)
+            _openai_client_base_url = base_url
+        return _openai_client
 
 
 _EMBEDDING_KEY_ENVS = ["DASHSCOPE_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"]
@@ -74,7 +76,7 @@ def embed_nodes(
     ids = [n.id for n in nodes]
 
     result: dict[str, list[float]] = {}
-    batch_size = 10
+    batch_size = 50
     batches = []
     for i in range(0, len(texts), batch_size):
         batches.append((
@@ -140,6 +142,6 @@ def _call_embedding_api(
                 raise
             delay = 2.0 * (2 ** attempt) + _random.uniform(0, 1)
             logger.warning("Embedding API retryable error (attempt %d): %s, retrying in %.1fs", attempt + 1, e, delay)
-            import time
-            time.sleep(delay)
-    return []
+            import time as _time
+            _time.sleep(delay)
+

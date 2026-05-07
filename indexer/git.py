@@ -1,15 +1,18 @@
 from __future__ import annotations
 import logging
+import os
 import subprocess
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+_GIT_ENV = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+
 
 def _run(cmd: list[str], cwd: Path) -> str:
     try:
-        result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=30, encoding="utf-8", errors="replace")
+        result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=30, encoding="utf-8", errors="replace", env=_GIT_ENV)
         if result.returncode != 0:
             logger.warning("git command failed (rc=%d): %s\nstderr: %s", result.returncode, " ".join(cmd), result.stderr.strip())
         return result.stdout.strip()
@@ -37,7 +40,7 @@ def staged_files(repo_root: Path) -> list[str]:
 def changed_files_since(repo_root: Path, since_commit: str) -> list[str]:
     result = subprocess.run(
         ["git", "diff", "--name-only", "--diff-filter=ACM", since_commit, "HEAD"],
-        cwd=repo_root, capture_output=True, text=True, timeout=30, encoding="utf-8", errors="replace",
+        cwd=repo_root, capture_output=True, text=True, timeout=30, encoding="utf-8", errors="replace", env=_GIT_ENV,
     )
     if result.returncode != 0:
         logger.warning("git diff failed for commit %s: %s", since_commit, result.stderr.strip())

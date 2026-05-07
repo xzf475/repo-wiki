@@ -30,7 +30,11 @@ def load_env_file() -> None:
         ]
         for env_path in candidates:
             if env_path.exists():
-                for line in env_path.read_text(encoding="utf-8").splitlines():
+                try:
+                    content = env_path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                for line in content.splitlines():
                     line = line.strip()
                     if not line or line.startswith("#") or "=" not in line:
                         continue

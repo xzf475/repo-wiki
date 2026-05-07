@@ -1,4 +1,6 @@
 from __future__ import annotations
+import json
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -15,6 +17,60 @@ from indexer.wiki import (
     sanitize_group_label,
 )
 from indexer.git import all_tracked_files, current_commit, is_git_repo, changed_files_since
+
+logger = logging.getLogger(__name__)
+
+
+def _desc_cache_path(root: Path) -> Path:
+    p = root / ".indexer" / "cache" / "descriptions.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def load_cached_descriptions(root: Path) -> dict[str, str]:
+    p = _desc_cache_path(root)
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_cached_descriptions(root: Path, descriptions: dict[str, str]) -> None:
+    p = _desc_cache_path(root)
+    try:
+        existing = load_cached_descriptions(root)
+        existing.update(descriptions)
+        p.write_text(json.dumps(existing, indent=2))
+    except OSError as e:
+        logger.warning("Failed to save description cache: %s", e)
+
+
+def _file_desc_cache_path(root: Path) -> Path:
+    p = root / ".indexer" / "cache" / "file_descriptions.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def load_cached_file_descriptions(root: Path) -> dict[str, str]:
+    p = _file_desc_cache_path(root)
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_cached_file_descriptions(root: Path, descriptions: dict[str, str]) -> None:
+    p = _file_desc_cache_path(root)
+    try:
+        existing = load_cached_file_descriptions(root)
+        existing.update(descriptions)
+        p.write_text(json.dumps(existing, indent=2))
+    except OSError as e:
+        logger.warning("Failed to save file description cache: %s", e)
 
 
 def cross_reference(all_nodes: list[ASTNode]) -> None:
@@ -57,24 +113,41 @@ def parse_candidates(
 ) -> list[ASTNode]:
     all_nodes: list[ASTNode] = []
     total = len(candidates)
-    for i, rel_path in enumerate(candidates, 1):
-        abs_path = root / rel_path
-        file_hash = compute_hash_short(abs_path)
 
-        if use_cache:
+    uncached = []
+    if use_cache:
+        for i, rel_path in enumerate(candidates, 1):
+            abs_path = root / rel_path
+            file_hash = compute_hash_short(abs_path)
             cached = load_cached_nodes(root, file_hash)
             if cached is not None:
                 all_nodes.extend(cached)
                 if progress_callback:
                     progress_callback(i, total, rel_path, cached=True)
-                continue
+            else:
+                uncached.append((i, rel_path, abs_path, file_hash))
+    else:
+        uncached = [(i, rel_path, root / rel_path, compute_hash_short(root / rel_path))
+                    for i, rel_path in enumerate(candidates, 1)]
 
-        nodes = parse_file(abs_path, root)
-        if use_cache:
-            save_cached_nodes(root, file_hash, nodes)
-        all_nodes.extend(nodes)
-        if progress_callback:
-            progress_callback(i, total, rel_path, cached=False, count=len(nodes))
+    if uncached:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = {pool.submit(parse_file, item[2], root): item for item in uncached}
+            for future in as_completed(futures):
+                item = futures[future]
+                i, rel_path, abs_path, file_hash = item
+                try:
+                    nodes = future.result()
+                except Exception as e:
+                    logger.warning("Failed to parse %s: %s", rel_path, e)
+                    continue
+                if use_cache:
+                    save_cached_nodes(root, file_hash, nodes)
+                all_nodes.extend(nodes)
+                if progress_callback:
+                    progress_callback(i, total, rel_path, cached=False, count=len(nodes))
+
     return all_nodes
 
 
@@ -83,7 +156,7 @@ def build_batches(all_nodes: list[ASTNode], cfg: Config) -> list[list[ASTNode]]:
     batches = []
     char_budget = cfg.max_tokens_per_batch * 3
     for node in all_nodes:
-        node_size = len(node.id) + len(node.type) + len(node.docstring or "") + len(" ".join(node.calls[:15])) + 80
+        node_size = len(node.id) + len(node.type) + len(node.docstring or "") + len(" ".join(node.calls[:15])) + len(" ".join(node.called_by[:15] if node.called_by else [])) + 80
         if batch_size + node_size > char_budget and batch:
             batches.append(batch)
             batch, batch_size = [], 0
@@ -212,8 +285,10 @@ def update_manifest(
     if is_git_repo(root):
         tracked = set(all_tracked_files(root))
         stale_keys = [k for k in manifest.files if k not in tracked]
-        for k in stale_keys:
-            del manifest.files[k]
+    else:
+        stale_keys = [k for k in manifest.files if not (root / k).exists()]
+    for k in stale_keys:
+        del manifest.files[k]
 
     save_manifest(root, manifest)
 
@@ -231,7 +306,7 @@ def upsert_vectors(
         if is_git_repo(root):
             tracked = all_tracked_files(root)
         else:
-            tracked = [str(p.relative_to(root)) for p in root.rglob("*") if p.is_file() and not str(p).startswith(".")]
+            tracked = [str(p.relative_to(root)) for p in root.rglob("*") if p.is_file() and not any(part.startswith(".") for part in p.relative_to(root).parts)]
         removed_files = manifest.removed_files(root, tracked)
     if removed_files:
         vs_delete(removed_files, cfg.vector_store, root, branch=branch)
