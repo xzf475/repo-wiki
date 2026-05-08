@@ -1,4 +1,5 @@
 from __future__ import annotations
+import hashlib
 import json
 import logging
 from datetime import datetime, timezone
@@ -6,7 +7,7 @@ from pathlib import Path
 
 from indexer.ast_parser import ASTNode, parse_file, load_cached_nodes, save_cached_nodes, compute_hash_short
 from indexer.config import Config
-from indexer.embedding import embed_nodes
+from indexer.embedding import embed_nodes, _build_text
 from indexer.grouper import density_group
 from indexer.llm import describe_nodes, describe_files, deep_enrich_pages, deep_enrich_index
 from indexer.manifest import Manifest, FileEntry, compute_hash, load_manifest, save_manifest
@@ -97,8 +98,8 @@ def load_existing_nodes(root: Path, manifest: Manifest, cfg: Config) -> list[AST
         abs_path = root / rel_path
         if not abs_path.exists():
             continue
-        file_hash = compute_hash_short(abs_path)
-        cached = load_cached_nodes(root, file_hash)
+        short_hash = entry.hash[7:7+16] if entry.hash and entry.hash.startswith("sha256:") else (entry.hash[:16] if entry.hash else compute_hash_short(abs_path))
+        cached = load_cached_nodes(root, short_hash)
         if cached is not None:
             existing_nodes.extend(cached)
     return existing_nodes
@@ -176,8 +177,9 @@ def write_wiki_pages(
     file_descriptions: dict[str, str],
     page_enrichments: dict[str, dict],
     skip_deep: bool = False,
+    precomputed_groups: dict[str, str] | None = None,
 ) -> tuple[list[IndexEntry], dict[str, str]]:
-    groups = density_group(candidates, merge_threshold=cfg.merge_threshold)
+    groups = precomputed_groups if precomputed_groups is not None else density_group(candidates, merge_threshold=cfg.merge_threshold)
     group_nodes: dict[str, list] = {}
     for node in all_nodes:
         group = groups.get(node.file, node.file)
@@ -293,6 +295,41 @@ def update_manifest(
     save_manifest(root, manifest)
 
 
+def _embedding_cache_path(root: Path) -> Path:
+    p = root / ".indexer" / "cache" / "embeddings.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _embedding_cache_sig(node: ASTNode, description: str) -> str:
+    text = _build_text(node, description)
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
+def load_cached_embeddings(root: Path) -> dict[str, dict]:
+    p = _embedding_cache_path(root)
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_cached_embeddings(root: Path, entries: dict[str, dict], current_node_ids: set[str] | None = None) -> None:
+    p = _embedding_cache_path(root)
+    try:
+        existing = load_cached_embeddings(root)
+        existing.update(entries)
+        if current_node_ids is not None:
+            stale = [k for k in existing if k not in current_node_ids]
+            for k in stale:
+                del existing[k]
+        p.write_text(json.dumps(existing))
+    except OSError as e:
+        logger.warning("Failed to save embedding cache: %s", e)
+
+
 def upsert_vectors(
     root: Path,
     cfg: Config,
@@ -311,5 +348,44 @@ def upsert_vectors(
     if removed_files:
         vs_delete(removed_files, cfg.vector_store, root, branch=branch)
 
-    vectors = embed_nodes(all_nodes, descriptions, cfg.embedding)
-    vs_upsert(all_nodes, vectors, descriptions, cfg.vector_store, root, dim=cfg.embedding.dimensions, branch=branch)
+    seen_ids: set[str] = set()
+    deduped_nodes: list[ASTNode] = []
+    for node in all_nodes:
+        if node.id not in seen_ids:
+            seen_ids.add(node.id)
+            deduped_nodes.append(node)
+    if len(deduped_nodes) < len(all_nodes):
+        logger.warning("Deduplicated nodes: %d -> %d", len(all_nodes), len(deduped_nodes))
+    all_nodes = deduped_nodes
+
+    cached_emb = load_cached_embeddings(root)
+    hit_vectors: dict[str, list[float]] = {}
+    miss_nodes: list[ASTNode] = []
+
+    for node in all_nodes:
+        sig = _embedding_cache_sig(node, descriptions.get(node.id, ""))
+        entry = cached_emb.get(node.id)
+        if entry and entry.get("sig") == sig and entry.get("vec"):
+            hit_vectors[node.id] = entry["vec"]
+        else:
+            miss_nodes.append(node)
+
+    if miss_nodes:
+        new_vectors = embed_nodes(miss_nodes, descriptions, cfg.embedding)
+        new_cache_entries = {}
+        for node in miss_nodes:
+            vec = new_vectors.get(node.id)
+            if vec:
+                sig = _embedding_cache_sig(node, descriptions.get(node.id, ""))
+                new_cache_entries[node.id] = {"sig": sig, "vec": vec}
+        save_cached_embeddings(root, new_cache_entries, current_node_ids=seen_ids)
+        hit_vectors.update(new_vectors)
+    else:
+        logger.info("Embedding cache hit: %d/%d nodes, 0 API calls", len(hit_vectors), len(all_nodes))
+        if cached_emb and set(cached_emb.keys()) - seen_ids:
+            save_cached_embeddings(root, {}, current_node_ids=seen_ids)
+
+    if len(hit_vectors) < len(all_nodes):
+        logger.warning("Embedding incomplete: %d/%d vectors available", len(hit_vectors), len(all_nodes))
+
+    vs_upsert(all_nodes, hit_vectors, descriptions, cfg.vector_store, root, dim=cfg.embedding.dimensions, branch=branch)

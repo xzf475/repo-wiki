@@ -42,6 +42,7 @@ from indexer.grouper import density_group
 
 _repo_locks: dict[str, threading.Lock] = {}
 _locks_lock = threading.Lock()
+_FATAL_EXCEPTIONS = (TypeError, AttributeError, ValueError, ImportError, NameError)
 
 
 def _get_repo_lock(name: str) -> threading.Lock:
@@ -749,42 +750,61 @@ def _run_indexing_pipeline(
     cross_reference(existing_nodes + all_nodes)
 
     tasks.update(task_id, status="running", progress=progress_offset + 45, step="describing_symbols", detail="batches (concurrent)")
-    batches = build_batches(all_nodes, cfg)
     from indexer.llm import describe_nodes, describe_files, deep_enrich_pages, deep_enrich_index
     from indexer.indexing import load_cached_descriptions, save_cached_descriptions, load_cached_file_descriptions, save_cached_file_descriptions
 
     cached_descs = load_cached_descriptions(root)
     new_nodes = [n for n in all_nodes if n.id not in cached_descs]
-    if new_nodes:
-        new_batches = build_batches(new_nodes, cfg)
-        new_descriptions = describe_nodes(new_batches, cfg)
-        save_cached_descriptions(root, new_descriptions)
-    else:
-        new_descriptions = {}
-    descriptions = {**cached_descs, **new_descriptions}
-    for n in all_nodes:
-        descriptions.setdefault(n.id, "")
 
-    tasks.update(task_id, status="running", progress=progress_offset + 58, step="describing_modules")
     file_nodes: dict[str, list] = {}
     for node in all_nodes:
         file_nodes.setdefault(node.file, []).append(node)
     cached_file_descs = load_cached_file_descriptions(root)
     new_file_nodes = {f: nodes for f, nodes in file_nodes.items() if f not in cached_file_descs}
-    if new_file_nodes:
-        new_file_descriptions = describe_files(new_file_nodes, cfg)
-        save_cached_file_descriptions(root, new_file_descriptions)
-    else:
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
+
+    with ThreadPoolExecutor(max_workers=2) as _desc_pool:
+        _desc_futures = {}
+        if new_nodes:
+            new_batches = build_batches(new_nodes, cfg)
+            _desc_futures[_desc_pool.submit(describe_nodes, new_batches, cfg)] = "symbols"
+        if new_file_nodes:
+            _desc_futures[_desc_pool.submit(describe_files, new_file_nodes, cfg)] = "files"
+
+        new_descriptions = {}
         new_file_descriptions = {}
+        for _fut in _as_completed(_desc_futures):
+            _label = _desc_futures[_fut]
+            try:
+                _result = _fut.result()
+            except Exception as e:
+                if isinstance(e, _FATAL_EXCEPTIONS):
+                    raise
+                logger.warning("Parallel description failed for %s: %s", _label, e)
+                _result = {}
+            if _label == "symbols":
+                new_descriptions = _result
+            else:
+                new_file_descriptions = _result
+
+    if new_descriptions:
+        save_cached_descriptions(root, new_descriptions)
+    if new_file_descriptions:
+        save_cached_file_descriptions(root, new_file_descriptions)
+
+    descriptions = {**cached_descs, **new_descriptions}
+    for n in all_nodes:
+        descriptions.setdefault(n.id, "")
     file_descriptions = {**cached_file_descs, **new_file_descriptions}
     for f in file_nodes:
         file_descriptions.setdefault(f, "")
 
     tasks.update(task_id, status="running", progress=progress_offset + 65, step="writing_wiki")
     page_enrichments: dict[str, dict] = {}
+    groups = density_group(candidates, merge_threshold=cfg.merge_threshold)
     if not skip_deep:
         tasks.update(task_id, status="running", progress=progress_offset + 70, step="deep_enrichment")
-        groups = density_group(candidates, merge_threshold=cfg.merge_threshold)
         group_nodes: dict[str, list] = {}
         for node in all_nodes:
             group = groups.get(node.file, node.file)
@@ -797,7 +817,7 @@ def _run_indexing_pipeline(
 
     index_entries, groups = write_wiki_pages(
         root, cfg, candidates, all_nodes, descriptions, file_descriptions,
-        page_enrichments, skip_deep,
+        page_enrichments, skip_deep, precomputed_groups=groups,
     )
 
     index_overview = ""

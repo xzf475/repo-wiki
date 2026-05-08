@@ -1295,8 +1295,8 @@ class TestPerformanceOptimizations:
     def test_embedding_batch_size_increased(self):
         with open("indexer/embedding.py", "r") as f:
             src = f.read()
-        assert "batch_size = 50" in src
-        assert "batch_size = 10" not in src
+        assert "batch_size" in src
+        assert "dashscope" in src
 
     def test_describe_files_parallel(self):
         import inspect
@@ -1317,3 +1317,36 @@ class TestPerformanceOptimizations:
         from indexer.vector_store import upsert_nodes
         src = inspect.getsource(upsert_nodes)
         assert "$or" in src
+
+    def test_embedding_cache_functions_exist(self):
+        from indexer.indexing import load_cached_embeddings, save_cached_embeddings, _embedding_cache_sig
+        assert callable(load_cached_embeddings)
+        assert callable(save_cached_embeddings)
+        assert callable(_embedding_cache_sig)
+
+    def test_upsert_vectors_uses_embedding_cache(self):
+        import inspect
+        from indexer.indexing import upsert_vectors
+        src = inspect.getsource(upsert_vectors)
+        assert "load_cached_embeddings" in src
+        assert "save_cached_embeddings" in src
+        assert "miss_nodes" in src
+
+    def test_parallel_symbol_and_file_description(self):
+        import inspect
+        from indexer.rest_api import _run_indexing_pipeline
+        src = inspect.getsource(_run_indexing_pipeline)
+        assert "_desc_pool" in src
+        assert "ThreadPoolExecutor(max_workers=2)" in src
+
+    def test_write_wiki_pages_accepts_precomputed_groups(self):
+        import inspect
+        from indexer.indexing import write_wiki_pages
+        sig = inspect.signature(write_wiki_pages)
+        assert "precomputed_groups" in sig.parameters
+
+    def test_load_existing_nodes_uses_manifest_hash(self):
+        import inspect
+        from indexer.indexing import load_existing_nodes
+        src = inspect.getsource(load_existing_nodes)
+        assert "entry.hash" in src

@@ -1,6 +1,6 @@
 {
-  "last_indexed_commit": "184baff19cfe01051f1ac09e9e435f6f3bfbc3b1",
-  "indexed_at": "2026-05-07T12:39:15.419295+00:00",
+  "last_indexed_commit": "16f0a7ede503b2d96690f1e164dd218a4fa9fabc",
+  "indexed_at": "2026-05-08T07:44:12.649908+00:00",
   "files": {
     "indexer/__init__.py": {
       "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -22,7 +22,7 @@
       ]
     },
     "indexer/cli.py": {
-      "hash": "sha256:1cb21b4623a3b4395428a7f22088365adf8cfdfe7b2b21747ecf7b83195edb45",
+      "hash": "sha256:9123a9e996b0c58c90a0a37c9e11426f4cc1ac57572f51c92a1689e9fdc89bbe",
       "wiki_page": "wiki/indexer.md",
       "component_ids": [
         "indexer/cli.py::main",
@@ -54,7 +54,7 @@
       ]
     },
     "indexer/embedding.py": {
-      "hash": "sha256:cb3f870848837ca5582b1bc6a92c4b882fea4849823d9ae2d8998da2bdaece19",
+      "hash": "sha256:e005880c7d695034dbe75c8bdc98ca6323b707ccda84c1938a14638030ec5d13",
       "wiki_page": "wiki/indexer.md",
       "component_ids": [
         "indexer/embedding.py::_get_openai_client",
@@ -116,7 +116,7 @@
       ]
     },
     "indexer/indexing.py": {
-      "hash": "sha256:8aad7a382bc816e410d7c2565ba54870221e69b4feac270551c6ca64dec762a4",
+      "hash": "sha256:5b68ef4de495244eaa6638150c549b38bf0c347aaaa3d08eb36e958da77f8cde",
       "wiki_page": "wiki/indexer.md",
       "component_ids": [
         "indexer/indexing.py::_desc_cache_path",
@@ -132,6 +132,10 @@
         "indexer/indexing.py::write_wiki_pages",
         "indexer/indexing.py::write_index_and_skill",
         "indexer/indexing.py::update_manifest",
+        "indexer/indexing.py::_embedding_cache_path",
+        "indexer/indexing.py::_embedding_cache_sig",
+        "indexer/indexing.py::load_cached_embeddings",
+        "indexer/indexing.py::save_cached_embeddings",
         "indexer/indexing.py::upsert_vectors"
       ]
     },
@@ -226,7 +230,7 @@
       ]
     },
     "indexer/rest_api.py": {
-      "hash": "sha256:d7afe6e4f23c27b99d8b4948e75e04c38e57920a4eff85bd982c4ffbac406f50",
+      "hash": "sha256:79be8c9b575c646c72748509c849e4137f8fb32799c3a48206d75ba167534476",
       "wiki_page": "wiki/indexer.md",
       "component_ids": [
         "indexer/rest_api.py::_get_repo_lock",
@@ -347,7 +351,7 @@
       ]
     },
     "indexer/vector_store.py": {
-      "hash": "sha256:ffb51b3d751bfbf87c704b144031fa6e1fdf8299c4f6a947b2eea1b1ff22363b",
+      "hash": "sha256:6204380e18ab4a66e08318b6d7c231c72fae18c019c3dadffa2392a8313347b8",
       "wiki_page": "wiki/indexer.md",
       "component_ids": [
         "indexer/vector_store.py::_get_client",
@@ -519,7 +523,7 @@
       ]
     },
     "tests/test_p1_fixes.py": {
-      "hash": "sha256:3fa9aff3c563d65691f8c999fb9ae36102c5901143ff7ac4397a2cd6b5ddce1d",
+      "hash": "sha256:147869280f4e6d76862b3a191e9e59b890abe66bdb192515cc9764a4bfc648c1",
       "wiki_page": "wiki/root.md",
       "component_ids": [
         "tests/test_p1_fixes.py::TestTaskStore",
@@ -746,6 +750,11 @@
         "tests/test_p1_fixes.py::TestPerformanceOptimizations.test_describe_files_parallel",
         "tests/test_p1_fixes.py::TestPerformanceOptimizations.test_parse_candidates_parallel",
         "tests/test_p1_fixes.py::TestPerformanceOptimizations.test_vector_store_batch_query",
+        "tests/test_p1_fixes.py::TestPerformanceOptimizations.test_embedding_cache_functions_exist",
+        "tests/test_p1_fixes.py::TestPerformanceOptimizations.test_upsert_vectors_uses_embedding_cache",
+        "tests/test_p1_fixes.py::TestPerformanceOptimizations.test_parallel_symbol_and_file_description",
+        "tests/test_p1_fixes.py::TestPerformanceOptimizations.test_write_wiki_pages_accepts_precomputed_groups",
+        "tests/test_p1_fixes.py::TestPerformanceOptimizations.test_load_existing_nodes_uses_manifest_hash",
         "tests/test_p1_fixes.py::_coro",
         "tests/test_p1_fixes.py::run",
         "tests/test_p1_fixes.py::run",

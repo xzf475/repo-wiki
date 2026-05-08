@@ -76,7 +76,7 @@ def embed_nodes(
     ids = [n.id for n in nodes]
 
     result: dict[str, list[float]] = {}
-    batch_size = 50
+    batch_size = 10 if "dashscope" in cfg.provider.lower() else 50
     batches = []
     for i in range(0, len(texts), batch_size):
         batches.append((

@@ -20,40 +20,41 @@ The wiki captures structure, relationships, and constraints in a fraction of the
 
 ## Stats
 
-- **392 symbols** across **11 files** — indexed 2026-05-07 @ `184baff1`
+- **348 symbols** across **6 files** — indexed 2026-05-08 @ `16f0a7ed`
 - Wiki: `wiki/` — 2 page(s)
 - Manifest: `.indexer/manifest.json` — maps every file to its wiki page and component IDs
 
 ## System Overview
 
-The system is a code indexing service that clones git repositories, parses source files, generates embeddings via an embedding API, and stores vector representations alongside metadata (symbols, call graphs) in a vector store. Main modules are `indexer/cli.py` (CLI interface), `indexer/git.py` (git operations), `indexer/indexing.py` (indexing pipeline), `indexer/embedding.py` and `indexer/llm.py` (external API calls), `indexer/vector_store.py` (vector CRUD), `indexer/rest_api.py` (REST endpoints), and `indexer/mcp_server.py` (MCP tools). The `TaskStore` and `RepoRegistry` manage async tasks and repository metadata. It supports multiple repositories, branches, and provides search, trace, and context tools via both REST and MCP.
+The system is a code indexing service that ingests, embeds, and searches code repositories via vector similarity. The `indexer` module contains a CLI (`cli.py`), a REST API (`rest_api.py`), an embedder (`embedding.py`), an indexer pipeline (`indexing.py`), and a vector store (`vector_store.py`). `TaskStore` manages asynchronous indexing jobs, and `RepoRegistry` persists repository metadata (branches, manifests). The service exposes endpoints for registration, sync, unregistration, and search, with all index mutations gated through task creation to ensure atomicity and lock correctness.
 ## Key Request Flows
-- CLI/API register_repo → RepoRegistry.register → git clone → _index_page → describe_nodes_batch → embedding API call → vector_store.upsert_nodes → manifest update
-- search_symbols_tool (REST or MCP) → parse query → vector_store.search (with branch filter) → return symbol results
-- trace_call_tool → expand call graph from indexed edges → vector_store.query for caller/callee nodes → return context chain
-- webhook_by_name → validate payload → sync_repo → git fetch + detect changed files → reindex changed files → vector_store.delete_by_files + upsert → manifest update
-- deep_enrich_page → LLM API call for descriptions/tags → update node metadata → re-embed (optional) → vector_store.update nodes
+- register_repo (CLI or API) → RepoRegistry.register → TaskStore.create → _run_register_task → clone repo → _index_page → embed → upsert_nodes (vector_store) → update manifest (RepoRegistry.update_meta)
+- webhook_by_name (API) → sync_repo → TaskStore.create → sync_all_branches → reindex (indexing pipeline with stale node detection and incremental upsert)
+- REST API search → embed_query (embedding) → vector_store.do_search (with branch filter) → return ranked results (including symbol context and call graph expansion)
+- unregister_repo (CLI or API) → RepoRegistry.unregister → TaskStore.create → remove repo lock → delete_by_files (vector_store) → cleanup manifest and TaskStore entries
+- rebuild_repo (CLI or API) → TaskStore.create → evict vector store client → rmtree clone dir → re-clone → re-index full pipeline (embedding batch, parallel description, vector upsert before manifest write)
 
 ## Wiki Pages
 
 | Page | Covers | Key Entry Points |
 |------|--------|-----------------|
-| [indexer](../wiki/indexer.md) | indexer/cli.py, indexer/config.py, indexer/embedding.py, indexer/git.py, indexer/indexing.py, indexer/llm.py, indexer/mcp_server.py, indexer/rest_api.py, indexer/utils.py, indexer/vector_store.py | main, init, status, hook, hook_install |
+| [indexer](../wiki/indexer.md) | indexer/cli.py, indexer/embedding.py, indexer/indexing.py, indexer/rest_api.py, indexer/vector_store.py | main, init, status, hook, hook_install |
 | [root](../wiki/root.md) | tests/test_p1_fixes.py | TestTaskStore, TestTaskStore.test_create_task, TestTaskStore.test_update_task, TestTaskStore.test_update_finished_sets_timestamp, TestTaskStore.test_update_nonexistent_task_noop |
 ## Critical Constraints (read before editing)
 **indexer**
-- API key resolution supports file-based secrets: if env var ends with '_FILE', its value is treated as a file path whose contents are read as the key.
-- Embedding text is built only from node `signature` and `docstring` (not full source body) to avoid exceeding token limits of the embedding model.
-- Configuration is loaded from a TOML file but each field can be overridden by environment variables (using `_env`, `_env_int` helpers) with no warning if the file is missing; defaults are set via dataclass field defaults.
-- Vector store configuration has a `store_dir` that defaults relative to the repo root; the actual store driver is abstracted (e.g., dummy for testing, proper vector DB in production).
-- Git operations assume `cwd` is a git repo; failures produce warnings and empty results, not exceptions, to allow graceful degradation in non-git directories.
+- Symbol descriptions are cached per-file hash in `<cache_dir>/desc/` and merged on save; incremental runs skip re-generation but new descriptions are added, not overwritten, preserving previous descriptions if API fails.
+- Embedding API calls use a uniform random delay (0.5–1.5s) between batches to respect rate limits; `_call_embedding_api` retries on failure but logs a warning and continues with empty embedding on repeated failure.
+- `_is_indexable` uses `fnmatch` patterns (e.g., `*.py`, `*.js`) to filter files; it is called on every file in `run` and `status` – non-matching files are silently skipped, not indexed.
+- CLI commands (`init`, `run`, `status`, `hook`) all require a valid git repository and call `is_git_repo()` early; they exit with error if not in a git repo.
+- `_ensure_cache_gitignore` writes a `.gitignore` into `.cache/` only if one doesn't already contain `*` – it checks each line, so manual edits to that file are preserved.
+- Cross-reference mapping (`cross_reference`) uses symbol IDs split by `::` to build caller→callee relationships; symbols without a delimiter (e.g., builtins) are ignored in the graph.
 **root**
-- TaskStore.update on a nonexistent task silently returns (no-op, not an error).
-- TaskStore.get returns None (not raises) for nonexistent task ID.
-- RepoLock skip-lock acquisition does NOT release an already held lock; acquire() and release() are not called when skip=True and lock is held.
-- Empty string in environment variable does not override existing config value (_apply_env preserves original).
-- Git checkout failure in _run_rebuild_task_inner marks the task as failed (status set) before propagating or continuing.
-- Manifest parsed from file: missing 'component_ids' defaults to empty list, missing 'hash' defaults to empty string, and unparseable JSON returns an empty dict (not a raise).
+- TaskStore.update on a nonexistent task_id is a silent noop (no error, no side effect).
+- TaskStore.get on a nonexistent task_id returns None, never raises KeyError or similar.
+- RepoRegistry.get on a nonexistent relative path returns None immediately, not exception or empty list.
+- _parse_body always returns a dict; returns {} if JSON decode fails or decoded value is not a dict.
+- Config._apply_env treats empty string ('') as 'not set' and does NOT override the default value.
+- Manifest file missing 'component_ids' or 'hash' keys loads as empty list/string, not error; corrupted manifest returns empty dict.
 
 ## Workflow — How to Answer Questions About This Codebase
 

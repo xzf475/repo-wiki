@@ -156,24 +156,62 @@ def run(staged: bool, force: bool, skip_deep: bool):
     click.echo(f"    {linked} symbols linked via call graph\n")
 
     # ── Phase 3: LLM descriptions ─────────────────────────────────────────────
-    batches = build_batches(all_nodes, cfg)
-    click.echo(f"  Describing symbols  ({len(batches)} LLM batch{'es' if len(batches) != 1 else ''}, concurrent)")
-    descriptions = describe_nodes(batches, cfg)
-    filled = sum(1 for v in descriptions.values() if v)
+    from indexer.indexing import load_cached_descriptions, save_cached_descriptions, load_cached_file_descriptions, save_cached_file_descriptions
+    cached_descs = load_cached_descriptions(root)
+    new_nodes = [n for n in all_nodes if n.id not in cached_descs]
 
-    # ── Phase 4: File-level descriptions ─────────────────────────────────────
-    click.echo(f"\n  Describing modules  ({len(set(n.file for n in all_nodes))} files)  ...", nl=False)
     file_nodes: dict[str, list] = {}
     for node in all_nodes:
         file_nodes.setdefault(node.file, []).append(node)
-    file_descriptions = describe_files(file_nodes, cfg)
+    cached_file_descs = load_cached_file_descriptions(root)
+    new_file_nodes = {f: nodes for f, nodes in file_nodes.items() if f not in cached_file_descs}
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
+
+    new_descriptions = {}
+    new_file_descriptions = {}
+    with ThreadPoolExecutor(max_workers=2) as _desc_pool:
+        _desc_futures = {}
+        if new_nodes:
+            new_batches = build_batches(new_nodes, cfg)
+            click.echo(f"  Describing symbols  ({len(new_batches)} LLM batch{'es' if len(new_batches) != 1 else ''}, concurrent)")
+            _desc_futures[_desc_pool.submit(describe_nodes, new_batches, cfg)] = "symbols"
+        if new_file_nodes:
+            click.echo(f"  Describing modules  ({len(new_file_nodes)} new files)  ...", nl=False)
+            _desc_futures[_desc_pool.submit(describe_files, new_file_nodes, cfg)] = "files"
+        for _fut in _as_completed(_desc_futures):
+            _label = _desc_futures[_fut]
+            try:
+                _result = _fut.result()
+            except Exception as e:
+                logger.warning("Parallel description failed for %s: %s", _label, e)
+                _result = {}
+            if _label == "symbols":
+                new_descriptions = _result
+            else:
+                new_file_descriptions = _result
+
+    if new_file_nodes:
+        click.echo(f"  {sum(1 for v in new_file_descriptions.values() if v)}/{len(new_file_nodes)} described\n")
+
+    if new_descriptions:
+        save_cached_descriptions(root, new_descriptions)
+    if new_file_descriptions:
+        save_cached_file_descriptions(root, new_file_descriptions)
+
+    descriptions = {**cached_descs, **new_descriptions}
+    for n in all_nodes:
+        descriptions.setdefault(n.id, "")
+    file_descriptions = {**cached_file_descs, **new_file_descriptions}
+    for f in file_nodes:
+        file_descriptions.setdefault(f, "")
+    filled = sum(1 for v in descriptions.values() if v)
     filled_files = sum(1 for v in file_descriptions.values() if v)
-    click.echo(f"  {filled_files}/{len(file_nodes)} described\n")
 
     # ── Phase 5: Deep enrichment + wiki pages ─────────────────────────────────
     page_enrichments: dict[str, dict] = {}
+    groups = density_group(candidates, merge_threshold=cfg.merge_threshold)
     if not skip_deep:
-        groups = density_group(candidates, merge_threshold=cfg.merge_threshold)
         click.echo(f"\n  Deep enrichment  ({len(groups)} pages, concurrent)  —  narrative + flows + constraints")
         group_nodes: dict[str, list] = {}
         for node in all_nodes:
@@ -195,7 +233,7 @@ def run(staged: bool, force: bool, skip_deep: bool):
     click.echo("  Writing wiki")
     index_entries, groups = write_wiki_pages(
         root, cfg, candidates, all_nodes, descriptions, file_descriptions,
-        page_enrichments, skip_deep,
+        page_enrichments, skip_deep, precomputed_groups=groups,
     )
     for entry in index_entries:
         page_name = entry.path.split("/")[-1]

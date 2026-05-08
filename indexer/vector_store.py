@@ -62,39 +62,31 @@ def upsert_nodes(
     client = _get_client(persist_path)
     collection = _get_or_create_collection(client, cfg.collection_name, dim=dim)
 
-    files_in_batch = {n.file for n in nodes}
+    files_in_batch = list({n.file for n in nodes})
     old_ids = set()
-    if len(files_in_batch) > 1:
+
+    chunk_size = 20
+    for ci in range(0, len(files_in_batch), chunk_size):
+        chunk = files_in_batch[ci:ci + chunk_size]
         try:
-            all_existing = collection.get(
-                where={"$or": [{"file": f} for f in files_in_batch]},
-                include=["ids"],
-            )
+            if branch:
+                where = {"$or": [{"$and": [{"file": f}, {"branch": branch}]} for f in chunk]} if len(chunk) > 1 else {"$and": [{"file": chunk[0]}, {"branch": branch}]}
+            else:
+                where = {"$or": [{"file": f} for f in chunk]} if len(chunk) > 1 else {"file": chunk[0]}
+            all_existing = collection.get(where=where)
             if all_existing and all_existing["ids"]:
                 old_ids.update(all_existing["ids"])
         except Exception as e:
-            logger.debug("Batch query failed, falling back to per-file: %s", e)
-            for f in files_in_batch:
+            logger.debug("Batch query failed for %d files, falling back: %s", len(chunk), e)
+            for f in chunk:
                 try:
                     existing_for_file = collection.get(
                         where={"$and": [{"file": f}, {"branch": branch}]},
-                        include=["ids"],
                     )
                     if existing_for_file and existing_for_file["ids"]:
                         old_ids.update(existing_for_file["ids"])
                 except Exception as e2:
                     logger.debug("Failed to query existing vectors for %s: %s", f, e2)
-    else:
-        for f in files_in_batch:
-            try:
-                existing_for_file = collection.get(
-                    where={"$and": [{"file": f}, {"branch": branch}]},
-                    include=["ids"],
-                )
-                if existing_for_file and existing_for_file["ids"]:
-                    old_ids.update(existing_for_file["ids"])
-            except Exception as e:
-                logger.debug("Failed to query existing vectors for %s: %s", f, e)
 
     valid = [(n, vectors[n.id]) for n in nodes if n.id in vectors and vectors[n.id] is not None]
     if not valid:
@@ -196,7 +188,6 @@ def delete_by_files(
             where_clause = {"$and": [{"file": file_path}, {"branch": branch}]}
         results = collection.get(
             where=where_clause,
-            include=["ids"],
         )
         if results and results["ids"]:
             ids_to_delete.extend(results["ids"])
