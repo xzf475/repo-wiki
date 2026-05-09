@@ -20,49 +20,42 @@ The wiki captures structure, relationships, and constraints in a fraction of the
 
 ## Stats
 
-- **372 symbols** across **8 files** — indexed 2026-05-09 @ `f3c2a981`
+- **77 symbols** across **2 files** — indexed 2026-05-09 @ `58ec64b2`
 - Wiki: `wiki/` — 3 page(s)
 - Manifest: `.indexer/manifest.json` — maps every file to its wiki page and component IDs
 
 ## System Overview
 
-The system is a multi-language code indexer that ingests git repositories, parses source files into AST nodes (via language-specific parsers in `indexer/ast_parser.py`, `go_parser.py`, `java_parser.py`, `js_parser.py`, `ruby_parser.py`, `rust_parser.py`), generates LLM-based descriptions and embeddings (`indexer/embedding.py`, `indexer/llm.py`), and stores results in a vector database (`indexer/vector_store.py`) alongside rendered wiki pages (`indexer/wiki.py`). A manifest layer (`indexer/manifest.py`) tracks file hashes and component IDs, while the grouper (`indexer/grouper.py`) decides folder-level page organization. The system exposes a CLI (`indexer/cli.py`), a REST API (`indexer/rest_api.py`), and an MCP server (`indexer/mcp_server.py`) for search, symbol tracing, and context retrieval, with task management via `TaskStore` and `RepoRegistry`.
+The system is a code indexer and retrieval engine that parses source repositories (Python, Java, Ruby, Rust, etc.) using language-specific AST parsers, extracts symbols and relationships, generates embeddings via an LLM (Litellm), and stores them in a vector store with a manifest-based file tracking system. The indexer module orchestrates pipeline steps (parse, describe, embed, store) while the retrieval module supports symbol search, call tracing, and context fetching through REST and MCP APIs, backed by a task store and repo registry for concurrency-safe operations. Configuration is managed via TOML, and git integration handles cloning, branch tracking, and webhook-triggered re-indexing.
 ## Key Request Flows
-- Register repo via API/CLI → `register_repo` → clone git → `_index_page` → parse files with `ast_parser` → `compute_ast_sig` → upsert nodes to vector store → build wiki pages via `_build_page`
-- Search query → REST API `/search` or MCP `search_symbols_tool` → `embed_query` → vector store `search` → return symbol nodes with context
-- Trace call → MCP `trace_call_tool` → `expand_with_call_graph` → retrieve caller/callee chain from vector store → return full source context
-- Git webhook → `webhook_by_name` → trigger `sync_repo` → detect changed files → `upsert_nodes` (new) → `delete_by_files` (removed) → rebuild manifest
-- Init or reindex cascade: `rebuild_repo` → `rebuild_all_branches` → `_run_all` → for each file: parse → enrich (LLM) → embed → upsert → write wiki pages
+- Repo registration → git clone → branch discovery → parse files → describe nodes/files → embed → upsert vectors → write manifest → build wiki pages
+- Search query → retrieval.query → vector store similarity search → enrich with context (symbol descriptions, call graphs) → return results via REST or MCP
+- Trace call → resolve symbol → retrieve call graph (callers/callees) → expand with depth limit → fetch source context → return enriched trace
+- Webhook event → git pull/fetch → detect changed files → reindex changed files → update vectors and manifest → notify via task store
+- Multi-repo skill → iterate registered repos → run search/trace across each → aggregate results → return combined response
 
 ## Wiki Pages
 
 | Page | Covers | Key Entry Points |
 |------|--------|-----------------|
-| [indexer](../wiki/indexer.md) | indexer/ast_parser.py, indexer/cli.py, indexer/config.py, indexer/embedding.py, indexer/git.py, indexer/go_parser.py, indexer/grouper.py, indexer/hooks.py, indexer/indexing.py, indexer/java_parser.py, indexer/js_parser.py, indexer/llm.py, indexer/manifest.py, indexer/mcp_server.py, indexer/rest_api.py, indexer/retrieval.py, indexer/ruby_parser.py, indexer/rust_parser.py, indexer/utils.py, indexer/vector_store.py, indexer/wiki.py | main, init, status, hook, hook_install |
+| [indexer](../wiki/indexer.md) | indexer/ast_parser.py, indexer/cli.py, indexer/config.py, indexer/embedding.py, indexer/git.py, indexer/go_parser.py, indexer/grouper.py, indexer/hooks.py, indexer/indexing.py, indexer/java_parser.py, indexer/js_parser.py, indexer/llm.py, indexer/manifest.py, indexer/mcp_server.py, indexer/rest_api.py, indexer/retrieval.py, indexer/ruby_parser.py, indexer/rust_parser.py, indexer/utils.py, indexer/vector_store.py, indexer/wiki.py | _get_type_name, describe_nodes_batch, describe_nodes, describe_files, _describe_files_chunk |
 | [tests_fixtures](../wiki/tests_fixtures.md) | tests/fixtures/sample_java/App.java, tests/fixtures/sample_py/auth.py, tests/fixtures/sample_ruby/app.rb, tests/fixtures/sample_rust/lib.rs | App, App.addUser, App.getUserCount, UserProfile, getDisplayName |
 | [tests](../wiki/tests.md) | tests/test_ast_parser.py, tests/test_config.py, tests/test_grouper.py, tests/test_manifest.py, tests/test_p1_fixes.py, tests/test_wiki.py | test_parse_returns_nodes, test_function_node, test_method_node, test_class_node, test_docstring_extracted |
 ## Critical Constraints (read before editing)
 **indexer**
-- AST parsing results are cached on disk using SHA256 hashes of file bytes; cache invalidated only when file content changes (not on timestamp).
-- Config file is written atomically using `NamedTemporaryFile` + `replace` to avoid partial writes.
-- The `_is_indexable` function uses **fnmatch** patterns; files outside tracked language extensions are silently skipped during indexing.
-- Embedding API key resolution falls back to `.env` file parsing; if neither environment variable nor `.env` contains `OPENAI_API_KEY`, the client creation will fail at runtime.
-- The `parse_file` dispatcher only handles `.java`, `.js`, `.rb`, `.py`, `.go`, `.rs`; other file types are ignored (no generic fallback).
-- Vector store is ephemeral per repository; the REST API serves multiple repos by aggregating separate vector stores in a directory (`repos_path`).
-**tests_fixtures**
-- Java App's internal `users` list (ArrayList) is not thread-safe; concurrent addUser calls may corrupt state without external synchronization.
-- Python TokenValidator.refresh relies on `sign_payload` which assumes a pre‑loaded private key; no key rotation logic is present in the module.
-- Ruby Router.dispatch matches routes by key equality (hash lookup); no wildcard or parameterised path support is exposed.
-- Rust User.age_difference uses `abs` internally; caller must ensure no overflow on i32 age values (though unrealistic, may panic on extreme inputs).
-- Python `require_auth` decorator calls `func` directly without any retry or fallback; any exception from the guarded function propagates unhandled.
-- Rust User.to_json returns a simple string without error handling; serialization failure (e.g., non‑UTF‑8) is not indicated to caller.
+- AST caching relies on file content hash (sha256); any byte-level change (even whitespace) invalidates cache, but docstring/extracted fields cache persists across runs via save_cached_nodes/load_cached_nodes.
+- Embedding API calls use a batch size (likely ~20) and random key rotation via uniform() over sorted keys to avoid rate limit issues; missing or invalid keys log warning but do not raise.
+- Git operations (`_run`) suppress stderr and return '' on failure (not None), but changed_files_since can raise ValueError on invalid ref; all_tracked_files and staged_files return empty list on error.
+- Each language parser handles only its own syntax; unsupported constructs produce empty ASTNode (no errors); the general parse_file dispatches by extension and falls back to AST parser (python-only).
+- Enforced 1-per-user limit at creation? Not present; but vector store config may assume a singleton collection per codebase (no concurrent writes).
+- Config fields default to None if missing; _apply_env_field replaces only if env var is set, but _env_int logs warning on parse failure and returns None, not a fallback default.
 **tests**
-- Each source file must produce at least one node; parse_file does not handle empty files gracefully (returns empty list).
-- Docstrings in Java must end with a period (asserted by test_java_javadoc_extracted); other languages have no such requirement.
-- Cache roundtrip is tested only for Python nodes; other languages rely on general parse test coverage.
-- Imports list is guaranteed to contain only strings (enforced via isinstance check per language).
-- Rust enum and type alias node type names end with '_enum' and '_type_alias' respectively; trait method spec is a distinct node type.
-- Ruby function and module nodes are type-checked via name ending with '_function' or '_module' (not present in Python/Java).
+- Tests use next() on parse_file generator to get first node; this assumes the first node is the top-level symbol (e.g., class, function) – order must be deterministic.
+- Assertions rely on endswith for name checks because sample code uses fully qualified names (e.g., 'MyClass'); exact match would be brittle across language conventions.
+- The cache test does not verify node content equivalence, only length; deeper equality is assumed from serialization format consistency.
+- Language-specific tests each contain inline sample code that must be kept in sync with parser capabilities; addition of a new language requires a new test suite.
+- The 'any' call in many tests means no assumption on node ordering within the returned list – parser may return nodes in arbitrary order (e.g., depth-first vs breadth-first).
+- test_docstring_extracted uses next() on parse_file then accesses doc attribute; this assumes the first returned node has a docstring – relies on sample code having docstring on first symbol.
 
 ## Workflow — How to Answer Questions About This Codebase
 

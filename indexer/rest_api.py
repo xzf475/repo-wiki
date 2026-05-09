@@ -747,6 +747,8 @@ def _run_indexing_pipeline(
     tasks.update(task_id, status="running", progress=progress_offset + 40, step="cross_ref", detail=f"{total_symbols} symbols")
 
     existing_nodes = load_existing_nodes(root, manifest, cfg)
+    candidate_set = set(candidates)
+    existing_nodes = [n for n in existing_nodes if n.file not in candidate_set]
     pre_cross_called_by = {n.id: list(n.called_by) for n in existing_nodes + all_nodes}
     cross_reference(existing_nodes + all_nodes)
     from indexer.indexing import _collect_affected_files
