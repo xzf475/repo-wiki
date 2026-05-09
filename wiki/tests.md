@@ -2,17 +2,17 @@
 
 ## Overview
 
-The test_ast_parser.py module is the primary test suite for the AST parser component, which extracts structured metadata (functions, classes, imports, docstrings) from source code across Python, Rust, Java, and Ruby. It solves the system-level problem of ensuring correctness and regression-free evolution of the multi-language parser, which is critical for downstream tools like wiki generation and code grouper. The tests use pytest and call parse_file on inline sample code, then assert properties like node types, names, and docstrings. They cover all language-specific constructs (e.g., Rust traits, Java interfaces, Ruby modules) and include a cache roundtrip test to verify serialization. Each test function targets a specific node type or attribute, forming a comprehensive safety net for parser changes.
+The test suite validates the core analytical pipeline: AST parsing (Python, Rust, Java, Ruby), caching, configuration, file grouping, manifest parsing, and wiki generation. Key classes tested include parse_file (multi-language), Config, Grouper, Manifest, and WikiBuilder, ensuring correct symbol extraction, cross-referencing, and output formatting across languages. This guarantees that the system's primary function—automated code analysis and documentation—is robust against regressions and edge cases.
 
 ## Modules
 | File | Purpose |
 |------|---------|
-| tests/test_config.py |  |
 | tests/test_wiki.py |  |
+| tests/test_ast_parser.py |  |
+| tests/test_config.py |  |
+| tests/test_p1_fixes.py |  |
 | tests/test_grouper.py |  |
 | tests/test_manifest.py |  |
-| tests/test_p1_fixes.py |  |
-| tests/test_ast_parser.py |  |
 ## Key Symbols
 | ID | Type | Description |
 |----|------|-------------|
@@ -310,16 +310,17 @@ The test_ast_parser.py module is the primary test suite for the AST parser compo
 | `tests/test_p1_fixes.py::register_repo` | function |  |
 | `tests/test_p1_fixes.py::unregister_repo` | function |  |
 ## Data Flows
-- Test discovery: pytest collects test functions → each function runs parse_file on an inline code snippet → parses into node list → asserts properties (e.g., any node with name ending in 'MyClass')
-- Cache roundtrip: test_cache_roundtrip creates a temporary directory → parses a Python file → saves nodes via save_cached_nodes → reloads via load_cached_nodes → compares lengths to ensure lossless serialization
-- Multi-language validation: test_rust_* functions parse Rust sample code → check for struct, trait, enum, type alias nodes → verify names and docstrings via endswith and any
+- Parser tests: sample source string → parse_file() → assert node count, type, name, docstring, imports, calls.
+- Cache tests: parse_file() → save_cached_nodes() → load_cached_nodes() → verify roundtrip equality and length.
+- Grouper tests: mock manifest entries → Grouper.group() → check output groupings (by language, directory, custom rules).
+- Wiki tests: mock manifest + parsed nodes → WikiBuilder.generate() → assert file existence, section headers, and cross-links.
 ## Design Constraints
-- Tests use next() on parse_file generator to get first node; this assumes the first node is the top-level symbol (e.g., class, function) – order must be deterministic.
-- Assertions rely on endswith for name checks because sample code uses fully qualified names (e.g., 'MyClass'); exact match would be brittle across language conventions.
-- The cache test does not verify node content equivalence, only length; deeper equality is assumed from serialization format consistency.
-- Language-specific tests each contain inline sample code that must be kept in sync with parser capabilities; addition of a new language requires a new test suite.
-- The 'any' call in many tests means no assumption on node ordering within the returned list – parser may return nodes in arbitrary order (e.g., depth-first vs breadth-first).
-- test_docstring_extracted uses next() on parse_file then accesses doc attribute; this assumes the first returned node has a docstring – relies on sample code having docstring on first symbol.
+- All parser tests use inline source strings or TemporaryDirectory—no external file dependencies to ensure isolation and speed.
+- Java/Ruby parser tests require tree-sitter parsers; they must skip (not fail) via pytest marks if parsers are missing.
+- Cache tests must clean up serialized files after each run to avoid cross-test contamination.
+- test_p1_fixes are regression tests; they are expected to fail if the corresponding bug fix is accidentally reverted.
+- Manifest tests raise ValueError on empty or malformed input; the Config test ensures missing keys fall back to defaults without crashing.
+- Wiki tests generate output into a temporary directory that is recreated before each test to guarantee a clean slate.
 ## Relationships
 - **Calls:** ASTNode, Config, EmbeddingConfig, Exception, FileEntry, IndexEntry, MagicMock, Manifest, NamedTemporaryFile, PageContext, Path, RLock, RepoRegistry, TaskStore, TemporaryDirectory, Thread, __import__, _apply_env, _clean_env, _cleanup, _coro, _expand_with_call_graph, _get_repo_lock, _make_node, _parse_body, _restore_env, _run_rebuild_task_inner, _truncate_list, acquire, all, any, append, asyncio_coro, build_batches, build_index, build_page, callable, changed_files_since, compare_digest, compute_hash, count, create, cross_reference, density_group, dict, dumps, embed_query, endswith, exists, find, get, get_source_context, getsource, hasattr, index, isinstance, items, join, keys, len, list, load_cached_nodes, load_config, load_env_file, load_manifest, loads, lower, max, min, mkdir, mkdtemp, next, object, open, parse_file, parse_ruby_file, patch, pop, range, read, read_text, register, release, replace, rfind, run, save_cached_nodes, save_config, save_manifest, set, signature, split, splitlines, stale_files, start, startswith, str, strip, time, unregister, update, update_meta, values, write, write_bytes, write_page, write_text
 - **Called by:** indexer/cli.py::run, indexer/cli.py::serve, indexer/cli.py::serve_api, indexer/git.py::_run, indexer/git.py::changed_files_since, indexer/rest_api.py::_detect_default_branch, indexer/rest_api.py::_discover_remote_branches, indexer/rest_api.py::_run_rebuild_task_inner, indexer/rest_api.py::_run_register_task_inner, indexer/rest_api.py::_run_sync_task, indexer/rest_api.py::_store_credentials, indexer/rest_api.py::list_repos, indexer/rest_api.py::repo_detail, tests/test_config.py::test_load_defaults, tests/test_config.py::test_partial_toml_uses_defaults, tests/test_config.py::test_save_and_reload, tests/test_p1_fixes.py::TestChangedFilesSinceInvalidCommit.test_raises_on_invalid_commit, tests/test_p1_fixes.py::TestGetSourceContextTypeCoercion.test_string_params_converted_to_int, tests/test_p1_fixes.py::TestIntParamValidation.test_invalid_line_start_returns_400, tests/test_p1_fixes.py::TestParseBody.test_invalid_json_returns_empty, tests/test_p1_fixes.py::TestParseBody.test_non_dict_returns_empty, tests/test_p1_fixes.py::TestParseBody.test_valid_json, tests/test_p1_fixes.py::asyncio_coro, tests/test_wiki.py::test_build_page_contains_called_by, tests/test_wiki.py::test_build_page_contains_calls, tests/test_wiki.py::test_build_page_contains_symbol, tests/test_wiki.py::test_build_page_no_agent_hints, tests/test_wiki.py::test_write_page_creates_file

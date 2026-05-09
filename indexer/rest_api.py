@@ -1006,7 +1006,7 @@ def _run_rebuild_task_inner(task_id: str, name: str, root: Path, skip_deep: bool
             tasks.update(task_id, status="completed", progress=100, step="complete", detail="Nothing to index")
             return
 
-        manifest = Manifest()
+        manifest = Manifest(last_indexed_commit=None, indexed_at="")
         total_symbols = _run_indexing_pipeline(task_id, name, root, skip_deep, candidates, cfg, manifest, branch=repo_branch)
 
         if total_symbols == 0:
