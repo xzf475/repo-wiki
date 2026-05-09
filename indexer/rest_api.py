@@ -747,20 +747,44 @@ def _run_indexing_pipeline(
     tasks.update(task_id, status="running", progress=progress_offset + 40, step="cross_ref", detail=f"{total_symbols} symbols")
 
     existing_nodes = load_existing_nodes(root, manifest, cfg)
+    pre_cross_called_by = {n.id: list(n.called_by) for n in existing_nodes + all_nodes}
     cross_reference(existing_nodes + all_nodes)
+    from indexer.indexing import _collect_affected_files
+    affected_files = _collect_affected_files(set(candidates), existing_nodes + all_nodes, pre_cross_called_by)
 
     tasks.update(task_id, status="running", progress=progress_offset + 45, step="describing_symbols", detail="batches (concurrent)")
     from indexer.llm import describe_nodes, describe_files, deep_enrich_pages, deep_enrich_index
-    from indexer.indexing import load_cached_descriptions, save_cached_descriptions, load_cached_file_descriptions, save_cached_file_descriptions
+    from indexer.indexing import load_cached_descriptions, save_cached_descriptions, load_cached_file_descriptions, save_cached_file_descriptions, compute_ast_sig
 
     cached_descs = load_cached_descriptions(root)
-    new_nodes = [n for n in all_nodes if n.id not in cached_descs]
+    new_nodes = []
+    for n in all_nodes:
+        entry = cached_descs.get(n.id)
+        if not entry:
+            new_nodes.append(n)
+        elif isinstance(entry, dict) and entry.get("sig"):
+            if entry["sig"] != compute_ast_sig(n):
+                new_nodes.append(n)
 
     file_nodes: dict[str, list] = {}
     for node in all_nodes:
         file_nodes.setdefault(node.file, []).append(node)
     cached_file_descs = load_cached_file_descriptions(root)
-    new_file_nodes = {f: nodes for f, nodes in file_nodes.items() if f not in cached_file_descs}
+    new_file_nodes = {}
+    file_sigs: dict[str, str] = {}
+    from indexer.manifest import compute_hash as _compute_file_hash
+    for f, nodes in file_nodes.items():
+        abs_path = root / f
+        file_sig = _compute_file_hash(abs_path) or ""
+        file_sigs[f] = file_sig
+        entry = cached_file_descs.get(f)
+        if not entry:
+            new_file_nodes[f] = nodes
+        elif isinstance(entry, dict) and entry.get("sig"):
+            if entry["sig"] != file_sig:
+                new_file_nodes[f] = nodes
+        else:
+            pass
 
     from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
 
@@ -788,36 +812,72 @@ def _run_indexing_pipeline(
             else:
                 new_file_descriptions = _result
 
-    if new_descriptions:
-        save_cached_descriptions(root, new_descriptions)
-    if new_file_descriptions:
-        save_cached_file_descriptions(root, new_file_descriptions)
+    new_sigs = {n.id: compute_ast_sig(n) for n in new_nodes}
+    all_node_ids = {n.id for n in existing_nodes} | {n.id for n in all_nodes}
+    save_cached_descriptions(root, new_descriptions, current_node_ids=all_node_ids, sigs=new_sigs)
+    all_file_set = set(manifest.files.keys()) | set(file_nodes.keys())
+    save_cached_file_descriptions(root, new_file_descriptions, current_files=all_file_set, sigs=file_sigs)
 
-    descriptions = {**cached_descs, **new_descriptions}
+    descriptions = {}
     for n in all_nodes:
-        descriptions.setdefault(n.id, "")
-    file_descriptions = {**cached_file_descs, **new_file_descriptions}
+        entry = cached_descs.get(n.id)
+        if n.id in new_descriptions:
+            descriptions[n.id] = new_descriptions[n.id]
+        elif isinstance(entry, dict):
+            descriptions[n.id] = entry.get("desc", "")
+        elif isinstance(entry, str):
+            descriptions[n.id] = entry
+        else:
+            descriptions[n.id] = ""
+    for n in existing_nodes:
+        if n.id not in descriptions:
+            entry = cached_descs.get(n.id)
+            if isinstance(entry, dict):
+                descriptions[n.id] = entry.get("desc", "")
+            elif isinstance(entry, str):
+                descriptions[n.id] = entry
+    file_descriptions = {}
     for f in file_nodes:
-        file_descriptions.setdefault(f, "")
+        entry = cached_file_descs.get(f)
+        if f in new_file_descriptions:
+            file_descriptions[f] = new_file_descriptions[f]
+        elif isinstance(entry, dict):
+            file_descriptions[f] = entry.get("desc", "")
+        elif isinstance(entry, str):
+            file_descriptions[f] = entry
+        else:
+            file_descriptions[f] = ""
+    for n in existing_nodes:
+        if n.file not in file_descriptions:
+            entry = cached_file_descs.get(n.file)
+            if isinstance(entry, dict):
+                file_descriptions[n.file] = entry.get("desc", "")
+            elif isinstance(entry, str):
+                file_descriptions[n.file] = entry
 
     tasks.update(task_id, status="running", progress=progress_offset + 65, step="writing_wiki")
     page_enrichments: dict[str, dict] = {}
-    groups = density_group(candidates, merge_threshold=cfg.merge_threshold)
+    all_manifest_files = list(set(manifest.files.keys()) | set(candidates)) if manifest.files else candidates
+    groups = density_group(all_manifest_files, merge_threshold=cfg.merge_threshold)
+    all_nodes_for_wiki = existing_nodes + all_nodes
     if not skip_deep:
         tasks.update(task_id, status="running", progress=progress_offset + 70, step="deep_enrichment")
         group_nodes: dict[str, list] = {}
-        for node in all_nodes:
+        for node in all_nodes_for_wiki:
             group = groups.get(node.file, node.file)
             group_nodes.setdefault(group, []).append(node)
+        affected_group_labels = {groups.get(f, f) for f in affected_files} if affected_files else set(groups.values())
         pages_args = [
             (group_label, list({n.file for n in nodes}), nodes, descriptions)
             for group_label, nodes in group_nodes.items()
+            if group_label in affected_group_labels
         ]
         page_enrichments = deep_enrich_pages(pages_args, cfg)
 
     index_entries, groups = write_wiki_pages(
-        root, cfg, candidates, all_nodes, descriptions, file_descriptions,
+        root, cfg, candidates, all_nodes_for_wiki, descriptions, file_descriptions,
         page_enrichments, skip_deep, precomputed_groups=groups,
+        all_files=all_manifest_files, affected_files=affected_files,
     )
 
     index_overview = ""
@@ -838,7 +898,8 @@ def _run_indexing_pipeline(
 
     removed = manifest.removed_files(root, all_tracked_files(root) if is_git_repo(root) else [])
     tasks.update(task_id, status="running", progress=progress_offset + 85, step="embedding", detail=f"{total_symbols} symbols")
-    upsert_vectors(root, cfg, manifest, all_nodes, descriptions, removed_files=removed, branch=branch)
+    existing_nids = {n.id for n in existing_nodes}
+    upsert_vectors(root, cfg, manifest, all_nodes, descriptions, removed_files=removed, branch=branch, existing_node_ids=existing_nids)
     update_manifest(root, cfg, manifest, candidates, all_nodes, groups)
 
     return total_symbols

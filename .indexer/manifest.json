@@ -1,6 +1,6 @@
 {
-  "last_indexed_commit": "16f0a7ede503b2d96690f1e164dd218a4fa9fabc",
-  "indexed_at": "2026-05-08T07:44:12.649908+00:00",
+  "last_indexed_commit": "f3c2a98199677d5ae218e68791db43090b1715b2",
+  "indexed_at": "2026-05-09T06:02:43.502514+00:00",
   "files": {
     "indexer/__init__.py": {
       "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -8,7 +8,7 @@
       "component_ids": []
     },
     "indexer/ast_parser.py": {
-      "hash": "sha256:f8dbd29e72e9424dea3e95426bb493ca922292906658a6512fc1f2edbdf7188c",
+      "hash": "sha256:bdb7e7d13054052aee6b137ffc44a71e630c1eb78ecd67a27b50a5dfb83da60f",
       "wiki_page": "wiki/indexer.md",
       "component_ids": [
         "indexer/ast_parser.py::ASTNode",
@@ -22,7 +22,7 @@
       ]
     },
     "indexer/cli.py": {
-      "hash": "sha256:9123a9e996b0c58c90a0a37c9e11426f4cc1ac57572f51c92a1689e9fdc89bbe",
+      "hash": "sha256:0c8d4441d3d058bd011fe4525342a0b6755cff5b8ecb832355cd00fb8aad6f21",
       "wiki_page": "wiki/indexer.md",
       "component_ids": [
         "indexer/cli.py::main",
@@ -35,7 +35,8 @@
         "indexer/cli.py::serve",
         "indexer/cli.py::serve_api",
         "indexer/cli.py::_ensure_cache_gitignore",
-        "indexer/cli.py::_is_indexable"
+        "indexer/cli.py::_is_indexable",
+        "indexer/cli.py::_parse_progress"
       ]
     },
     "indexer/config.py": {
@@ -54,12 +55,13 @@
       ]
     },
     "indexer/embedding.py": {
-      "hash": "sha256:e005880c7d695034dbe75c8bdc98ca6323b707ccda84c1938a14638030ec5d13",
+      "hash": "sha256:a67d6dadf1772db1cd82a620ba39a5f1ce4d6a2419bb9f8f902de35954525016",
       "wiki_page": "wiki/indexer.md",
       "component_ids": [
         "indexer/embedding.py::_get_openai_client",
         "indexer/embedding.py::_resolve_api_key",
-        "indexer/embedding.py::_build_text",
+        "indexer/embedding.py::build_embedding_text",
+        "indexer/embedding.py::compute_embedding_sig",
         "indexer/embedding.py::embed_nodes",
         "indexer/embedding.py::embed_query",
         "indexer/embedding.py::_call_embedding_api"
@@ -116,27 +118,33 @@
       ]
     },
     "indexer/indexing.py": {
-      "hash": "sha256:5b68ef4de495244eaa6638150c549b38bf0c347aaaa3d08eb36e958da77f8cde",
+      "hash": "sha256:95443f739fbd7c36540005d0f7cad4fb20a54f6760240a29ebc79dc563ab28d5",
       "wiki_page": "wiki/indexer.md",
       "component_ids": [
-        "indexer/indexing.py::_desc_cache_path",
+        "indexer/indexing.py::compute_ast_sig",
+        "indexer/indexing.py::_atomic_write_json",
+        "indexer/indexing.py::_desc_cache_dir",
+        "indexer/indexing.py::_desc_shard_key",
         "indexer/indexing.py::load_cached_descriptions",
         "indexer/indexing.py::save_cached_descriptions",
-        "indexer/indexing.py::_file_desc_cache_path",
+        "indexer/indexing.py::_file_desc_cache_dir",
+        "indexer/indexing.py::_fdesc_shard_key",
         "indexer/indexing.py::load_cached_file_descriptions",
         "indexer/indexing.py::save_cached_file_descriptions",
         "indexer/indexing.py::cross_reference",
         "indexer/indexing.py::load_existing_nodes",
         "indexer/indexing.py::parse_candidates",
         "indexer/indexing.py::build_batches",
+        "indexer/indexing.py::_collect_affected_files",
         "indexer/indexing.py::write_wiki_pages",
         "indexer/indexing.py::write_index_and_skill",
         "indexer/indexing.py::update_manifest",
-        "indexer/indexing.py::_embedding_cache_path",
-        "indexer/indexing.py::_embedding_cache_sig",
+        "indexer/indexing.py::_embedding_cache_dir",
+        "indexer/indexing.py::_emb_shard_key",
         "indexer/indexing.py::load_cached_embeddings",
         "indexer/indexing.py::save_cached_embeddings",
-        "indexer/indexing.py::upsert_vectors"
+        "indexer/indexing.py::upsert_vectors",
+        "indexer/indexing.py::_load_one"
       ]
     },
     "indexer/java_parser.py": {
@@ -195,7 +203,7 @@
       ]
     },
     "indexer/manifest.py": {
-      "hash": "sha256:89fe428bf1672ade72e54e7c04fd353a8022a64e50fc17cc2305d36a0a33eff5",
+      "hash": "sha256:6152953678ffd3e0e853d8f92a76b0a51db133c1ad8fa836fa9685f734b16462",
       "wiki_page": "wiki/indexer.md",
       "component_ids": [
         "indexer/manifest.py::FileEntry",
@@ -204,7 +212,8 @@
         "indexer/manifest.py::Manifest.removed_files",
         "indexer/manifest.py::compute_hash",
         "indexer/manifest.py::load_manifest",
-        "indexer/manifest.py::save_manifest"
+        "indexer/manifest.py::save_manifest",
+        "indexer/manifest.py::_check"
       ]
     },
     "indexer/mcp_server.py": {
@@ -230,7 +239,7 @@
       ]
     },
     "indexer/rest_api.py": {
-      "hash": "sha256:79be8c9b575c646c72748509c849e4137f8fb32799c3a48206d75ba167534476",
+      "hash": "sha256:6ad0f3aec67cf324d14c2709c47b8de338f1f55b1b1aa0dcae1a8a8589265aae",
       "wiki_page": "wiki/indexer.md",
       "component_ids": [
         "indexer/rest_api.py::_get_repo_lock",
@@ -351,7 +360,7 @@
       ]
     },
     "indexer/vector_store.py": {
-      "hash": "sha256:6204380e18ab4a66e08318b6d7c231c72fae18c019c3dadffa2392a8313347b8",
+      "hash": "sha256:80610a6a02fcc8c068cfe97e900cd24763c01f6398e3c8c1af5d773e1ae7c3a9",
       "wiki_page": "wiki/indexer.md",
       "component_ids": [
         "indexer/vector_store.py::_get_client",
@@ -523,8 +532,8 @@
       ]
     },
     "tests/test_p1_fixes.py": {
-      "hash": "sha256:147869280f4e6d76862b3a191e9e59b890abe66bdb192515cc9764a4bfc648c1",
-      "wiki_page": "wiki/root.md",
+      "hash": "sha256:0698b1e918059e7cee9722f817146316cb86b5b878252ed4af9adc8491868715",
+      "wiki_page": "wiki/tests.md",
       "component_ids": [
         "tests/test_p1_fixes.py::TestTaskStore",
         "tests/test_p1_fixes.py::TestTaskStore.test_create_task",

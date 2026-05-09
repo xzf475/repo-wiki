@@ -144,4 +144,4 @@ def load_cached_nodes(repo_root: Path, file_hash: str) -> Optional[list[ASTNode]
 def save_cached_nodes(repo_root: Path, file_hash: str, nodes: list[ASTNode]) -> None:
     p = repo_root / ".indexer" / "cache" / f"{file_hash}.json"
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps([asdict(n) for n in nodes], indent=2))
+    p.write_text(json.dumps([asdict(n) for n in nodes]))

@@ -80,9 +80,14 @@ def upsert_nodes(
             logger.debug("Batch query failed for %d files, falling back: %s", len(chunk), e)
             for f in chunk:
                 try:
-                    existing_for_file = collection.get(
-                        where={"$and": [{"file": f}, {"branch": branch}]},
-                    )
+                    if branch:
+                        existing_for_file = collection.get(
+                            where={"$and": [{"file": f}, {"branch": branch}]},
+                        )
+                    else:
+                        existing_for_file = collection.get(
+                            where={"file": f},
+                        )
                     if existing_for_file and existing_for_file["ids"]:
                         old_ids.update(existing_for_file["ids"])
                 except Exception as e2:

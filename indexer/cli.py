@@ -16,7 +16,6 @@ from indexer.git import (
     staged_files, all_tracked_files, current_commit, current_branch,
     changed_files_since, is_git_repo
 )
-from indexer.ast_parser import parse_file, load_cached_nodes, save_cached_nodes, compute_hash_short
 from indexer.llm import describe_nodes, describe_files, deep_enrich_pages, deep_enrich_index, synthesize_commit_message
 from indexer.grouper import density_group
 from indexer.hooks import install_hook, remove_hook
@@ -118,24 +117,19 @@ def run(staged: bool, force: bool, skip_deep: bool):
     mode = "staged" if staged else ("full re-index" if force else "incremental")
     click.echo(f"\n  repo-wiki  —  {mode}  —  {len(candidates)} file(s)\n")
 
-    # ── Phase 1: Parse ────────────────────────────────────────────────────────
+    # ── Phase 1: Parse (parallel) ──────────────────────────────────────────────
     click.echo("  Parsing")
-    all_nodes = []
-    cached_count = 0
-    for rel_path in candidates:
-        abs_path = root / rel_path
-        file_hash = compute_hash_short(abs_path)
-        cached = load_cached_nodes(root, file_hash)
-        if cached is not None:
-            all_nodes.extend(cached)
-            cached_count += 1
+    _cached_count = 0
+
+    def _parse_progress(i, total, rel_path, cached=False, count=0, **kw):
+        nonlocal _cached_count
+        if cached:
+            _cached_count += 1
             click.echo(f"    ✓  {rel_path}  (cached)")
         else:
-            nodes = parse_file(abs_path, root)
-            save_cached_nodes(root, file_hash, nodes)
-            all_nodes.extend(nodes)
-            symbol_count = len(nodes)
-            click.echo(f"    ✓  {rel_path}  ({symbol_count} symbol{'s' if symbol_count != 1 else ''})")
+            click.echo(f"    ✓  {rel_path}  ({count} symbol{'s' if count != 1 else ''})")
+
+    all_nodes = parse_candidates(root, candidates, cfg, use_cache=True, progress_callback=_parse_progress)
 
     if not all_nodes:
         click.echo("\n  No symbols found.")
@@ -143,28 +137,54 @@ def run(staged: bool, force: bool, skip_deep: bool):
         return
 
     total_symbols = len(all_nodes)
-    click.echo(f"\n    {total_symbols} symbols across {len(candidates)} files  ({cached_count} from cache)\n")
+    click.echo(f"\n    {total_symbols} symbols across {len(candidates)} files  ({_cached_count} from cache)\n")
 
     # ── Phase 2: Cross-reference (with existing nodes for complete called_by) ──
     click.echo("  Cross-referencing calls")
+    affected_files: set[str] | None = None
+    existing_nodes: list = []
     if not force and manifest.last_indexed_commit is not None:
         existing_nodes = load_existing_nodes(root, manifest, cfg)
+        pre_cross_called_by = {n.id: list(n.called_by) for n in existing_nodes + all_nodes}
         cross_reference(existing_nodes + all_nodes)
+        from indexer.indexing import _collect_affected_files
+        affected_files = _collect_affected_files(set(candidates), existing_nodes + all_nodes, pre_cross_called_by)
     else:
         cross_reference(all_nodes)
     linked = sum(1 for n in all_nodes if n.called_by)
     click.echo(f"    {linked} symbols linked via call graph\n")
 
     # ── Phase 3: LLM descriptions ─────────────────────────────────────────────
-    from indexer.indexing import load_cached_descriptions, save_cached_descriptions, load_cached_file_descriptions, save_cached_file_descriptions
+    from indexer.indexing import load_cached_descriptions, save_cached_descriptions, load_cached_file_descriptions, save_cached_file_descriptions, compute_ast_sig
     cached_descs = load_cached_descriptions(root)
-    new_nodes = [n for n in all_nodes if n.id not in cached_descs]
+    new_nodes = []
+    for n in all_nodes:
+        entry = cached_descs.get(n.id)
+        if not entry:
+            new_nodes.append(n)
+        elif isinstance(entry, dict) and entry.get("sig"):
+            if entry["sig"] != compute_ast_sig(n):
+                new_nodes.append(n)
 
     file_nodes: dict[str, list] = {}
     for node in all_nodes:
         file_nodes.setdefault(node.file, []).append(node)
     cached_file_descs = load_cached_file_descriptions(root)
-    new_file_nodes = {f: nodes for f, nodes in file_nodes.items() if f not in cached_file_descs}
+    new_file_nodes = {}
+    file_sigs: dict[str, str] = {}
+    from indexer.manifest import compute_hash as _compute_file_hash
+    for f, nodes in file_nodes.items():
+        abs_path = root / f
+        file_sig = _compute_file_hash(abs_path) or ""
+        file_sigs[f] = file_sig
+        entry = cached_file_descs.get(f)
+        if not entry:
+            new_file_nodes[f] = nodes
+        elif isinstance(entry, dict) and entry.get("sig"):
+            if entry["sig"] != file_sig:
+                new_file_nodes[f] = nodes
+        else:
+            pass
 
     from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
 
@@ -194,32 +214,67 @@ def run(staged: bool, force: bool, skip_deep: bool):
     if new_file_nodes:
         click.echo(f"  {sum(1 for v in new_file_descriptions.values() if v)}/{len(new_file_nodes)} described\n")
 
-    if new_descriptions:
-        save_cached_descriptions(root, new_descriptions)
-    if new_file_descriptions:
-        save_cached_file_descriptions(root, new_file_descriptions)
+    new_sigs = {n.id: compute_ast_sig(n) for n in new_nodes}
+    all_node_ids = {n.id for n in existing_nodes} | {n.id for n in all_nodes}
+    save_cached_descriptions(root, new_descriptions, current_node_ids=all_node_ids, sigs=new_sigs)
+    all_file_set = set(manifest.files.keys()) | set(file_nodes.keys())
+    save_cached_file_descriptions(root, new_file_descriptions, current_files=all_file_set, sigs=file_sigs)
 
-    descriptions = {**cached_descs, **new_descriptions}
+    descriptions = {}
     for n in all_nodes:
-        descriptions.setdefault(n.id, "")
-    file_descriptions = {**cached_file_descs, **new_file_descriptions}
+        entry = cached_descs.get(n.id)
+        if n.id in new_descriptions:
+            descriptions[n.id] = new_descriptions[n.id]
+        elif isinstance(entry, dict):
+            descriptions[n.id] = entry.get("desc", "")
+        elif isinstance(entry, str):
+            descriptions[n.id] = entry
+        else:
+            descriptions[n.id] = ""
+    for n in existing_nodes:
+        if n.id not in descriptions:
+            entry = cached_descs.get(n.id)
+            if isinstance(entry, dict):
+                descriptions[n.id] = entry.get("desc", "")
+            elif isinstance(entry, str):
+                descriptions[n.id] = entry
+    file_descriptions = {}
     for f in file_nodes:
-        file_descriptions.setdefault(f, "")
+        entry = cached_file_descs.get(f)
+        if f in new_file_descriptions:
+            file_descriptions[f] = new_file_descriptions[f]
+        elif isinstance(entry, dict):
+            file_descriptions[f] = entry.get("desc", "")
+        elif isinstance(entry, str):
+            file_descriptions[f] = entry
+        else:
+            file_descriptions[f] = ""
+    for n in existing_nodes:
+        if n.file not in file_descriptions:
+            entry = cached_file_descs.get(n.file)
+            if isinstance(entry, dict):
+                file_descriptions[n.file] = entry.get("desc", "")
+            elif isinstance(entry, str):
+                file_descriptions[n.file] = entry
     filled = sum(1 for v in descriptions.values() if v)
     filled_files = sum(1 for v in file_descriptions.values() if v)
 
     # ── Phase 5: Deep enrichment + wiki pages ─────────────────────────────────
     page_enrichments: dict[str, dict] = {}
-    groups = density_group(candidates, merge_threshold=cfg.merge_threshold)
+    all_manifest_files = list(set(manifest.files.keys()) | set(candidates)) if manifest.files else candidates
+    groups = density_group(all_manifest_files, merge_threshold=cfg.merge_threshold)
+    all_nodes_for_wiki = existing_nodes + all_nodes
     if not skip_deep:
-        click.echo(f"\n  Deep enrichment  ({len(groups)} pages, concurrent)  —  narrative + flows + constraints")
+        affected_group_labels = {groups.get(f, f) for f in affected_files} if affected_files else set(groups.values())
+        click.echo(f"\n  Deep enrichment  ({len(affected_group_labels)} pages, concurrent)  —  narrative + flows + constraints")
         group_nodes: dict[str, list] = {}
-        for node in all_nodes:
+        for node in all_nodes_for_wiki:
             group = groups.get(node.file, node.file)
             group_nodes.setdefault(group, []).append(node)
         pages_args = [
             (group_label, list({n.file for n in nodes}), nodes, descriptions)
             for group_label, nodes in group_nodes.items()
+            if group_label in affected_group_labels
         ]
         page_enrichments = deep_enrich_pages(pages_args, cfg)
         for group_label, enrichment in page_enrichments.items():
@@ -232,8 +287,9 @@ def run(staged: bool, force: bool, skip_deep: bool):
 
     click.echo("  Writing wiki")
     index_entries, groups = write_wiki_pages(
-        root, cfg, candidates, all_nodes, descriptions, file_descriptions,
+        root, cfg, candidates, all_nodes_for_wiki, descriptions, file_descriptions,
         page_enrichments, skip_deep, precomputed_groups=groups,
+        all_files=all_manifest_files, affected_files=affected_files,
     )
     for entry in index_entries:
         page_name = entry.path.split("/")[-1]
@@ -298,7 +354,8 @@ def run(staged: bool, force: bool, skip_deep: bool):
     click.echo("\n  Embedding + vector store")
     try:
         branch = current_branch(root) or ""
-        upsert_vectors(root, cfg, manifest, all_nodes, descriptions, removed_files=removed, branch=branch)
+        existing_nids = {n.id for n in existing_nodes}
+        upsert_vectors(root, cfg, manifest, all_nodes, descriptions, removed_files=removed, branch=branch, existing_node_ids=existing_nids)
         click.echo(f"    ✓  {total_symbols} vectors upserted")
     except Exception as e:
         logger.error("Vector store indexing failed: %s", e)

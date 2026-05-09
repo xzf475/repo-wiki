@@ -1,4 +1,5 @@
 from __future__ import annotations
+import hashlib
 import os
 import json
 import logging
@@ -42,7 +43,7 @@ def _resolve_api_key(cfg: EmbeddingConfig) -> str | None:
     return os.environ.get(value)
 
 
-def _build_text(node: ASTNode, description: str = "") -> str:
+def build_embedding_text(node: ASTNode, description: str = "") -> str:
     parts = [
         f"[{node.type}] {node.id}",
         f"Lines {node.line_start}-{node.line_end}",
@@ -60,11 +61,16 @@ def _build_text(node: ASTNode, description: str = "") -> str:
     return "\n".join(parts)
 
 
+def compute_embedding_sig(node: ASTNode, description: str = "") -> str:
+    text = build_embedding_text(node, description)
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
 def embed_nodes(
     nodes: list[ASTNode],
     descriptions: dict[str, str],
     cfg: EmbeddingConfig,
-    max_workers: int = 4,
+    max_workers: int = 8,
 ) -> dict[str, list[float]]:
     api_key = _resolve_api_key(cfg)
     if not api_key:
@@ -72,7 +78,7 @@ def embed_nodes(
             f"Embedding API key not found. Set {cfg.api_key_env} env var or configure api_key_env in .indexer.toml"
         )
 
-    texts = [_build_text(n, descriptions.get(n.id, "")) for n in nodes]
+    texts = [build_embedding_text(n, descriptions.get(n.id, "")) for n in nodes]
     ids = [n.id for n in nodes]
 
     result: dict[str, list[float]] = {}

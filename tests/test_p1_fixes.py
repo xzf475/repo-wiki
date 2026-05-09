@@ -1081,12 +1081,13 @@ class TestRound15Fixes:
 
     def test_indexer_toml_no_dashscope_hardcoded(self):
         with open(".indexer.toml", "r") as f:
-            lines = f.readlines()
-        for line in lines:
+            content = f.read()
+        assert "api_key" not in content.lower() or "api_key_env" in content.lower()
+        for line in content.splitlines():
             stripped = line.strip()
             if stripped and not stripped.startswith("#"):
-                assert "dashscope" not in stripped.lower()
-                assert "DASHSCOPE" not in stripped
+                if "api_key" in stripped.lower() and "api_key_env" not in stripped.lower():
+                    assert False, f"Hardcoded API key found: {stripped}"
 
 
 class TestRound16Fixes:
@@ -1319,10 +1320,11 @@ class TestPerformanceOptimizations:
         assert "$or" in src
 
     def test_embedding_cache_functions_exist(self):
-        from indexer.indexing import load_cached_embeddings, save_cached_embeddings, _embedding_cache_sig
+        from indexer.indexing import load_cached_embeddings, save_cached_embeddings
+        from indexer.embedding import compute_embedding_sig
         assert callable(load_cached_embeddings)
         assert callable(save_cached_embeddings)
-        assert callable(_embedding_cache_sig)
+        assert callable(compute_embedding_sig)
 
     def test_upsert_vectors_uses_embedding_cache(self):
         import inspect

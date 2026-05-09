@@ -23,15 +23,37 @@ class Manifest:
     files: dict[str, FileEntry] = field(default_factory=dict)
 
     def stale_files(self, repo_root: Path, candidate_paths: list[str]) -> list[str]:
-        stale = []
-        for rel_path in candidate_paths:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        def _check(rel_path):
             abs_path = repo_root / rel_path
             if not abs_path.exists():
-                continue
+                return None
             current_hash = compute_hash(abs_path)
             entry = self.files.get(rel_path)
             if current_hash is None or entry is None or entry.hash != current_hash:
-                stale.append(rel_path)
+                return rel_path
+            return None
+
+        if len(candidate_paths) < 50:
+            stale = []
+            for rel_path in candidate_paths:
+                abs_path = repo_root / rel_path
+                if not abs_path.exists():
+                    continue
+                current_hash = compute_hash(abs_path)
+                entry = self.files.get(rel_path)
+                if current_hash is None or entry is None or entry.hash != current_hash:
+                    stale.append(rel_path)
+            return stale
+
+        stale = []
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {pool.submit(_check, p): p for p in candidate_paths}
+            for future in as_completed(futures):
+                result = future.result()
+                if result is not None:
+                    stale.append(result)
         return stale
 
     def removed_files(self, repo_root: Path, current_tracked: list[str]) -> list[str]:
