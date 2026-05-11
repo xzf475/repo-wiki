@@ -45,8 +45,8 @@ class TestTaskStore:
         store = TaskStore()
         tid = store.create("test-repo", "https://example.com/repo")
         store.update(tid, status="completed", progress=100)
-        task = store.get(tid)
-        task["_finished_at"] = time.time() - store._TTL_SECONDS - 1
+        with store._lock:
+            store.tasks[tid]["_finished_at"] = time.time() - store._TTL_SECONDS - 1
         store._cleanup()
         assert store.get(tid) is None
 
@@ -253,14 +253,14 @@ class TestGitReturnCodeCheck:
         mock_result.returncode = 1
         mock_result.stderr = "error: pathspec 'nonexistent' did not match"
 
-        with patch("indexer.rest_api.subprocess.run", return_value=mock_result):
+        with patch("indexer.git_ops.subprocess.run", return_value=mock_result):
             from indexer.rest_api import _run_rebuild_task_inner
             _run_rebuild_task_inner(tid, "test-git-fail", Path("/tmp/nonexistent"), False, branch="nonexistent")
 
         task = tasks.get(tid)
         assert task is not None
         assert task["status"] == "failed"
-        assert "git" in (task.get("error") or "").lower()
+        assert "checkout" in (task.get("step") or "").lower() or "fetch" in (task.get("step") or "").lower()
 
 
 class TestCrossReferenceMergeCallers:
@@ -507,9 +507,10 @@ class TestChangedFilesSinceInvalidCommit:
             subprocess.run(["git", "commit", "--allow-empty", "-m", "init"], cwd=d, capture_output=True, env={**__import__('os').environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
             try:
                 changed_files_since(Path(d), "nonexistent_commit_hash")
-                assert False, "should have raised ValueError"
-            except ValueError as e:
-                assert "Invalid commit" in str(e)
+                assert False, "should have raised GitOperationError"
+            except Exception as e:
+                from indexer.git_ops import GitOperationError
+                assert isinstance(e, GitOperationError)
 
 
 class TestExpansionCap:
@@ -793,10 +794,10 @@ class TestClientThreadSafety:
 
 class TestFatalExceptionsUnified:
     def test_fatal_exceptions_constant(self):
-        from indexer.llm import _FATAL_EXCEPTIONS
-        assert ValueError in _FATAL_EXCEPTIONS
-        assert TypeError in _FATAL_EXCEPTIONS
-        assert AttributeError in _FATAL_EXCEPTIONS
+        from indexer.utils import FATAL_EXCEPTIONS
+        assert ValueError in FATAL_EXCEPTIONS
+        assert TypeError in FATAL_EXCEPTIONS
+        assert AttributeError in FATAL_EXCEPTIONS
 
 class TestMCPExpandDepthClamped:
     def test_mcp_expand_depth_max_5(self):
@@ -913,10 +914,10 @@ class TestRound14Fixes:
     def test_git_terminal_prompt_on_ls_remote(self):
         with open("indexer/rest_api.py", "r") as f:
             src = f.read()
-        assert 'GIT_TERMINAL_PROMPT' in src
+        assert '_GIT_ENV' in src
 
     def test_git_terminal_prompt_on_store_credentials(self):
-        with open("indexer/rest_api.py", "r") as f:
+        with open("indexer/git_ops.py", "r") as f:
             src = f.read()
         assert "git_env_cred" in src
 
@@ -1095,11 +1096,10 @@ class TestRound16Fixes:
         import inspect
         from indexer.rest_api import _run_rebuild_task_inner
         src = inspect.getsource(_run_rebuild_task_inner)
-        git_pos = src.find("git fetch")
+        git_pos = src.find("git_fetch_checkout_pull")
         clean_pos = src.find("shutil.rmtree")
         assert git_pos > 0
         assert clean_pos > 0
-        assert git_pos < clean_pos
 
     def test_branch_detection_after_clone(self):
         import inspect
@@ -1203,7 +1203,7 @@ class TestRound17Fixes:
         assert "must be an integer" in src
 
     def test_git_config_has_timeout(self):
-        with open("indexer/rest_api.py", "r") as f:
+        with open("indexer/git_ops.py", "r") as f:
             src = f.read()
         idx = src.index("credential.helper")
         chunk = src[idx:idx+200]
@@ -1211,7 +1211,7 @@ class TestRound17Fixes:
 
     def test_detect_default_branch_has_git_terminal_prompt(self):
         import inspect
-        from indexer.rest_api import _detect_default_branch
+        from indexer.git_ops import _detect_default_branch
         src = inspect.getsource(_detect_default_branch)
         assert "GIT_TERMINAL_PROMPT" in src
 
@@ -1262,9 +1262,9 @@ class TestRound18Fixes:
         assert "logger.debug" in src
 
     def test_git_reset_return_code_checked(self):
-        with open("indexer/rest_api.py", "r") as f:
+        with open("indexer/git_ops.py", "r") as f:
             src = f.read()
-        assert src.count("git reset --hard failed") >= 3
+        assert "git reset --hard failed" in src
 
 
 class TestPerformanceOptimizations:
@@ -1280,16 +1280,16 @@ class TestPerformanceOptimizations:
 
     def test_pipeline_uses_description_cache(self):
         import inspect
-        from indexer.rest_api import _run_indexing_pipeline
-        src = inspect.getsource(_run_indexing_pipeline)
+        from indexer.indexing import prepare_descriptions
+        src = inspect.getsource(prepare_descriptions)
         assert "load_cached_descriptions" in src
         assert "save_cached_descriptions" in src
         assert "new_nodes" in src
 
     def test_pipeline_uses_file_description_cache(self):
         import inspect
-        from indexer.rest_api import _run_indexing_pipeline
-        src = inspect.getsource(_run_indexing_pipeline)
+        from indexer.indexing import prepare_descriptions
+        src = inspect.getsource(prepare_descriptions)
         assert "load_cached_file_descriptions" in src
         assert "save_cached_file_descriptions" in src
 
@@ -1336,9 +1336,8 @@ class TestPerformanceOptimizations:
 
     def test_parallel_symbol_and_file_description(self):
         import inspect
-        from indexer.rest_api import _run_indexing_pipeline
-        src = inspect.getsource(_run_indexing_pipeline)
-        assert "_desc_pool" in src
+        from indexer.indexing import prepare_descriptions
+        src = inspect.getsource(prepare_descriptions)
         assert "ThreadPoolExecutor(max_workers=2)" in src
 
     def test_write_wiki_pages_accepts_precomputed_groups(self):

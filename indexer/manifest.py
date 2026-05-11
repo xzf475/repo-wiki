@@ -111,7 +111,16 @@ def save_manifest(repo_root: Path, manifest: Manifest) -> None:
         "files": {k: asdict(v) for k, v in manifest.files.items()},
     }
     import tempfile
-    with tempfile.NamedTemporaryFile(dir=str(path.parent), suffix=".json.tmp", delete=False, mode="w") as f:
-        f.write(json.dumps(data, indent=2))
-        tmp_path = f.name
-    os.replace(tmp_path, str(path))
+    tmp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(dir=str(path.parent), suffix=".json.tmp", delete=False, mode="w") as f:
+            f.write(json.dumps(data, indent=2))
+            tmp_path = f.name
+        os.replace(tmp_path, str(path))
+    except OSError:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        raise

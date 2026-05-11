@@ -1,10 +1,10 @@
 from __future__ import annotations
 import hashlib
-import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
+from indexer.cache import ShardedCache
 from indexer.ast_parser import ASTNode, parse_file, load_cached_nodes, save_cached_nodes, compute_hash_short
 from indexer.config import Config
 from indexer.embedding import embed_nodes, compute_embedding_sig
@@ -28,203 +28,142 @@ def compute_ast_sig(node: ASTNode) -> str:
     return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
 
 
-def _atomic_write_json(path: Path, data: object) -> None:
-    tmp = path.with_suffix(".tmp")
-    try:
-        tmp.write_text(json.dumps(data, separators=(",", ":")))
-        tmp.replace(path)
-    except OSError as e:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise e
+def _first_char_shard(key: str) -> str:
+    return key[0].lower() if key else "0"
 
 
-def _desc_cache_dir(root: Path) -> Path:
-    d = root / ".indexer" / "cache" / "desc"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def _desc_shard_key(node_id: str) -> str:
-    return node_id[0].lower() if node_id else "0"
+_desc_cache = lambda root: ShardedCache(root, "desc", _first_char_shard)
+_fdesc_cache = lambda root: ShardedCache(root, "fdesc", _first_char_shard)
+_emb_cache = lambda root: ShardedCache(root, "emb", _first_char_shard)
 
 
 def load_cached_descriptions(root: Path) -> dict[str, dict]:
-    d = _desc_cache_dir(root)
-    legacy = root / ".indexer" / "cache" / "descriptions.json"
-    if legacy.exists() and not any(d.iterdir()):
-        try:
-            raw = json.loads(legacy.read_text())
-            result = {}
-            for k, v in raw.items():
-                if isinstance(v, str):
-                    result[k] = {"desc": v, "sig": ""}
-                elif isinstance(v, dict):
-                    result[k] = v
-            return result
-        except (json.JSONDecodeError, OSError):
-            pass
-    result = {}
-    for shard_file in d.glob("*.json"):
-        try:
-            data = json.loads(shard_file.read_text())
-            for k, v in data.items():
-                if isinstance(v, str):
-                    result[k] = {"desc": v, "sig": ""}
-                elif isinstance(v, dict):
-                    result[k] = v
-        except (json.JSONDecodeError, OSError):
-            pass
-    return result
+    return _desc_cache(root).load()
 
 
 def save_cached_descriptions(root: Path, descriptions: dict[str, str], current_node_ids: set[str] | None = None, sigs: dict[str, str] | None = None) -> None:
-    d = _desc_cache_dir(root)
-    legacy = root / ".indexer" / "cache" / "descriptions.json"
-    try:
-        by_shard: dict[str, dict] = {}
-        for node_id, desc in descriptions.items():
-            shard = _desc_shard_key(node_id)
-            sig = sigs.get(node_id, "") if sigs else ""
-            by_shard.setdefault(shard, {})[node_id] = {"desc": desc, "sig": sig}
-
-        if current_node_ids is not None:
-            for shard_file in d.glob("*.json"):
-                try:
-                    data = json.loads(shard_file.read_text())
-                except (json.JSONDecodeError, OSError):
-                    continue
-                shard = shard_file.stem
-                stale = [k for k in data if k not in current_node_ids]
-                if stale:
-                    for k in stale:
-                        del data[k]
-                if stale or shard in by_shard:
-                    by_shard[shard] = data
-                    for node_id, desc in descriptions.items():
-                        if _desc_shard_key(node_id) == shard:
-                            sig = sigs.get(node_id, "") if sigs else ""
-                            by_shard[shard][node_id] = {"desc": desc, "sig": sig}
-
-        for shard, shard_entries in by_shard.items():
-            shard_path = d / f"{shard}.json"
-            existing = {}
-            if shard_path.exists() and current_node_ids is None:
-                try:
-                    existing = json.loads(shard_path.read_text())
-                except (json.JSONDecodeError, OSError):
-                    pass
-            existing.update(shard_entries)
-            if existing:
-                _atomic_write_json(shard_path, existing)
-            else:
-                try:
-                    shard_path.unlink()
-                except OSError:
-                    pass
-
-        if legacy.exists():
-            try:
-                legacy.unlink()
-            except OSError:
-                pass
-    except OSError as e:
-        logger.warning("Failed to save description cache: %s", e)
-
-
-def _file_desc_cache_dir(root: Path) -> Path:
-    d = root / ".indexer" / "cache" / "fdesc"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def _fdesc_shard_key(file_path: str) -> str:
-    return file_path[0].lower() if file_path else "0"
+    entries = {}
+    for node_id, desc in descriptions.items():
+        sig = sigs.get(node_id, "") if sigs else ""
+        entries[node_id] = {"desc": desc, "sig": sig}
+    _desc_cache(root).save(entries, current_keys=current_node_ids)
 
 
 def load_cached_file_descriptions(root: Path) -> dict[str, dict]:
-    d = _file_desc_cache_dir(root)
-    legacy = root / ".indexer" / "cache" / "file_descriptions.json"
-    if legacy.exists() and not any(d.iterdir()):
-        try:
-            raw = json.loads(legacy.read_text())
-            result = {}
-            for k, v in raw.items():
-                if isinstance(v, str):
-                    result[k] = {"desc": v, "sig": ""}
-                elif isinstance(v, dict):
-                    result[k] = v
-            return result
-        except (json.JSONDecodeError, OSError):
-            pass
-    result = {}
-    for shard_file in d.glob("*.json"):
-        try:
-            data = json.loads(shard_file.read_text())
-            for k, v in data.items():
-                if isinstance(v, str):
-                    result[k] = {"desc": v, "sig": ""}
-                elif isinstance(v, dict):
-                    result[k] = v
-        except (json.JSONDecodeError, OSError):
-            pass
-    return result
+    return _fdesc_cache(root).load()
 
 
 def save_cached_file_descriptions(root: Path, descriptions: dict[str, str], current_files: set[str] | None = None, sigs: dict[str, str] | None = None) -> None:
-    d = _file_desc_cache_dir(root)
-    legacy = root / ".indexer" / "cache" / "file_descriptions.json"
-    try:
-        by_shard: dict[str, dict] = {}
-        for file_path, desc in descriptions.items():
-            shard = _fdesc_shard_key(file_path)
-            sig = sigs.get(file_path, "") if sigs else ""
-            by_shard.setdefault(shard, {})[file_path] = {"desc": desc, "sig": sig}
+    entries = {}
+    for file_path, desc in descriptions.items():
+        sig = sigs.get(file_path, "") if sigs else ""
+        entries[file_path] = {"desc": desc, "sig": sig}
+    _fdesc_cache(root).save(entries, current_keys=current_files)
 
-        if current_files is not None:
-            for shard_file in d.glob("*.json"):
-                try:
-                    data = json.loads(shard_file.read_text())
-                except (json.JSONDecodeError, OSError):
-                    continue
-                shard = shard_file.stem
-                stale = [k for k in data if k not in current_files]
-                if stale:
-                    for k in stale:
-                        del data[k]
-                if stale or shard in by_shard:
-                    by_shard[shard] = data
-                    for file_path, desc in descriptions.items():
-                        if _fdesc_shard_key(file_path) == shard:
-                            sig = sigs.get(file_path, "") if sigs else ""
-                            by_shard[shard][file_path] = {"desc": desc, "sig": sig}
 
-        for shard, shard_entries in by_shard.items():
-            shard_path = d / f"{shard}.json"
-            existing = {}
-            if shard_path.exists() and current_files is None:
-                try:
-                    existing = json.loads(shard_path.read_text())
-                except (json.JSONDecodeError, OSError):
-                    pass
-            existing.update(shard_entries)
-            if existing:
-                _atomic_write_json(shard_path, existing)
-            else:
-                try:
-                    shard_path.unlink()
-                except OSError:
-                    pass
+def prepare_descriptions(
+    root: Path,
+    all_nodes: list[ASTNode],
+    existing_nodes: list[ASTNode],
+    manifest: Manifest,
+    cfg: Config,
+) -> tuple[dict[str, str], dict[str, str]]:
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        if legacy.exists():
+    cached_descs = load_cached_descriptions(root)
+    new_nodes = []
+    for n in all_nodes:
+        entry = cached_descs.get(n.id)
+        if not entry:
+            new_nodes.append(n)
+        elif isinstance(entry, dict) and entry.get("sig"):
+            if entry["sig"] != compute_ast_sig(n):
+                new_nodes.append(n)
+
+    file_nodes: dict[str, list] = {}
+    for node in all_nodes:
+        file_nodes.setdefault(node.file, []).append(node)
+
+    cached_file_descs = load_cached_file_descriptions(root)
+    new_file_nodes: dict[str, list] = {}
+    file_sigs: dict[str, str] = {}
+    for f, nodes in file_nodes.items():
+        abs_path = root / f
+        file_sig = compute_hash(abs_path) or ""
+        file_sigs[f] = file_sig
+        entry = cached_file_descs.get(f)
+        if not entry:
+            new_file_nodes[f] = nodes
+        elif isinstance(entry, dict) and entry.get("sig"):
+            if entry["sig"] != file_sig:
+                new_file_nodes[f] = nodes
+
+    new_descriptions: dict[str, str] = {}
+    new_file_descriptions: dict[str, str] = {}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = {}
+        if new_nodes:
+            batches = build_batches(new_nodes, cfg)
+            futures[pool.submit(describe_nodes, batches, cfg)] = "symbols"
+        if new_file_nodes:
+            futures[pool.submit(describe_files, new_file_nodes, cfg)] = "files"
+        for fut in as_completed(futures):
+            label = futures[fut]
             try:
-                legacy.unlink()
-            except OSError:
-                pass
-    except OSError as e:
-        logger.warning("Failed to save file description cache: %s", e)
+                result = fut.result()
+            except Exception as e:
+                logger.warning("Parallel description failed for %s: %s", label, e)
+                result = {}
+            if label == "symbols":
+                new_descriptions = result
+            else:
+                new_file_descriptions = result
+
+    new_sigs = {n.id: compute_ast_sig(n) for n in new_nodes}
+    all_node_ids = {n.id for n in existing_nodes} | {n.id for n in all_nodes}
+    save_cached_descriptions(root, new_descriptions, current_node_ids=all_node_ids, sigs=new_sigs)
+    all_file_set = set(manifest.files.keys()) | set(file_nodes.keys())
+    save_cached_file_descriptions(root, new_file_descriptions, current_files=all_file_set, sigs=file_sigs)
+
+    descriptions: dict[str, str] = {}
+    for n in all_nodes:
+        entry = cached_descs.get(n.id)
+        if n.id in new_descriptions:
+            descriptions[n.id] = new_descriptions[n.id]
+        elif isinstance(entry, dict):
+            descriptions[n.id] = entry.get("desc", "")
+        elif isinstance(entry, str):
+            descriptions[n.id] = entry
+        else:
+            descriptions[n.id] = ""
+    for n in existing_nodes:
+        if n.id not in descriptions:
+            entry = cached_descs.get(n.id)
+            if isinstance(entry, dict):
+                descriptions[n.id] = entry.get("desc", "")
+            elif isinstance(entry, str):
+                descriptions[n.id] = entry
+
+    file_descriptions: dict[str, str] = {}
+    for f in file_nodes:
+        entry = cached_file_descs.get(f)
+        if f in new_file_descriptions:
+            file_descriptions[f] = new_file_descriptions[f]
+        elif isinstance(entry, dict):
+            file_descriptions[f] = entry.get("desc", "")
+        elif isinstance(entry, str):
+            file_descriptions[f] = entry
+        else:
+            file_descriptions[f] = ""
+    for n in existing_nodes:
+        if n.file not in file_descriptions:
+            entry = cached_file_descs.get(n.file)
+            if isinstance(entry, dict):
+                file_descriptions[n.file] = entry.get("desc", "")
+            elif isinstance(entry, str):
+                file_descriptions[n.file] = entry
+
+    return descriptions, file_descriptions
 
 
 def cross_reference(all_nodes: list[ASTNode]) -> None:
@@ -279,13 +218,17 @@ def load_existing_nodes(root: Path, manifest: Manifest, cfg: Config) -> list[AST
         return existing_nodes
 
     existing_nodes = []
+    failed = 0
     with ThreadPoolExecutor(max_workers=8) as pool:
         futures = [pool.submit(_load_one, item) for item in items]
         for future in as_completed(futures):
             try:
                 existing_nodes.extend(future.result())
-            except Exception:
-                pass
+            except Exception as e:
+                failed += 1
+                logger.warning("Failed to load existing node: %s", e)
+    if failed:
+        logger.warning("load_existing_nodes: %d/%d files failed to load", failed, len(items))
     return existing_nodes
 
 
@@ -435,10 +378,10 @@ def write_index_and_skill(
     index_content = build_index(index_entries, commit, today, overview=index_overview, flows=index_flows)
     write_index(wiki_dir, index_content)
 
-    from jinja2 import Environment, FileSystemLoader
+    from indexer.wiki import _jinja_env
     skill_dir = root / ".indexer" / "skills"
     skill_dir.mkdir(parents=True, exist_ok=True)
-    env = Environment(loader=FileSystemLoader(str(TEMPLATES_DIR)), trim_blocks=True, lstrip_blocks=True)
+    env = _jinja_env()
     skill_pages = [
         {
             "label": Path(e.path).stem,
@@ -459,7 +402,8 @@ def write_index_and_skill(
         commit=commit,
         indexed_date=today,
     )
-    (skill_dir / "codebase.md").write_text(skill_content)
+    from indexer.wiki import _atomic_write_text
+    _atomic_write_text(skill_dir / "codebase.md", skill_content)
 
 
 def update_manifest(
@@ -500,84 +444,12 @@ def update_manifest(
     save_manifest(root, manifest)
 
 
-def _embedding_cache_dir(root: Path) -> Path:
-    d = root / ".indexer" / "cache" / "emb"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def _emb_shard_key(node_id: str) -> str:
-    return node_id[0].lower() if node_id else "0"
-
-
 def load_cached_embeddings(root: Path) -> dict[str, dict]:
-    d = _embedding_cache_dir(root)
-    legacy = root / ".indexer" / "cache" / "embeddings.json"
-    if legacy.exists() and not any(d.iterdir()):
-        try:
-            return json.loads(legacy.read_text())
-        except (json.JSONDecodeError, OSError):
-            pass
-    result = {}
-    for shard_file in d.glob("*.json"):
-        try:
-            data = json.loads(shard_file.read_text())
-            result.update(data)
-        except (json.JSONDecodeError, OSError):
-            pass
-    return result
+    return _emb_cache(root).load()
 
 
 def save_cached_embeddings(root: Path, entries: dict[str, dict], current_node_ids: set[str] | None = None) -> None:
-    d = _embedding_cache_dir(root)
-    legacy = root / ".indexer" / "cache" / "embeddings.json"
-    try:
-        by_shard: dict[str, dict] = {}
-        for node_id, entry in entries.items():
-            shard = _emb_shard_key(node_id)
-            by_shard.setdefault(shard, {})[node_id] = entry
-
-        if current_node_ids is not None:
-            for shard_file in d.glob("*.json"):
-                try:
-                    data = json.loads(shard_file.read_text())
-                except (json.JSONDecodeError, OSError):
-                    continue
-                shard = shard_file.stem
-                stale = [k for k in data if k not in current_node_ids]
-                if stale:
-                    for k in stale:
-                        del data[k]
-                if stale or shard in by_shard:
-                    by_shard[shard] = data
-                    for node_id, entry in entries.items():
-                        if _emb_shard_key(node_id) == shard:
-                            by_shard[shard][node_id] = entry
-
-        for shard, shard_entries in by_shard.items():
-            shard_path = d / f"{shard}.json"
-            existing = {}
-            if shard_path.exists() and current_node_ids is None:
-                try:
-                    existing = json.loads(shard_path.read_text())
-                except (json.JSONDecodeError, OSError):
-                    pass
-            existing.update(shard_entries)
-            if existing:
-                _atomic_write_json(shard_path, existing)
-            else:
-                try:
-                    shard_path.unlink()
-                except OSError:
-                    pass
-
-        if legacy.exists():
-            try:
-                legacy.unlink()
-            except OSError:
-                pass
-    except OSError as e:
-        logger.warning("Failed to save embedding cache: %s", e)
+    _emb_cache(root).save(entries, current_keys=current_node_ids)
 
 
 def upsert_vectors(

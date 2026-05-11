@@ -155,7 +155,16 @@ def save_config(repo_root: Path, cfg: Config) -> None:
     import tempfile
     import tomli_w
     target = repo_root / FILENAME
-    with tempfile.NamedTemporaryFile(dir=str(repo_root), suffix=".toml.tmp", delete=False) as f:
-        tomli_w.dump(data, f)
-        tmp_path = f.name
-    os.replace(tmp_path, str(target))
+    tmp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(dir=str(repo_root), suffix=".toml.tmp", delete=False) as f:
+            tomli_w.dump(data, f)
+            tmp_path = f.name
+        os.replace(tmp_path, str(target))
+    except OSError:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        raise

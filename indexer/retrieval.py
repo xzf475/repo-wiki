@@ -6,6 +6,14 @@ from indexer.config import Config
 from indexer.embedding import embed_query
 from indexer.vector_store import search, get_by_ids
 
+MAX_DOC_LEN = 2000
+
+
+def truncate_documents(hits: list[dict], max_len: int = MAX_DOC_LEN) -> None:
+    for h in hits:
+        if "document" in h and h["document"] and len(h["document"]) > max_len:
+            h["document"] = h["document"][:max_len]
+
 
 def search_symbols(
     query: str,
@@ -20,15 +28,11 @@ def search_symbols(
     where_clause = {"branch": branch} if branch else None
     hits = search(query_vector, cfg.vector_store, repo_root, top_k=top_k, where=where_clause)
 
-    for h in hits:
-        if "document" in h and h["document"]:
-            h["document"] = h["document"][:2000]
+    truncate_documents(hits)
 
     if expand_depth > 0:
         hits = _expand_with_call_graph(hits, cfg, repo_root, expand_depth)
-        for h in hits:
-            if "document" in h and h["document"]:
-                h["document"] = h["document"][:2000]
+        truncate_documents(hits)
 
     return hits
 

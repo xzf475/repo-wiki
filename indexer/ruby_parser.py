@@ -1,6 +1,6 @@
 from __future__ import annotations
 from pathlib import Path
-from typing import Optional
+
 from indexer.ast_parser import ASTNode
 from indexer.utils import _rel, _node_text
 
@@ -11,7 +11,7 @@ def _get_ruby_language():
     return Language(tsrb.language())
 
 
-def _extract_ruby_doc(node, source: bytes) -> Optional[str]:
+def _extract_ruby_doc(node, source: bytes) -> str | None:
     prev = node.prev_named_sibling
     while prev:
         if prev.type == "comment":
@@ -51,7 +51,7 @@ def _extract_calls(node, source: bytes) -> list[str]:
     return list(calls)
 
 
-def _get_name(node, source: bytes) -> Optional[str]:
+def _get_name(node, source: bytes) -> str | None:
     name_node = node.child_by_field_name("name")
     if name_node:
         return _node_text(name_node, source)
@@ -84,7 +84,7 @@ def parse_ruby_file(path: Path, repo_root: Path) -> list[ASTNode]:
     file_imports = _extract_imports(tree, source)
     nodes: list[ASTNode] = []
 
-    def visit(node, class_name: Optional[str] = None, module_name: Optional[str] = None):
+    def visit(node, class_name: str | None = None, module_name: str | None = None):
         if node.type == "class":
             name = _get_name(node, source)
             if name:

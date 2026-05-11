@@ -1,6 +1,6 @@
 from __future__ import annotations
 from pathlib import Path
-from typing import Optional
+
 from indexer.ast_parser import ASTNode
 from indexer.utils import _rel, _node_text
 
@@ -11,7 +11,7 @@ def _get_java_language():
     return Language(tsj.language())
 
 
-def _extract_javadoc(node, source: bytes) -> Optional[str]:
+def _extract_javadoc(node, source: bytes) -> str | None:
     prev = node.prev_named_sibling
     while prev:
         if prev.type == "block_comment":
@@ -63,14 +63,14 @@ def _extract_calls(node, source: bytes) -> list[str]:
     return list(calls)
 
 
-def _get_name(node, source: bytes) -> Optional[str]:
+def _get_name(node, source: bytes) -> str | None:
     name_node = node.child_by_field_name("name")
     if name_node:
         return _node_text(name_node, source)
     return None
 
 
-def _get_type_name(node, source: bytes) -> Optional[str]:
+def _get_type_name(node, source: bytes) -> str | None:
     type_node = node.child_by_field_name("type")
     if type_node:
         return _node_text(type_node, source)
@@ -103,7 +103,7 @@ def parse_java_file(path: Path, repo_root: Path) -> list[ASTNode]:
     file_imports = _extract_imports(tree, source)
     nodes: list[ASTNode] = []
 
-    def visit(node, class_name: Optional[str] = None, interface_name: Optional[str] = None):
+    def visit(node, class_name: str | None = None, interface_name: str | None = None):
         if node.type == "class_declaration":
             name = _get_name(node, source)
             if name:

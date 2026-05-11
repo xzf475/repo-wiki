@@ -2,14 +2,14 @@
 
 ## Overview
 
-This module provides synthetic, multi-language code samples designed for testing a code analysis tool that extracts symbols, call graphs, and type relationships. Each file exercises language-specific constructs: Java demonstrates generic List operations and interfaces (App, UserProfile), Python showcases decorators (require_auth) and token authentication (TokenValidator), Ruby implements a basic routing dispatch (Router), and Rust models a User struct with trait serialization (ToJson) and an enum (Status). Together, they validate the parser's ability to handle OOP, functional, and type system patterns across different languages.
+This fixture module provides minimal, cross-language sample code (Python, Ruby, Java, Rust) designed to test a multi-language static analysis tool. It models common backend patterns—token-based authentication (Python `TokenValidator` with `refresh`), HTTP routing (Ruby `Router` with `add_route`/`dispatch`), user profile management (Java `App` storing `UserProfile` objects, with `Role` enum), and a Rust `User` struct implementing `ToJson` for serialization. Each language snippet is self-contained and independent, allowing the tool to verify symbol resolution, call-graph extraction, and type inference across different syntaxes without external dependencies.
 
 ## Modules
 | File | Purpose |
 |------|---------|
+| tests/fixtures/sample_py/auth.py |  |
 | tests/fixtures/sample_rust/lib.rs |  |
 | tests/fixtures/sample_ruby/app.rb |  |
-| tests/fixtures/sample_py/auth.py |  |
 | tests/fixtures/sample_java/App.java |  |
 ## Key Symbols
 | ID | Type | Description |
@@ -41,17 +41,17 @@ This module provides synthetic, multi-language code samples designed for testing
 | `tests/fixtures/sample_rust/lib.rs::Status` | enum |  |
 | `tests/fixtures/sample_rust/lib.rs::UserResult` | type |  |
 ## Data Flows
-- Python: require_auth decorator wraps a function -> wrapper calls the original function after token validation, with TokenValidator.refresh calling sign_payload
-- Java: App.addUser adds a UserProfile to internal list -> App.getUserCount calls size() on the list to return count
-- Ruby: Router.dispatch receives a request path -> matches against stored routes -> calls the associated handler with call
-- Rust: User::new creates a User instance -> User.to_json serializes the User to a JSON string using the ToJson trait method
+- require_auth decorator → calls wrapper → calls func, illustrating decorator pattern call interception in Python
+- Router.dispatch(path) → iterates routes → calls stored lambda (call), demonstrating dynamic dispatch in Ruby
+- App.addUser(name, role) → creates UserProfile (anonymous class) → adds to ArrayList, modeling in-memory user store in Java
+- User.to_json() → formats fields (name, age, status) into JSON string, using Rust's trait implementation for serialization
 ## Design Constraints
-- Java App does not enforce uniqueness; duplicate UserProfile objects can be added to the same list.
-- Python require_auth decorator does not handle exceptions from func; wrapper will propagate any error from the original function.
-- Ruby Router.dispatch assumes stored handler responds to `call`; no type checking on route registration.
-- Rust age_difference returns an i32 difference; if ages are equal returns 0, but overflow for large i32 values is not handled.
-- Rust User.to_json serializes fields in declaration order (name, age, status); order is not guaranteed by the ToJson trait signature.
-- Python TokenValidator.refresh calls sign_payload which is not defined in this module; must be provided externally.
+- TokenValidator.refresh() assumes `sign_payload` is a callable in scope; no fallback or error handling is provided (minimal test stub).
+- Router.initialize accepts no arguments; routes are stored as a hash without thread safety—single-threaded test context only.
+- Java App.getUserCount() returns the raw size of the ArrayList; no null or duplicate checks on addUser (duplicate names allowed).
+- Rust age_difference(a, b) is a pure function that returns absolute difference; it does not handle negative ages or overflow (u8).
+- The Rust Status enum has no default or unknown variant; any serialization of an uninitialized User would panic (no TryFrom/Default).
+- Ruby parse(str) calls strip on the input but does not handle nil—calling parse(nil) would raise NoMethodError.
 ## Relationships
 - **Calls:** add, call, func, sign_payload, size, strip
 - **Called by:** indexer/ast_parser.py::parse_file, indexer/go_parser.py::parse_go_file, indexer/java_parser.py::parse_java_file, indexer/js_parser.py::parse_js_file, indexer/ruby_parser.py::parse_ruby_file, indexer/rust_parser.py::parse_rust_file

@@ -16,13 +16,13 @@ from indexer.git import (
     staged_files, all_tracked_files, current_commit, current_branch,
     changed_files_since, is_git_repo
 )
-from indexer.llm import describe_nodes, describe_files, deep_enrich_pages, deep_enrich_index, synthesize_commit_message
+from indexer.llm import deep_enrich_pages, deep_enrich_index, synthesize_commit_message
 from indexer.grouper import density_group
 from indexer.hooks import install_hook, remove_hook
 from indexer.indexing import (
     cross_reference, load_existing_nodes, parse_candidates,
-    build_batches, write_wiki_pages, write_index_and_skill,
-    update_manifest, upsert_vectors,
+    write_wiki_pages, write_index_and_skill,
+    update_manifest, upsert_vectors, prepare_descriptions,
 )
 
 CLAUDEMD_SNIPPET = """
@@ -102,8 +102,12 @@ def run(staged: bool, force: bool, skip_deep: bool):
     else:
         try:
             git_changed = changed_files_since(root, manifest.last_indexed_commit) if is_git_repo(root) else []
-        except ValueError:
-            logger.warning("Last indexed commit %s is no longer valid, falling back to full index", manifest.last_indexed_commit)
+        except (ValueError, Exception) as e:
+            from indexer.git_ops import GitOperationError
+            if isinstance(e, GitOperationError):
+                logger.warning("Git operation failed: %s, falling back to full index", e)
+            else:
+                logger.warning("Last indexed commit %s is no longer valid, falling back to full index", manifest.last_indexed_commit)
             git_changed = all_git_files
         stale = manifest.stale_files(root, tracked_files)
         candidates = list(dict.fromkeys(git_changed + stale))
@@ -157,109 +161,13 @@ def run(staged: bool, force: bool, skip_deep: bool):
     click.echo(f"    {linked} symbols linked via call graph\n")
 
     # ── Phase 3: LLM descriptions ─────────────────────────────────────────────
-    from indexer.indexing import load_cached_descriptions, save_cached_descriptions, load_cached_file_descriptions, save_cached_file_descriptions, compute_ast_sig
-    cached_descs = load_cached_descriptions(root)
-    new_nodes = []
-    for n in all_nodes:
-        entry = cached_descs.get(n.id)
-        if not entry:
-            new_nodes.append(n)
-        elif isinstance(entry, dict) and entry.get("sig"):
-            if entry["sig"] != compute_ast_sig(n):
-                new_nodes.append(n)
-
-    file_nodes: dict[str, list] = {}
-    for node in all_nodes:
-        file_nodes.setdefault(node.file, []).append(node)
-    cached_file_descs = load_cached_file_descriptions(root)
-    new_file_nodes = {}
-    file_sigs: dict[str, str] = {}
-    from indexer.manifest import compute_hash as _compute_file_hash
-    for f, nodes in file_nodes.items():
-        abs_path = root / f
-        file_sig = _compute_file_hash(abs_path) or ""
-        file_sigs[f] = file_sig
-        entry = cached_file_descs.get(f)
-        if not entry:
-            new_file_nodes[f] = nodes
-        elif isinstance(entry, dict) and entry.get("sig"):
-            if entry["sig"] != file_sig:
-                new_file_nodes[f] = nodes
-        else:
-            pass
-
-    from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
-
-    new_descriptions = {}
-    new_file_descriptions = {}
-    with ThreadPoolExecutor(max_workers=2) as _desc_pool:
-        _desc_futures = {}
-        if new_nodes:
-            new_batches = build_batches(new_nodes, cfg)
-            click.echo(f"  Describing symbols  ({len(new_batches)} LLM batch{'es' if len(new_batches) != 1 else ''}, concurrent)")
-            _desc_futures[_desc_pool.submit(describe_nodes, new_batches, cfg)] = "symbols"
-        if new_file_nodes:
-            click.echo(f"  Describing modules  ({len(new_file_nodes)} new files)  ...", nl=False)
-            _desc_futures[_desc_pool.submit(describe_files, new_file_nodes, cfg)] = "files"
-        for _fut in _as_completed(_desc_futures):
-            _label = _desc_futures[_fut]
-            try:
-                _result = _fut.result()
-            except Exception as e:
-                logger.warning("Parallel description failed for %s: %s", _label, e)
-                _result = {}
-            if _label == "symbols":
-                new_descriptions = _result
-            else:
-                new_file_descriptions = _result
-
-    if new_file_nodes:
-        click.echo(f"  {sum(1 for v in new_file_descriptions.values() if v)}/{len(new_file_nodes)} described\n")
-
-    new_sigs = {n.id: compute_ast_sig(n) for n in new_nodes}
-    all_node_ids = {n.id for n in existing_nodes} | {n.id for n in all_nodes}
-    save_cached_descriptions(root, new_descriptions, current_node_ids=all_node_ids, sigs=new_sigs)
-    all_file_set = set(manifest.files.keys()) | set(file_nodes.keys())
-    save_cached_file_descriptions(root, new_file_descriptions, current_files=all_file_set, sigs=file_sigs)
-
-    descriptions = {}
-    for n in all_nodes:
-        entry = cached_descs.get(n.id)
-        if n.id in new_descriptions:
-            descriptions[n.id] = new_descriptions[n.id]
-        elif isinstance(entry, dict):
-            descriptions[n.id] = entry.get("desc", "")
-        elif isinstance(entry, str):
-            descriptions[n.id] = entry
-        else:
-            descriptions[n.id] = ""
-    for n in existing_nodes:
-        if n.id not in descriptions:
-            entry = cached_descs.get(n.id)
-            if isinstance(entry, dict):
-                descriptions[n.id] = entry.get("desc", "")
-            elif isinstance(entry, str):
-                descriptions[n.id] = entry
-    file_descriptions = {}
-    for f in file_nodes:
-        entry = cached_file_descs.get(f)
-        if f in new_file_descriptions:
-            file_descriptions[f] = new_file_descriptions[f]
-        elif isinstance(entry, dict):
-            file_descriptions[f] = entry.get("desc", "")
-        elif isinstance(entry, str):
-            file_descriptions[f] = entry
-        else:
-            file_descriptions[f] = ""
-    for n in existing_nodes:
-        if n.file not in file_descriptions:
-            entry = cached_file_descs.get(n.file)
-            if isinstance(entry, dict):
-                file_descriptions[n.file] = entry.get("desc", "")
-            elif isinstance(entry, str):
-                file_descriptions[n.file] = entry
+    descriptions, file_descriptions = prepare_descriptions(root, all_nodes, existing_nodes, manifest, cfg)
+    new_nodes = [n for n in all_nodes if n.id in descriptions and descriptions[n.id]]
     filled = sum(1 for v in descriptions.values() if v)
     filled_files = sum(1 for v in file_descriptions.values() if v)
+    if new_nodes:
+        click.echo(f"  Describing symbols  ({len(new_nodes)} new/changed)")
+    click.echo(f"    {filled} symbols described, {filled_files} modules described\n")
 
     # ── Phase 5: Deep enrichment + wiki pages ─────────────────────────────────
     page_enrichments: dict[str, dict] = {}

@@ -31,17 +31,14 @@ class IndexEntry:
     flows: list[str] = field(default_factory=list)
 
 
-_JINJA_ENV = None
+_JINJA_ENV = Environment(
+    loader=FileSystemLoader(str(TEMPLATES_DIR)),
+    trim_blocks=True,
+    lstrip_blocks=True,
+)
 
 
 def _jinja_env() -> Environment:
-    global _JINJA_ENV
-    if _JINJA_ENV is None:
-        _JINJA_ENV = Environment(
-            loader=FileSystemLoader(str(TEMPLATES_DIR)),
-            trim_blocks=True,
-            lstrip_blocks=True,
-        )
     return _JINJA_ENV
 
 
@@ -96,16 +93,38 @@ def sanitize_group_label(group_label: str) -> str:
         s = s[:200]
     return s or "root"
 
+
+def resolve_wiki_page_path(wiki_page: str, wiki_dir: Path) -> Path | None:
+    if not wiki_page:
+        return None
+    raw_label = wiki_page.rsplit("/", 1)[-1].replace(".md", "")
+    safe_name = sanitize_group_label(raw_label)
+    page_path = wiki_dir / f"{safe_name}.md"
+    return page_path if page_path.exists() else None
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    tmp = path.with_suffix(".tmp")
+    try:
+        tmp.write_text(content)
+        tmp.replace(path)
+    except OSError:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
 def write_page(wiki_dir: Path, group_label: str, content: str) -> Path:
     safe_name = sanitize_group_label(group_label)
     page_path = wiki_dir / f"{safe_name}.md"
     page_path.parent.mkdir(parents=True, exist_ok=True)
-    page_path.write_text(content)
+    _atomic_write_text(page_path, content)
     return page_path
 
 
 def write_index(wiki_dir: Path, content: str) -> Path:
     wiki_dir.mkdir(parents=True, exist_ok=True)
     index_path = wiki_dir / "INDEX.md"
-    index_path.write_text(content)
+    _atomic_write_text(index_path, content)
     return index_path

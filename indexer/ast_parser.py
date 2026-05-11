@@ -2,7 +2,6 @@ from __future__ import annotations
 import ast, json, hashlib
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Optional
 
 from indexer.utils import _rel
 
@@ -13,7 +12,7 @@ class ASTNode:
     file: str
     line_start: int
     line_end: int
-    docstring: Optional[str]
+    docstring: str | None
     imports: list[str] = field(default_factory=list)
     calls: list[str] = field(default_factory=list)
     called_by: list[str] = field(default_factory=list)
@@ -130,7 +129,7 @@ def compute_hash_short(path: Path) -> str:
         return ""
 
 
-def load_cached_nodes(repo_root: Path, file_hash: str) -> Optional[list[ASTNode]]:
+def load_cached_nodes(repo_root: Path, file_hash: str) -> list[ASTNode] | None:
     p = repo_root / ".indexer" / "cache" / f"{file_hash}.json"
     if not p.exists():
         return None
@@ -142,6 +141,7 @@ def load_cached_nodes(repo_root: Path, file_hash: str) -> Optional[list[ASTNode]
 
 
 def save_cached_nodes(repo_root: Path, file_hash: str, nodes: list[ASTNode]) -> None:
+    from indexer.cache import _atomic_write_json
     p = repo_root / ".indexer" / "cache" / f"{file_hash}.json"
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps([asdict(n) for n in nodes]))
+    _atomic_write_json(p, [asdict(n) for n in nodes])

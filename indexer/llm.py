@@ -12,15 +12,16 @@ import time
 import logging
 from indexer.ast_parser import ASTNode
 from indexer.config import Config
+from indexer.utils import FATAL_EXCEPTIONS, resolve_api_key
 
 logger = logging.getLogger(__name__)
 
-_FATAL_EXCEPTIONS = (TypeError, AttributeError, ValueError, ImportError, NameError)
-
-_RETRY_ATTEMPTS = 3
+_RETRIES = 3
 _RETRY_BASE_DELAY = 2.0
 
 _ANTHROPIC_MODELS = {"claude", "anthropic"}
+
+_LLM_KEY_ENVS = ("ANTHROPIC_API_KEY", "DASHSCOPE_API_KEY", "GROQ_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY")
 
 
 def _is_anthropic(cfg: Config) -> bool:
@@ -28,16 +29,7 @@ def _is_anthropic(cfg: Config) -> bool:
 
 
 def _resolve_api_key(cfg: Config) -> str | None:
-    value = cfg.api_key_env
-    if not value:
-        for env_var in ("ANTHROPIC_API_KEY", "DASHSCOPE_API_KEY", "GROQ_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"):
-            key = os.environ.get(env_var)
-            if key:
-                return key
-        return None
-    if " " not in value and not value.isupper() and not value.replace("_", "").isupper():
-        return value
-    return os.environ.get(value)
+    return resolve_api_key(cfg.api_key_env, list(_LLM_KEY_ENVS))
 
 
 def _litellm_kwargs(cfg: Config, api_key: str | None) -> dict:
@@ -57,7 +49,7 @@ def _litellm_completion(cfg: Config, api_key: str | None, messages: list[dict], 
         logger.warning("LLM call skipped: no API key configured (provider=%s, api_key_env=%s)", cfg.provider, cfg.api_key_env)
         return ""
 
-    for attempt in range(_RETRY_ATTEMPTS):
+    for attempt in range(_RETRIES):
         try:
             response = litellm.completion(
                 **_litellm_kwargs(cfg, api_key),
@@ -70,8 +62,8 @@ def _litellm_completion(cfg: Config, api_key: str | None, messages: list[dict], 
             return content if content is not None else ""
         except Exception as e:
             is_rate_limit = isinstance(e, litellm.RateLimitError)
-            is_fatal = isinstance(e, _FATAL_EXCEPTIONS)
-            last_attempt = attempt >= _RETRY_ATTEMPTS - 1
+            is_fatal = isinstance(e, FATAL_EXCEPTIONS)
+            last_attempt = attempt >= _RETRIES - 1
             if last_attempt or is_fatal:
                 raise
 
@@ -79,7 +71,7 @@ def _litellm_completion(cfg: Config, api_key: str | None, messages: list[dict], 
                 delay = 5.0 * (2 ** attempt) + random.uniform(0, 2)
             else:
                 delay = _RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
-            logger.warning("litellm call failed (attempt %d/%d), retrying in %.1fs: %s", attempt + 1, _RETRY_ATTEMPTS, delay, e)
+            logger.warning("litellm call failed (attempt %d/%d), retrying in %.1fs: %s", attempt + 1, _RETRIES, delay, e)
             time.sleep(delay)
 
 
@@ -102,7 +94,7 @@ def _anthropic_completion(model: str, system: str, user: str, api_key: str, max_
     bare_model = model.removeprefix("anthropic/")
     client = _get_anthropic_client(api_key)
 
-    for attempt in range(_RETRY_ATTEMPTS):
+    for attempt in range(_RETRIES):
         try:
             response = client.messages.create(
                 model=bare_model,
@@ -117,17 +109,17 @@ def _anthropic_completion(model: str, system: str, user: str, api_key: str, max_
                 raise _EmptyResponseError("No text block in Anthropic response")
             return text_blocks[0].text
         except anthropic.RateLimitError as e:
-            if attempt >= _RETRY_ATTEMPTS - 1:
+            if attempt >= _RETRIES - 1:
                 raise
             delay = 5.0 * (2 ** attempt) + random.uniform(0, 2)
-            logger.warning("Anthropic API rate limited (attempt %d/%d), retrying in %.1fs: %s", attempt + 1, _RETRY_ATTEMPTS, delay, e)
+            logger.warning("Anthropic API rate limited (attempt %d/%d), retrying in %.1fs: %s", attempt + 1, _RETRIES, delay, e)
             time.sleep(delay)
         except Exception as e:
-            is_fatal = isinstance(e, _FATAL_EXCEPTIONS)
-            if attempt >= _RETRY_ATTEMPTS - 1 or is_fatal:
+            is_fatal = isinstance(e, FATAL_EXCEPTIONS)
+            if attempt >= _RETRIES - 1 or is_fatal:
                 raise
             delay = _RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
-            logger.warning("Anthropic API call failed (attempt %d/%d), retrying in %.1fs: %s", attempt + 1, _RETRY_ATTEMPTS, delay, e)
+            logger.warning("Anthropic API call failed (attempt %d/%d), retrying in %.1fs: %s", attempt + 1, _RETRIES, delay, e)
             time.sleep(delay)
 
 
@@ -214,7 +206,7 @@ def describe_nodes_batch(nodes: list[ASTNode], cfg: Config) -> dict[str, str]:
             result = converted
         return {n.id: result.get(n.id, "") for n in nodes}
     except Exception as e:
-        if isinstance(e, _FATAL_EXCEPTIONS):
+        if isinstance(e, FATAL_EXCEPTIONS):
             raise
         logger.warning("LLM description failed for batch of %d symbols: %s", len(nodes), e)
         return {n.id: "" for n in nodes}
@@ -232,7 +224,7 @@ def describe_nodes(batches: list[list[ASTNode]], cfg: Config, max_workers: int =
                 result = future.result()
                 descriptions.update(result)
             except Exception as e:
-                if isinstance(e, _FATAL_EXCEPTIONS):
+                if isinstance(e, FATAL_EXCEPTIONS):
                     raise
                 logger.warning("Batch description failed: %s", e)
                 for n in batch:
@@ -257,7 +249,7 @@ def describe_files(file_nodes: dict[str, list[ASTNode]], cfg: Config, max_worker
                 result = future.result()
                 all_results.update(result)
             except Exception as e:
-                if isinstance(e, _FATAL_EXCEPTIONS):
+                if isinstance(e, FATAL_EXCEPTIONS):
                     raise
                 logger.warning("File description chunk failed: %s", e)
                 for f in chunk_keys:
@@ -309,7 +301,7 @@ def _describe_files_chunk(file_nodes: dict[str, list[ASTNode]], cfg: Config) -> 
             result = {item.get("file", item.get("id", "")): item.get("description", item.get("desc", "")) for item in result if isinstance(item, dict)}
         return {f: result.get(f, "") for f in file_nodes}
     except Exception as e:
-        if isinstance(e, _FATAL_EXCEPTIONS):
+        if isinstance(e, FATAL_EXCEPTIONS):
             raise
         logger.warning("LLM file description failed: %s", e)
         return {f: "" for f in file_nodes}
@@ -376,7 +368,7 @@ def deep_enrich_page(
             "constraints": result.get("constraints", []) if isinstance(result.get("constraints"), list) else [],
         }
     except Exception as e:
-        if isinstance(e, _FATAL_EXCEPTIONS):
+        if isinstance(e, FATAL_EXCEPTIONS):
             raise
         logger.warning("LLM deep enrichment failed: %s", e)
         return empty
@@ -396,7 +388,7 @@ def deep_enrich_pages(pages_args: list[tuple], cfg: Config, max_workers: int = 3
             try:
                 page_enrichments[group_label] = future.result()
             except Exception as e:
-                if isinstance(e, _FATAL_EXCEPTIONS):
+                if isinstance(e, FATAL_EXCEPTIONS):
                     raise
                 logger.warning("Deep enrich failed for %s: %s", group_label, e)
                 page_enrichments[group_label] = {"narrative": "", "data_flows": [], "constraints": []}
@@ -451,7 +443,7 @@ def deep_enrich_index(
             "flows": result.get("flows", []) if isinstance(result.get("flows"), list) else [],
         }
     except Exception as e:
-        if isinstance(e, _FATAL_EXCEPTIONS):
+        if isinstance(e, FATAL_EXCEPTIONS):
             raise
         logger.warning("LLM index enrichment failed: %s", e)
         return empty
@@ -491,7 +483,7 @@ def rewrite_query(query: str, cfg: Config) -> list[str]:
             return list(dict.fromkeys([query] + result))
         return [query]
     except Exception as e:
-        if isinstance(e, _FATAL_EXCEPTIONS):
+        if isinstance(e, FATAL_EXCEPTIONS):
             raise
         logger.warning("Query rewrite failed: %s", e)
         return [query]
@@ -521,7 +513,7 @@ def synthesize_commit_message(changed_files: list[str], descriptions: dict[str, 
             text = text[1:-1]
         return text[:72]
     except Exception as e:
-        if isinstance(e, _FATAL_EXCEPTIONS):
+        if isinstance(e, FATAL_EXCEPTIONS):
             raise
         logger.warning("LLM commit message synthesis failed: %s", e)
         return ""

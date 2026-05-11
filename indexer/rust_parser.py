@@ -1,6 +1,6 @@
 from __future__ import annotations
 from pathlib import Path
-from typing import Optional
+
 from indexer.ast_parser import ASTNode
 from indexer.utils import _rel, _node_text
 
@@ -11,7 +11,7 @@ def _get_rust_language():
     return Language(tsr.language())
 
 
-def _extract_rust_doc(node, source: bytes) -> Optional[str]:
+def _extract_rust_doc(node, source: bytes) -> str | None:
     prev = node.prev_named_sibling
     while prev:
         if prev.type == "line_comment":
@@ -70,7 +70,7 @@ def _extract_calls(node, source: bytes) -> list[str]:
     return list(calls)
 
 
-def _get_name(node, source: bytes) -> Optional[str]:
+def _get_name(node, source: bytes) -> str | None:
     name_node = node.child_by_field_name("name")
     if name_node:
         return _node_text(name_node, source)

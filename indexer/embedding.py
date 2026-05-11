@@ -7,7 +7,7 @@ import threading
 from pathlib import Path
 from indexer.ast_parser import ASTNode
 from indexer.config import EmbeddingConfig
-from indexer.utils import load_env_file
+from indexer.utils import load_env_file, resolve_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -31,16 +31,7 @@ _EMBEDDING_KEY_ENVS = ["DASHSCOPE_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"]
 
 def _resolve_api_key(cfg: EmbeddingConfig) -> str | None:
     load_env_file()
-    value = cfg.api_key_env
-    if not value:
-        for env_name in _EMBEDDING_KEY_ENVS:
-            v = os.environ.get(env_name)
-            if v:
-                return v
-        return None
-    if " " not in value and not value.isupper() and not value.replace("_", "").isupper():
-        return value
-    return os.environ.get(value)
+    return resolve_api_key(cfg.api_key_env, _EMBEDDING_KEY_ENVS)
 
 
 def build_embedding_text(node: ASTNode, description: str = "") -> str:
@@ -124,6 +115,7 @@ def _call_embedding_api(
     api_key: str,
 ) -> list[list[float]]:
     import random as _random
+    import time as _time
     from openai import RateLimitError, APIConnectionError, APITimeoutError
 
     client = _get_openai_client(api_key, cfg.base_url)
@@ -148,6 +140,5 @@ def _call_embedding_api(
                 raise
             delay = 2.0 * (2 ** attempt) + _random.uniform(0, 1)
             logger.warning("Embedding API retryable error (attempt %d): %s, retrying in %.1fs", attempt + 1, e, delay)
-            import time as _time
             _time.sleep(delay)
 

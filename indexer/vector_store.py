@@ -9,11 +9,15 @@ logger = logging.getLogger(__name__)
 
 _client_cache: dict[str, object] = {}
 _client_lock = threading.Lock()
+_MAX_CLIENTS = 50
 
 
 def _get_client(persist_dir: str):
     with _client_lock:
         if persist_dir not in _client_cache:
+            if len(_client_cache) >= _MAX_CLIENTS:
+                oldest_key = next(iter(_client_cache))
+                del _client_cache[oldest_key]
             import chromadb
             _client_cache[persist_dir] = chromadb.PersistentClient(path=persist_dir)
         return _client_cache[persist_dir]
@@ -217,7 +221,7 @@ def _truncate_list(obj: list, max_json_len: int = 4000) -> str:
     if len(s) <= max_json_len:
         return s
     while len(obj) > 1:
-        obj = obj[:len(obj) // 2]
+        obj = obj[:-1]
         s = json_dumps_compact(obj)
         if len(s) <= max_json_len:
             return s

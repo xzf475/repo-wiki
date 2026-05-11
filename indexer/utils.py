@@ -4,6 +4,21 @@ import threading
 from pathlib import Path
 
 
+FATAL_EXCEPTIONS = (TypeError, AttributeError, ValueError, ImportError, NameError)
+
+
+def resolve_api_key(api_key_env: str, env_names: list[str]) -> str | None:
+    if not api_key_env:
+        for env_name in env_names:
+            key = os.environ.get(env_name)
+            if key:
+                return key
+        return None
+    if " " not in api_key_env and not api_key_env.isupper() and not api_key_env.replace("_", "").isupper():
+        return api_key_env
+    return os.environ.get(api_key_env)
+
+
 def _rel(path: Path, repo_root: Path) -> str:
     try:
         return str(path.relative_to(repo_root))
