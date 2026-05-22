@@ -22,6 +22,7 @@ def git_fetch_checkout_pull(
     branch: str = "",
     *,
     sanitize_fn=None,
+    destructive: bool = False,
 ) -> None:
     git_env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
     git_cfg = ["-c", "http.followRedirects=true"]
@@ -30,20 +31,7 @@ def git_fetch_checkout_pull(
         msg = sanitize_fn(stderr) if sanitize_fn else stderr
         raise GitOperationError(step, msg)
 
-    r = subprocess.run(
-        ["git"] + git_cfg + ["fetch", "--all"],
-        cwd=cwd, capture_output=True, text=True, timeout=60, env=git_env,
-    )
-    if r.returncode != 0:
-        _err("fetch", r.stderr.strip())
-
-    if branch:
-        r = subprocess.run(
-            ["git"] + git_cfg + ["checkout", branch],
-            cwd=cwd, capture_output=True, text=True, timeout=30, env=git_env,
-        )
-        if r.returncode != 0:
-            _err("checkout", r.stderr.strip())
+    def _cleanup_worktree() -> None:
         r = subprocess.run(
             ["git"] + git_cfg + ["reset", "--hard"],
             cwd=cwd, capture_output=True, text=True, timeout=30, env=git_env,
@@ -54,6 +42,26 @@ def git_fetch_checkout_pull(
             ["git"] + git_cfg + ["clean", "-fd"],
             cwd=cwd, capture_output=True, text=True, timeout=30, env=git_env,
         )
+
+    r = subprocess.run(
+        ["git"] + git_cfg + ["fetch", "--all"],
+        cwd=cwd, capture_output=True, text=True, timeout=60, env=git_env,
+    )
+    if r.returncode != 0:
+        _err("fetch", r.stderr.strip())
+
+    if destructive:
+        _cleanup_worktree()
+
+    if branch:
+        r = subprocess.run(
+            ["git"] + git_cfg + ["checkout", branch],
+            cwd=cwd, capture_output=True, text=True, timeout=30, env=git_env,
+        )
+        if r.returncode != 0:
+            _err("checkout", r.stderr.strip())
+        if destructive:
+            _cleanup_worktree()
 
     r = subprocess.run(
         ["git"] + git_cfg + ["pull", "--rebase"],

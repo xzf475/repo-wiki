@@ -44,6 +44,29 @@ def test_calls_extracted():
     method = next(n for n in nodes if "TokenValidator.refresh" in n.id)
     assert "sign_payload" in method.calls
 
+
+def test_python_fastapi_route_entry_point(tmp_path):
+    from indexer.ast_parser import parse_file
+
+    src = tmp_path / "api.py"
+    src.write_text("from fastapi import FastAPI\napp = FastAPI()\n\n@app.post('/login')\ndef login():\n    return {}\n")
+
+    node = next(n for n in parse_file(src, tmp_path) if n.id.endswith("::login"))
+
+    assert node.entry_point_kind == "api"
+    assert node.entry_point_path == "/login"
+
+
+def test_python_click_command_entry_point(tmp_path):
+    from indexer.ast_parser import parse_file
+
+    src = tmp_path / "cli.py"
+    src.write_text("import click\n\n@click.command()\ndef sync():\n    pass\n")
+
+    node = next(n for n in parse_file(src, tmp_path) if n.id.endswith("::sync"))
+
+    assert node.entry_point_kind == "cli"
+
 def test_cache_roundtrip():
     with tempfile.TemporaryDirectory() as d:
         root = Path(d)

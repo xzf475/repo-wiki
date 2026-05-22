@@ -13,13 +13,13 @@ description: >
 
 # repo-wiki Code Analysis
 
-This skill uses the repo-wiki MCP server to provide semantic code understanding across registered repositories. It offers four tools that work together as a diagnostic pipeline.
+This skill uses the repo-wiki MCP server to provide semantic code understanding across registered repositories. It offers Agent-focused tools that work together as a diagnostic and edit-preparation pipeline.
 
 ## Tool Pipeline
 
 ```
-list_repos → search_symbols_tool → trace_call_tool → get_source_context_tool
-   (发现)        (定位符号)            (追踪关系)          (阅读源码)
+list_repos → locate_from_error_tool/search_symbols_tool → resolve_symbol_tool → impact_analysis_tool → change_plan_tool
+   (发现)        (错误/语义召回)                     (消歧定位)             (影响面)              (修改计划)
 ```
 
 ### When to use each tool
@@ -28,8 +28,25 @@ list_repos → search_symbols_tool → trace_call_tool → get_source_context_to
 |-------|------|------|
 | 1. Scouting | `list_repos` | First thing — discover which repos exist |
 | 2. Locating | `search_symbols_tool` | User asks about a feature, bug, error, or module |
-| 3. Tracing | `trace_call_tool` | After finding a symbol — understand callers/callees |
-| 4. Reading | `get_source_context_tool` | After finding a symbol or trace — read actual code |
+| 3. Resolving | `resolve_symbol_tool` | Convert query + hints to a concrete `component_id`; handle ambiguity before reading/editing |
+| 4. Tracing | `trace_call_tool` | After finding a symbol — understand callers/callees |
+| 5. Reading | `get_source_context_tool` | After finding a symbol or trace — read actual code |
+| 6. Edit prep | `get_edit_context_tool` | Before modifying code — gather source, relationships, sibling symbols, tests, and freshness |
+| 7. Pre-edit check | `pre_edit_check_tool` | Before modifying code — check index freshness, dirty files, impact, and recommended tests |
+| 8. Verification | `find_tests_for_symbol_tool` | Before/after edits — identify likely tests |
+| 9. Freshness | `get_index_status_tool` | When results seem stale or before high-risk edits |
+| 10. Impact | `impact_analysis_tool` | Before edits — understand direct/transitive callers, callees, entry points, tests, and risk |
+| 11. Planning | `change_plan_tool` | Before edits — produce files to read, edit targets, verification commands, and risks |
+| 12. Diagnosis | `diagnose_index_tool` | When search results look wrong or index artifacts may be broken |
+| 13. Agent protocol | `agent_protocol_tool` | When another Agent needs a compact handoff payload |
+| 14. Error location | `locate_from_error_tool` | Start here when the user provides stack traces, logs, HTTP paths, or exception text |
+| 15. Entry points | `list_entry_points_tool` | Find API routes, CLI commands, event handlers, jobs, and webhooks |
+| 16. Post-edit verify | `post_edit_verify_tool` | After edits, before commit/push — map diff to symbols, tests, commands, risks |
+| 17. Change set | `change_set_tool` | Before or after edits — find files/symbols/tests that must move together |
+| 18. Coverage | `coverage_map_tool` | Check whether a source symbol has likely test coverage |
+| 19. Index diff | `index_diff_report_tool` | Compare index snapshots after reindexing |
+| 20. Cross repo | `cross_repo_graph_tool` | Find frontend/backend/SDK/service dependency edges |
+| 21. Capabilities | `agent_capabilities_manifest_tool` | Discover available tools and recommended flow |
 
 ## Tool Reference
 
@@ -124,21 +141,50 @@ First find it: search_symbols_tool(query="JWT token validation")
 Then read it:  get_source_context_tool(file_path="server/auth/token_validator.go", repo="bug_agent", line_start=42, line_end=68)
 ```
 
+### 5. Agent edit-preparation tools
+
+Use these after `resolve_symbol_tool` returns a concrete `component_id`.
+
+| Tool | Use |
+|------|-----|
+| `impact_analysis_tool` | Find callers, callees, entry points, candidate tests, affected files, risks, and freshness |
+| `change_plan_tool` | Turn a goal and symbol into `read_these_files`, `edit_targets`, `verify_commands`, and ordered steps |
+| `diagnose_index_tool` | Check manifest/wiki/vector/source/freshness health when results are empty or suspicious |
+| `agent_protocol_tool` | Produce compact Codex/Claude-style handoff fields |
+| `locate_from_error_tool` | Turn stack traces, logs, and HTTP paths into ranked code candidates |
+| `list_entry_points_tool` | List indexed API/CLI/event/job/webhook entry points |
+| `post_edit_verify_tool` | Use after edits; local mode reads `git diff`, remote mode should pass `diff` explicitly |
+| `change_set_tool` | Expand a goal/symbol/diff into must-change files, related symbols, tests, and commands |
+| `coverage_map_tool` | Return likely tests for a source symbol and whether it appears covered |
+| `index_diff_report_tool` | Report added/removed/changed symbols, entry point changes, and call graph changes |
+| `cross_repo_graph_tool` | Build cross-repo HTTP path dependency edges |
+| `stable_symbol_id_tool` | Generate stable IDs for rename/move tracking |
+| `agent_capabilities_manifest_tool` | Return local/remote capability manifest |
+
 ## Common Workflows
 
 ### Workflow A: Bug Analysis
 ```
-1. search_symbols_tool(query="<error message or bug description>")
-   → Find suspicious symbols
+1. locate_from_error_tool(error_text="<stack trace, log, HTTP path, or exception>")
+   → Find ranked code candidates from concrete runtime evidence
 
-2. trace_call_tool(symbol_id="<found symbol>", direction="up")
+2. resolve_symbol_tool(query="<best candidate or user wording>")
+   → Resolve to a concrete component ID
+
+3. impact_analysis_tool(symbol_id="<resolved symbol>")
    → Find where the buggy code is called from (root cause)
 
-3. get_source_context_tool(file_path="<file>", line_start=<line>, line_end=<line>)
+4. get_source_context_tool(file_path="<file>", line_start=<line>, line_end=<line>)
    → Read actual code
 
-4. trace_call_tool(symbol_id="<root cause>", direction="down")
-   → Understand impact scope
+5. change_plan_tool(goal="<fix goal>", symbol_id="<resolved symbol>")
+   → Get read targets, edit target, verification commands, and risks
+
+6. post_edit_verify_tool()
+   → Before commit/push, verify changed symbols, tests, commands, risks, and reindex need
+
+7. change_set_tool(goal="<fix goal>", diff="<optional diff>")
+   → Confirm no related file/symbol/test is missing before commit
 ```
 
 ### Workflow B: Feature Understanding

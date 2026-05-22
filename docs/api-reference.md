@@ -304,6 +304,283 @@ curl -X POST http://localhost:8765/source \
 
 ---
 
+### POST /edit-context
+
+Return an edit-ready context bundle for a symbol. This is the preferred endpoint before an Agent modifies code.
+
+**Request Body:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `symbol_id` | string | Yes | Component ID to edit |
+| `repo` | string | Required when multiple repos are registered | Repository name |
+| `padding` | int | No | Source padding lines. Default: `8`, max `50` |
+
+**Response (200):**
+
+```json
+{
+  "repo": "backend",
+  "symbol": {"id": "auth/token.py::TokenValidator.validate"},
+  "source": "  45 | def validate(...):",
+  "callers": [],
+  "callees": [],
+  "siblings": [],
+  "candidate_tests": [],
+  "index_status": {
+    "is_stale": false,
+    "indexed_commit": "abc123",
+    "current_commit": "abc123"
+  }
+}
+```
+
+---
+
+### POST /resolve-symbol
+
+Resolve a query, symbol name, and optional hints into a concrete `component_id`.
+
+**Request Body:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `query` | string | Yes | Natural language query or symbol name |
+| `repo` | string | Required when multiple repos are registered | Repository name |
+| `file_hint` | string | No | File/path fragment to bias ranking |
+| `type_hint` | string | No | Symbol type, such as `function`, `method`, or `class` |
+| `top_k` | int | No | Candidate count. Default: `10`, max `50` |
+
+Response `status` is `resolved`, `ambiguous`, or `not_found`.
+
+---
+
+### POST /tests-for-symbol
+
+Find likely test files for a symbol using indexed files, naming conventions, imports, and symbol-name matches.
+
+**Request Body:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `symbol_id` | string | Yes | Component ID |
+| `repo` | string | No | Limit search to a specific repo |
+| `max_results` | int | No | Maximum matches. Default: `10`, max `50` |
+
+---
+
+### POST /pre-edit-check
+
+Run pre-edit checks for a symbol before an Agent modifies code.
+
+**Request Body:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `symbol_id` | string | Yes | Component ID |
+| `repo` | string | Required when multiple repos are registered | Repository name |
+
+The response includes index freshness, dirty files, candidate tests, recommended test commands, callers, and callees.
+
+---
+
+### POST /impact-analysis
+
+Analyze the likely impact of changing a symbol.
+
+**Request Body:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `symbol_id` | string | Yes | Component ID |
+| `repo` | string | Required when multiple repos are registered | Repository name |
+| `max_depth` | int | No | Transitive call depth. Default: `2`, max `5` |
+
+The response includes direct/indirect callers and callees, likely entry points, candidate tests, affected files, risk points, and index freshness.
+
+---
+
+### POST /change-plan
+
+Generate an Agent-ready edit plan for a goal and target symbol.
+
+**Request Body:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `goal` | string | Yes | What the Agent needs to change |
+| `symbol_id` | string | Yes | Target component ID |
+| `repo` | string | Required when multiple repos are registered | Repository name |
+
+The response includes files to read, edit targets, verification commands, candidate tests, risk points, and ordered steps.
+
+---
+
+### POST /diagnose-index
+
+Diagnose whether an index is structurally usable.
+
+**Request Body:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `repo` | string | No | Limit diagnosis to a specific repo |
+
+The response checks manifest presence, wiki index, skill file, vector DB, missing source files, missing wiki pages, freshness, and consistency ratios. `summary` includes manifest file count, missing source/wiki counts, stale/removed file counts, and artifact presence.
+
+---
+
+### POST /agent-protocol
+
+Return compact fields optimized for Codex/Claude-style Agents.
+
+**Request Body:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `goal` | string | Yes | What the Agent needs to change |
+| `symbol_id` | string | Yes | Target component ID |
+| `repo` | string | Required when multiple repos are registered | Repository name |
+| `protocol` | string | No | Output protocol label, such as `codex` or `claude` |
+
+The response includes `read_these_files`, `edit_targets`, `verify_commands`, `warnings`, and `index_freshness` in a compact schema.
+
+---
+
+### POST /locate-from-error
+
+Locate likely code symbols from stack traces, error logs, HTTP paths, or exception text.
+
+**Request Body:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `error_text` | string | Yes | Stack trace, log line, HTTP error, or exception text |
+| `repo` | string | No | Limit lookup to a specific repo |
+| `top_k` | int | No | Candidate count. Default: `10`, max `50` |
+
+The response includes parsed stack frames, HTTP paths, extracted terms, ranked candidates, match reasons, and index freshness.
+
+---
+
+### POST /entry-points
+
+List first-class entry points discovered in indexed metadata.
+
+**Request Body:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `repo` | string | No | Limit lookup to a specific repo |
+| `kind` | string | No | Optional kind filter: `api`, `cli`, `event`, `job`, or `webhook` |
+| `max_results` | int | No | Maximum results. Default: `50`, max `200` |
+
+The response includes entry point component IDs, kind, file, line range, document text, and index freshness.
+
+---
+
+### POST /post-edit-verify
+
+Generate pre-commit verification guidance from edited files.
+
+Local MCP mode reads `git diff` automatically when `diff` is omitted. Remote API/MCP mode should pass the local diff payload, because the remote server cannot see uncommitted local edits.
+
+**Request Body:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `repo` | string | Required when multiple repos are registered | Repository name |
+| `diff` | string | No | Local `git diff` text. Required for remote callers that need local uncommitted changes analyzed |
+| `changed_files` | string[] | No | Optional changed file list when diff is unavailable |
+
+The response includes changed files, changed symbols, candidate tests, recommended verification commands, risk points, index freshness, whether reindexing is needed, and a checklist.
+
+Diff payloads are capped by `REPO_WIKI_MAX_DIFF_BYTES` (default 2 MiB). Oversized diffs return HTTP 413.
+
+---
+
+### POST /change-set
+
+Build the must-change set for an Agent task.
+
+Remote callers should pass `diff` when the change is still local and uncommitted.
+
+**Request Body:** `repo`, `goal`, optional `symbol_id`, optional `diff`, optional `changed_files`, optional `max_results`, optional `include_details`.
+
+Returns target symbols, files that should be considered together, related symbols, candidate tests, verification commands, risks, and freshness.
+
+Large responses are capped by `max_results`. Set `include_details=false` for summary-first Agent handoffs.
+
+---
+
+### POST /coverage-map
+
+Map source symbols to likely covering tests.
+
+**Request Body:** `repo`, optional `symbol_id`.
+
+When `symbol_id` is provided, returns whether that symbol appears covered and the likely tests. Without `symbol_id`, returns a repo-wide symbol coverage map.
+
+---
+
+### POST /index-diff-report
+
+Compare two index snapshots.
+
+**Request Body:** `repo`, `before_nodes`, `after_nodes`.
+
+Returns added/removed/changed symbols, rename/move matches via stable IDs, entry point changes, and call graph edge changes.
+
+---
+
+### POST /cross-repo-graph
+
+Build a cross-repo dependency graph across registered repos.
+
+**Request Body:** optional `repos` list.
+
+Returns edges such as frontend API client symbols pointing to backend route symbols through shared HTTP paths. GraphQL operation names are also linked when the same operation appears in client and server symbols.
+
+---
+
+### POST /stable-symbol-id
+
+Generate a deterministic stable symbol ID.
+
+**Request Body:** `symbol_id`, optional `symbol_type`, optional `file_path`, optional `source`.
+
+The stable ID is also stored in vector metadata for newly indexed symbols. `index-diff-report` uses stable IDs to report rename/move events instead of treating them only as delete+add.
+
+---
+
+### GET /agent-capabilities
+
+Return the Agent-facing tool manifest and recommended local/remote flow. Each tool entry includes modes, JSON input schema, output schema, example input, and recommended next tools. The response also embeds `json_schema` for validating the manifest itself.
+
+---
+
+### GET /agent-schema
+
+Return an OpenAPI 3.1 document for Agent-facing endpoints.
+
+The schema includes request examples and response schemas for `/search`, `/resolve-symbol`, `/impact-analysis`, `/change-plan`, `/post-edit-verify`, `/change-set`, `/coverage-map`, `/index-diff-report`, `/cross-repo-graph`, and `/agent-capabilities`.
+
+---
+
+### POST /index-status
+
+Report whether registered indexes are stale relative to the current workspace.
+
+**Request Body:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `repo` | string | No | Limit status to a specific repo |
+
+The response includes `is_stale`, `reasons`, indexed/current commits, stale files, removed files, and counts.
+
+---
+
 ### GET /repos
 
 List all registered repos and their status.

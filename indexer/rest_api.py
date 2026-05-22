@@ -30,7 +30,31 @@ from indexer.config import Config, load_config, save_config
 from indexer.manifest import Manifest
 from indexer.embedding import embed_query
 from indexer.vector_store import search, get_by_ids
-from indexer.retrieval import trace_call as _trace_call_retrieval, _expand_with_call_graph as _expand_retrieval, _parse_json_list, truncate_documents
+from indexer.retrieval import (
+    trace_call as _trace_call_retrieval,
+    _expand_with_call_graph as _expand_retrieval,
+    _parse_json_list,
+    _annotate_match_reasons,
+    truncate_documents,
+    get_edit_context as _get_edit_context_impl,
+    find_tests_for_symbol as _find_tests_for_symbol_impl,
+    get_index_status as _get_index_status_impl,
+    resolve_symbol as _resolve_symbol_impl,
+    pre_edit_check as _pre_edit_check_impl,
+    impact_analysis as _impact_analysis_impl,
+    change_plan as _change_plan_impl,
+    diagnose_index as _diagnose_index_impl,
+    agent_protocol_bundle as _agent_protocol_bundle_impl,
+    locate_from_error as _locate_from_error_impl,
+    list_entry_points as _list_entry_points_impl,
+    post_edit_verify as _post_edit_verify_impl,
+    change_set as _change_set_impl,
+    coverage_map as _coverage_map_impl,
+    index_diff_report as _index_diff_report_impl,
+    cross_repo_graph as _cross_repo_graph_impl,
+    agent_capabilities_manifest as _agent_capabilities_manifest_impl,
+    stable_symbol_id as _stable_symbol_id_impl,
+)
 from indexer.indexing import (
     cross_reference, load_existing_nodes, parse_candidates,
     build_batches, write_wiki_pages, write_index_and_skill,
@@ -44,12 +68,14 @@ from indexer.git_ops import (
     _inject_credentials, _store_credentials, _sanitize_error,
     git_fetch_checkout_pull, GitOperationError,
 )
+from indexer.agent_contracts import agent_schema as _agent_schema_impl
 
 from indexer.utils import FATAL_EXCEPTIONS
 
 tasks = TaskStore()
 registry = RepoRegistry()
 registry._load()
+MAX_DIFF_BYTES = int(os.environ.get("REPO_WIKI_MAX_DIFF_BYTES", str(2 * 1024 * 1024)))
 
 
 async def register_repo(request: Request) -> JSONResponse:
@@ -361,11 +387,9 @@ async def reindex_repo(request: Request) -> JSONResponse:
     branch_rule = body.get("branch_rule")
     skip_deep = body.get("skip_deep", True)
 
-    if description is None and tags is None and branch_rule is None:
-        return JSONResponse({"error": "no fields to update (send description, tags, and/or branch_rule)"}, status_code=400)
-
     # 1. Update meta
-    registry.update_meta(repo_name, description=description, tags=tags, branch_rule=branch_rule)
+    if description is not None or tags is not None or branch_rule is not None:
+        registry.update_meta(repo_name, description=description, tags=tags, branch_rule=branch_rule)
 
     # 2. Re-discover branches if branch_rule changed
     url = info.get("url", "")
@@ -384,19 +408,18 @@ async def reindex_repo(request: Request) -> JSONResponse:
 
     task_id = tasks.create(repo_name, url)
 
-    def _run_all():
-        lock = _get_repo_lock(repo_name)
-        if not lock.acquire(blocking=False):
-            tasks.update(task_id, status="failed", progress=0, step="locked", error="Another operation is running on this repo")
-            return
-        try:
-            for br in branches_to_rebuild:
-                _run_rebuild_task_inner(task_id, repo_name, updated_info["root"], skip_deep, branch=br, repo_url=url, repo_branches=branches_to_rebuild)
-        finally:
-            lock.release()
-
     loop = asyncio.get_running_loop()
-    loop.run_in_executor(None, _run_all)
+    loop.run_in_executor(
+        None,
+        lambda: _run_all_branches(
+            repo_name,
+            branches_to_rebuild,
+            task_id,
+            _run_rebuild_task,
+            root=updated_info["root"],
+            skip_deep=skip_deep,
+        ),
+    )
 
     return JSONResponse({
         "task_id": task_id,
@@ -566,7 +589,7 @@ def _run_rebuild_task_inner(task_id: str, name: str, root: Path, skip_deep: bool
 
         if repo_branch and is_git_repo(root):
             try:
-                git_fetch_checkout_pull(root, repo_branch)
+                git_fetch_checkout_pull(root, repo_branch, destructive=True)
             except GitOperationError as e:
                 tasks.update(task_id, status="failed", progress=15, step=f"git_{e.step}", error=e.stderr)
                 return
@@ -993,6 +1016,7 @@ async def search_symbols(request: Request) -> JSONResponse:
     except (ValueError, TypeError):
         return JSONResponse({"error": "top_k and expand_depth must be integers"}, status_code=400)
     rewrite = body.get("rewrite", True)
+    explain = body.get("explain", False)
 
     if not query:
         return JSONResponse({"error": "query is required"}, status_code=400)
@@ -1035,6 +1059,8 @@ async def search_symbols(request: Request) -> JSONResponse:
                 where_clause = None
             for qv in all_query_vectors:
                 hits = search(qv, cfg.vector_store, root, top_k=top_k * 2, where=where_clause)
+                if explain:
+                    _annotate_match_reasons(hits, query)
                 for h in hits:
                     h["repo"] = name
                     if h["id"] not in seen_ids:
@@ -1068,6 +1094,10 @@ async def search_symbols(request: Request) -> JSONResponse:
         "results": all_hits,
         "total": len(all_hits),
         "rewritten_queries": queries if len(queries) > 1 else None,
+        "index_status": [
+            {**_get_index_status_impl(info["root"]), "repo": name}
+            for name, info in targets
+        ],
     })
 
 
@@ -1148,6 +1178,416 @@ async def get_source_context(request: Request) -> JSONResponse:
         "source": "\n".join(numbered),
         "total_lines": len(lines),
     })
+
+
+async def get_edit_context(request: Request) -> JSONResponse:
+    body = await _parse_body(request)
+    symbol_id = body.get("symbol_id", "")
+    repo = body.get("repo")
+    try:
+        padding = max(0, min(int(body.get("padding", 8)), 50))
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "padding must be an integer"}, status_code=400)
+
+    if not symbol_id:
+        return JSONResponse({"error": "symbol_id is required"}, status_code=400)
+
+    targets = _resolve_repos(repo)
+    if not targets:
+        return JSONResponse({"error": f"repo '{repo}' not registered"}, status_code=404)
+    if repo is None and len(targets) != 1:
+        return JSONResponse({"error": "repo is required when multiple repos are registered"}, status_code=400)
+
+    name, info = targets[0]
+    context = _get_edit_context_impl(symbol_id, info["config"], info["root"], padding=padding)
+    context["repo"] = name
+    status = 404 if context.get("error") else 200
+    return JSONResponse(context, status_code=status)
+
+
+async def resolve_symbol(request: Request) -> JSONResponse:
+    body = await _parse_body(request)
+    query = body.get("query", "")
+    repo = body.get("repo")
+    file_hint = body.get("file_hint", "")
+    type_hint = body.get("type_hint", "")
+    try:
+        top_k = max(1, min(int(body.get("top_k", 10)), 50))
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "top_k must be an integer"}, status_code=400)
+
+    if not query:
+        return JSONResponse({"error": "query is required"}, status_code=400)
+
+    targets = _resolve_repos(repo)
+    if not targets:
+        return JSONResponse({"error": f"repo '{repo}' not registered"}, status_code=404)
+    if repo is None and len(targets) != 1:
+        return JSONResponse({"error": "repo is required when multiple repos are registered"}, status_code=400)
+
+    name, info = targets[0]
+    result = _resolve_symbol_impl(query, info["config"], info["root"], file_hint=file_hint, type_hint=type_hint, top_k=top_k)
+    result["repo"] = name
+    result["index_status"] = _get_index_status_impl(info["root"])
+    return JSONResponse(result)
+
+
+async def find_tests_for_symbol(request: Request) -> JSONResponse:
+    body = await _parse_body(request)
+    symbol_id = body.get("symbol_id", "")
+    repo = body.get("repo")
+    try:
+        max_results = max(1, min(int(body.get("max_results", 10)), 50))
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "max_results must be an integer"}, status_code=400)
+
+    if not symbol_id:
+        return JSONResponse({"error": "symbol_id is required"}, status_code=400)
+
+    results = []
+    targets = _resolve_repos(repo)
+    if not targets:
+        return JSONResponse({"error": f"repo '{repo}' not registered"}, status_code=404)
+
+    for name, info in targets:
+        matches = _find_tests_for_symbol_impl(symbol_id, info["config"], info["root"], max_results=max_results)
+        for match in matches:
+            match["repo"] = name
+        results.extend(matches)
+
+    results.sort(key=lambda item: (-item.get("score", 0), item.get("repo", ""), item.get("file", "")))
+    results = results[:max_results]
+    return JSONResponse({"results": results, "total": len(results)})
+
+
+async def pre_edit_check(request: Request) -> JSONResponse:
+    body = await _parse_body(request)
+    symbol_id = body.get("symbol_id", "")
+    repo = body.get("repo")
+    if not symbol_id:
+        return JSONResponse({"error": "symbol_id is required"}, status_code=400)
+
+    targets = _resolve_repos(repo)
+    if not targets:
+        return JSONResponse({"error": f"repo '{repo}' not registered"}, status_code=404)
+    if repo is None and len(targets) != 1:
+        return JSONResponse({"error": "repo is required when multiple repos are registered"}, status_code=400)
+
+    name, info = targets[0]
+    result = _pre_edit_check_impl(symbol_id, info["config"], info["root"])
+    result["repo"] = name
+    return JSONResponse(result)
+
+
+async def impact_analysis(request: Request) -> JSONResponse:
+    body = await _parse_body(request)
+    symbol_id = body.get("symbol_id", "")
+    repo = body.get("repo")
+    try:
+        max_depth = max(1, min(int(body.get("max_depth", 2)), 5))
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "max_depth must be an integer"}, status_code=400)
+    if not symbol_id:
+        return JSONResponse({"error": "symbol_id is required"}, status_code=400)
+
+    targets = _resolve_repos(repo)
+    if not targets:
+        return JSONResponse({"error": f"repo '{repo}' not registered"}, status_code=404)
+    if repo is None and len(targets) != 1:
+        return JSONResponse({"error": "repo is required when multiple repos are registered"}, status_code=400)
+
+    name, info = targets[0]
+    result = _impact_analysis_impl(symbol_id, info["config"], info["root"], max_depth=max_depth)
+    result["repo"] = name
+    status = 404 if result.get("error") else 200
+    return JSONResponse(result, status_code=status)
+
+
+async def change_plan(request: Request) -> JSONResponse:
+    body = await _parse_body(request)
+    goal = body.get("goal", "")
+    symbol_id = body.get("symbol_id", "")
+    repo = body.get("repo")
+    if not goal:
+        return JSONResponse({"error": "goal is required"}, status_code=400)
+    if not symbol_id:
+        return JSONResponse({"error": "symbol_id is required"}, status_code=400)
+
+    targets = _resolve_repos(repo)
+    if not targets:
+        return JSONResponse({"error": f"repo '{repo}' not registered"}, status_code=404)
+    if repo is None and len(targets) != 1:
+        return JSONResponse({"error": "repo is required when multiple repos are registered"}, status_code=400)
+
+    name, info = targets[0]
+    result = _change_plan_impl(goal, symbol_id, info["config"], info["root"])
+    result["repo"] = name
+    return JSONResponse(result)
+
+
+async def diagnose_index(request: Request) -> JSONResponse:
+    body = await _parse_body(request)
+    repo = body.get("repo")
+    targets = _resolve_repos(repo)
+    if not targets:
+        return JSONResponse({"error": f"repo '{repo}' not registered"}, status_code=404)
+
+    reports = []
+    for name, info in targets:
+        report = _diagnose_index_impl(info["root"], info["config"])
+        report["repo"] = name
+        reports.append(report)
+
+    if repo:
+        return JSONResponse(reports[0])
+    return JSONResponse({"results": reports, "total": len(reports)})
+
+
+async def agent_protocol(request: Request) -> JSONResponse:
+    body = await _parse_body(request)
+    goal = body.get("goal", "")
+    symbol_id = body.get("symbol_id", "")
+    repo = body.get("repo")
+    protocol = body.get("protocol", "codex")
+    if not goal:
+        return JSONResponse({"error": "goal is required"}, status_code=400)
+    if not symbol_id:
+        return JSONResponse({"error": "symbol_id is required"}, status_code=400)
+
+    targets = _resolve_repos(repo)
+    if not targets:
+        return JSONResponse({"error": f"repo '{repo}' not registered"}, status_code=404)
+    if repo is None and len(targets) != 1:
+        return JSONResponse({"error": "repo is required when multiple repos are registered"}, status_code=400)
+
+    name, info = targets[0]
+    result = _agent_protocol_bundle_impl(goal, symbol_id, info["config"], info["root"], protocol=protocol)
+    result["repo"] = name
+    return JSONResponse(result)
+
+
+async def locate_from_error(request: Request) -> JSONResponse:
+    body = await _parse_body(request)
+    error_text = body.get("error_text", "")
+    repo = body.get("repo")
+    try:
+        top_k = max(1, min(int(body.get("top_k", 10)), 50))
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "top_k must be an integer"}, status_code=400)
+    if not error_text:
+        return JSONResponse({"error": "error_text is required"}, status_code=400)
+
+    targets = _resolve_repos(repo)
+    if not targets:
+        return JSONResponse({"error": f"repo '{repo}' not registered"}, status_code=404)
+
+    all_candidates = []
+    payloads = []
+    for name, info in targets:
+        result = _locate_from_error_impl(error_text, info["config"], info["root"], top_k=top_k)
+        for candidate in result.get("candidates", []):
+            candidate["repo"] = name
+            all_candidates.append(candidate)
+        result["repo"] = name
+        payloads.append(result)
+
+    all_candidates.sort(key=lambda item: (-item.get("locate_score", 0), item.get("repo", ""), item.get("id", "")))
+    return JSONResponse({
+        "candidates": all_candidates[:top_k],
+        "total": min(len(all_candidates), top_k),
+        "results": payloads,
+    })
+
+
+async def list_entry_points(request: Request) -> JSONResponse:
+    body = await _parse_body(request)
+    repo = body.get("repo")
+    kind = body.get("kind", "")
+    try:
+        max_results = max(1, min(int(body.get("max_results", 50)), 200))
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "max_results must be an integer"}, status_code=400)
+
+    targets = _resolve_repos(repo)
+    if not targets:
+        return JSONResponse({"error": f"repo '{repo}' not registered"}, status_code=404)
+
+    all_results = []
+    payloads = []
+    for name, info in targets:
+        result = _list_entry_points_impl(info["config"], info["root"], kind=kind, max_results=max_results)
+        for entry in result.get("results", []):
+            entry["repo"] = name
+            all_results.append(entry)
+        result["repo"] = name
+        payloads.append(result)
+
+    all_results.sort(key=lambda item: (item.get("kind", ""), item.get("repo", ""), item.get("file") or ""))
+    if repo:
+        return JSONResponse(payloads[0])
+    return JSONResponse({"results": all_results[:max_results], "total": min(len(all_results), max_results), "repos": payloads})
+
+
+async def post_edit_verify(request: Request) -> JSONResponse:
+    body = await _parse_body(request)
+    repo = body.get("repo")
+    diff = body.get("diff", "")
+    too_large = _validate_diff_payload(diff)
+    if too_large:
+        return too_large
+    changed_files = body.get("changed_files", [])
+    if changed_files and not isinstance(changed_files, list):
+        return JSONResponse({"error": "changed_files must be a list"}, status_code=400)
+    if changed_files and not all(isinstance(item, str) for item in changed_files):
+        return JSONResponse({"error": "changed_files must be a list of strings"}, status_code=400)
+
+    targets = _resolve_repos(repo)
+    if not targets:
+        return JSONResponse({"error": f"repo '{repo}' not registered"}, status_code=404)
+    if repo is None and len(targets) != 1:
+        return JSONResponse({"error": "repo is required when multiple repos are registered"}, status_code=400)
+
+    name, info = targets[0]
+    result = _post_edit_verify_impl(info["config"], info["root"], diff=diff, changed_files=changed_files)
+    result["repo"] = name
+    return JSONResponse(result)
+
+
+async def change_set(request: Request) -> JSONResponse:
+    body = await _parse_body(request)
+    goal = body.get("goal", "")
+    symbol_id = body.get("symbol_id", "")
+    repo = body.get("repo")
+    diff = body.get("diff", "")
+    too_large = _validate_diff_payload(diff)
+    if too_large:
+        return too_large
+    changed_files = body.get("changed_files", [])
+    include_details = bool(body.get("include_details", True))
+    try:
+        max_results = max(1, min(int(body.get("max_results", 50)), 500))
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "max_results must be an integer"}, status_code=400)
+    if not goal:
+        return JSONResponse({"error": "goal is required"}, status_code=400)
+    if changed_files and not isinstance(changed_files, list):
+        return JSONResponse({"error": "changed_files must be a list"}, status_code=400)
+    targets = _resolve_repos(repo)
+    if not targets:
+        return JSONResponse({"error": f"repo '{repo}' not registered"}, status_code=404)
+    if repo is None and len(targets) != 1:
+        return JSONResponse({"error": "repo is required when multiple repos are registered"}, status_code=400)
+    name, info = targets[0]
+    result = _change_set_impl(
+        goal,
+        info["config"],
+        info["root"],
+        symbol_id=symbol_id,
+        diff=diff,
+        changed_files=changed_files,
+        max_results=max_results,
+        include_details=include_details,
+    )
+    result["repo"] = name
+    return JSONResponse(result)
+
+
+async def coverage_map(request: Request) -> JSONResponse:
+    body = await _parse_body(request)
+    repo = body.get("repo")
+    symbol_id = body.get("symbol_id", "")
+    try:
+        max_results = max(1, min(int(body.get("max_results", 100)), 500))
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "max_results must be an integer"}, status_code=400)
+    targets = _resolve_repos(repo)
+    if not targets:
+        return JSONResponse({"error": f"repo '{repo}' not registered"}, status_code=404)
+    if repo is None and len(targets) != 1:
+        return JSONResponse({"error": "repo is required when multiple repos are registered"}, status_code=400)
+    name, info = targets[0]
+    result = _coverage_map_impl(info["config"], info["root"], symbol_id=symbol_id, max_results=max_results)
+    result["repo"] = name
+    return JSONResponse(result)
+
+
+async def index_diff_report(request: Request) -> JSONResponse:
+    body = await _parse_body(request)
+    repo = body.get("repo")
+    before_nodes = body.get("before_nodes", [])
+    after_nodes = body.get("after_nodes", [])
+    if not isinstance(before_nodes, list) or not isinstance(after_nodes, list):
+        return JSONResponse({"error": "before_nodes and after_nodes must be lists"}, status_code=400)
+    targets = _resolve_repos(repo)
+    if not targets:
+        return JSONResponse({"error": f"repo '{repo}' not registered"}, status_code=404)
+    if repo is None and len(targets) != 1:
+        return JSONResponse({"error": "repo is required when multiple repos are registered"}, status_code=400)
+    name, info = targets[0]
+    result = _index_diff_report_impl(info["config"], info["root"], before_nodes=before_nodes, after_nodes=after_nodes)
+    result["repo"] = name
+    return JSONResponse(result)
+
+
+async def cross_repo_graph(request: Request) -> JSONResponse:
+    body = await _parse_body(request)
+    repo_names = body.get("repos", [])
+    try:
+        max_results = max(1, min(int(body.get("max_results", 200)), 1000))
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "max_results must be an integer"}, status_code=400)
+    if repo_names and not isinstance(repo_names, list):
+        return JSONResponse({"error": "repos must be a list"}, status_code=400)
+    names = repo_names or registry.list_names()
+    repos = {}
+    for name in names:
+        info = registry.get(name)
+        if info:
+            repos[name] = info
+    if not repos:
+        return JSONResponse({"error": "no repos available"}, status_code=404)
+    return JSONResponse(_cross_repo_graph_impl(repos, max_results=max_results))
+
+
+async def agent_capabilities(request: Request) -> JSONResponse:
+    return JSONResponse(_agent_capabilities_manifest_impl())
+
+
+async def agent_schema(request: Request) -> JSONResponse:
+    return JSONResponse(_agent_schema_impl())
+
+
+async def stable_symbol_id_endpoint(request: Request) -> JSONResponse:
+    body = await _parse_body(request)
+    symbol_id = body.get("symbol_id", "")
+    if not symbol_id:
+        return JSONResponse({"error": "symbol_id is required"}, status_code=400)
+    return JSONResponse({
+        "stable_symbol_id": _stable_symbol_id_impl(
+            symbol_id,
+            body.get("symbol_type", ""),
+            body.get("file_path", ""),
+            body.get("source", ""),
+        )
+    })
+
+
+async def index_status(request: Request) -> JSONResponse:
+    body = await _parse_body(request)
+    repo = body.get("repo")
+    targets = _resolve_repos(repo)
+    if not targets:
+        return JSONResponse({"error": f"repo '{repo}' not registered"}, status_code=404)
+
+    statuses = []
+    for name, info in targets:
+        status = _get_index_status_impl(info["root"])
+        status["repo"] = name
+        statuses.append(status)
+
+    if repo:
+        return JSONResponse(statuses[0])
+    return JSONResponse({"results": statuses, "total": len(statuses)})
 
 
 async def list_repos(request: Request) -> JSONResponse:
@@ -1677,6 +2117,25 @@ def create_app(repos: dict[str, Path] | None = None, repos_dir: Path | None = No
             Route("/search", search_symbols, methods=["POST"]),
             Route("/trace", trace_call, methods=["POST"]),
             Route("/source", get_source_context, methods=["POST"]),
+            Route("/edit-context", get_edit_context, methods=["POST"]),
+            Route("/resolve-symbol", resolve_symbol, methods=["POST"]),
+            Route("/tests-for-symbol", find_tests_for_symbol, methods=["POST"]),
+            Route("/pre-edit-check", pre_edit_check, methods=["POST"]),
+            Route("/impact-analysis", impact_analysis, methods=["POST"]),
+            Route("/change-plan", change_plan, methods=["POST"]),
+            Route("/diagnose-index", diagnose_index, methods=["POST"]),
+            Route("/agent-protocol", agent_protocol, methods=["POST"]),
+            Route("/locate-from-error", locate_from_error, methods=["POST"]),
+            Route("/entry-points", list_entry_points, methods=["POST"]),
+            Route("/post-edit-verify", post_edit_verify, methods=["POST"]),
+            Route("/change-set", change_set, methods=["POST"]),
+            Route("/coverage-map", coverage_map, methods=["POST"]),
+            Route("/index-diff-report", index_diff_report, methods=["POST"]),
+            Route("/cross-repo-graph", cross_repo_graph, methods=["POST"]),
+            Route("/agent-capabilities", agent_capabilities, methods=["GET", "POST"]),
+            Route("/agent-schema", agent_schema, methods=["GET", "POST"]),
+            Route("/stable-symbol-id", stable_symbol_id_endpoint, methods=["POST"]),
+            Route("/index-status", index_status, methods=["POST"]),
             Route("/register", register_repo, methods=["POST"]),
             Route("/unregister", unregister_repo, methods=["POST"]),
             Route("/sync", sync_repo, methods=["POST"]),
@@ -1741,6 +2200,15 @@ def _expand_with_call_graph(
 
 class _InvalidBodyError(Exception):
     pass
+
+
+def _validate_diff_payload(diff: str) -> JSONResponse | None:
+    if diff and len(diff.encode("utf-8", errors="replace")) > MAX_DIFF_BYTES:
+        return JSONResponse(
+            {"error": f"diff payload too large; max {MAX_DIFF_BYTES} bytes"},
+            status_code=413,
+        )
+    return None
 
 
 async def _parse_body(request: Request) -> dict:

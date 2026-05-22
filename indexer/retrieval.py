@@ -1,6 +1,9 @@
 # indexer/retrieval.py
 from __future__ import annotations
 import json
+import hashlib
+import re
+import subprocess
 from pathlib import Path
 from indexer.config import Config
 from indexer.embedding import embed_query
@@ -22,19 +25,111 @@ def search_symbols(
     top_k: int = 10,
     expand_depth: int = 1,
     branch: str = "",
+    explain: bool = False,
 ) -> list[dict]:
     top_k = max(1, min(top_k, 100))
     query_vector = embed_query(query, cfg.embedding)
     where_clause = {"branch": branch} if branch else None
     hits = search(query_vector, cfg.vector_store, repo_root, top_k=top_k, where=where_clause)
+    if explain:
+        _annotate_match_reasons(hits, query)
 
     truncate_documents(hits)
 
     if expand_depth > 0:
         hits = _expand_with_call_graph(hits, cfg, repo_root, expand_depth)
+        if explain:
+            _annotate_match_reasons(hits, query)
         truncate_documents(hits)
 
     return hits
+
+
+def resolve_symbol(*args, **kwargs):
+    from indexer.agent_context import resolve_symbol as _impl
+    return _impl(*args, **kwargs)
+
+def impact_analysis(*args, **kwargs):
+    from indexer.agent_context import impact_analysis as _impl
+    return _impl(*args, **kwargs)
+
+def change_plan(*args, **kwargs):
+    from indexer.agent_context import change_plan as _impl
+    return _impl(*args, **kwargs)
+
+def diagnose_index(*args, **kwargs):
+    from indexer.agent_diagnostics import diagnose_index as _impl
+    return _impl(*args, **kwargs)
+
+def agent_protocol_bundle(
+    goal: str,
+    symbol_id: str,
+    cfg: Config,
+    repo_root: Path,
+    protocol: str = "codex",
+) -> dict:
+    plan = change_plan(goal, symbol_id, cfg, repo_root)
+    read_targets = []
+    for item in plan.get("read_these_files", []):
+        file_path = item.get("file", "")
+        if item.get("line_start") and item.get("line_end"):
+            read_targets.append(f"{file_path}:{item['line_start']}-{item['line_end']}")
+        elif file_path:
+            read_targets.append(file_path)
+    return {
+        "protocol": protocol,
+        "goal": goal,
+        "target_symbol_id": symbol_id,
+        "index_freshness": plan.get("index_status", {}),
+        "read_these_files": read_targets,
+        "edit_targets": [
+            {
+                "file": item.get("file"),
+                "symbol_id": item.get("symbol_id"),
+                "lines": f"{item.get('line_start')}-{item.get('line_end')}",
+            }
+            for item in plan.get("edit_targets", [])
+        ],
+        "verify_commands": plan.get("verify_commands", []),
+        "warnings": plan.get("risk_points", []),
+    }
+
+
+def list_entry_points(*args, **kwargs):
+    from indexer.agent_context import list_entry_points as _impl
+    return _impl(*args, **kwargs)
+
+def locate_from_error(*args, **kwargs):
+    from indexer.agent_context import locate_from_error as _impl
+    return _impl(*args, **kwargs)
+
+def post_edit_verify(*args, **kwargs):
+    from indexer.agent_diff import post_edit_verify as _impl
+    return _impl(*args, **kwargs)
+
+def stable_symbol_id(*args, **kwargs):
+    from indexer.agent_diff import stable_symbol_id as _impl
+    return _impl(*args, **kwargs)
+
+def change_set(*args, **kwargs):
+    from indexer.agent_diff import change_set as _impl
+    return _impl(*args, **kwargs)
+
+def coverage_map(*args, **kwargs):
+    from indexer.agent_diff import coverage_map as _impl
+    return _impl(*args, **kwargs)
+
+def index_diff_report(*args, **kwargs):
+    from indexer.agent_diff import index_diff_report as _impl
+    return _impl(*args, **kwargs)
+
+def cross_repo_graph(*args, **kwargs):
+    from indexer.agent_graph import cross_repo_graph as _impl
+    return _impl(*args, **kwargs)
+
+def agent_capabilities_manifest() -> dict:
+    from indexer.agent_contracts import agent_capabilities_manifest as _manifest
+    return _manifest()
 
 
 def trace_call(
@@ -119,6 +214,216 @@ def get_source_context(
     return "\n".join(numbered)
 
 
+def get_index_status(repo_root: Path) -> dict:
+    from indexer.git import all_tracked_files, current_branch, current_commit, is_git_repo
+    from indexer.manifest import load_manifest
+
+    manifest = load_manifest(repo_root)
+    git_repo = is_git_repo(repo_root)
+    current = current_commit(repo_root) if git_repo else None
+    branch = current_branch(repo_root) if git_repo else ""
+    candidate_paths = all_tracked_files(repo_root) if git_repo else list(manifest.files.keys())
+    stale_files = sorted(manifest.stale_files(repo_root, candidate_paths))
+    removed_files = sorted(manifest.removed_files(repo_root, candidate_paths))
+    missing_manifest = manifest.last_indexed_commit is None and not manifest.files
+    commit_changed = bool(current and manifest.last_indexed_commit and current != manifest.last_indexed_commit)
+
+    reasons = []
+    if missing_manifest:
+        reasons.append("missing manifest")
+    if commit_changed:
+        reasons.append("HEAD differs from indexed commit")
+    if stale_files:
+        reasons.append("indexed file hashes differ")
+    if removed_files:
+        reasons.append("indexed files removed")
+
+    return {
+        "is_stale": bool(reasons),
+        "reasons": reasons,
+        "indexed_commit": manifest.last_indexed_commit,
+        "current_commit": current,
+        "current_branch": branch,
+        "indexed_at": manifest.indexed_at,
+        "tracked_files": len(candidate_paths),
+        "indexed_files": len(manifest.files),
+        "stale_files": stale_files[:50],
+        "removed_files": removed_files[:50],
+        "stale_file_count": len(stale_files),
+        "removed_file_count": len(removed_files),
+    }
+
+
+def find_tests_for_symbol(
+    symbol_id: str,
+    cfg: Config,
+    repo_root: Path,
+    max_results: int = 10,
+) -> list[dict]:
+    from indexer.manifest import load_manifest
+
+    max_results = max(1, min(max_results, 50))
+    seed = get_by_ids([symbol_id], cfg.vector_store, repo_root)
+    seed_meta = seed[0].get("metadata", {}) if seed else {}
+    source_file = str(seed_meta.get("file") or symbol_id.split("::", 1)[0])
+    symbol_name = symbol_id.rsplit("::", 1)[-1].split(".")[-1]
+    source_stem = Path(source_file).stem
+
+    manifest = load_manifest(repo_root)
+    matches = []
+    for rel_path, entry in manifest.files.items():
+        path = Path(rel_path)
+        parts = set(path.parts)
+        is_test = (
+            path.name.startswith("test_")
+            or path.name.endswith("_test.py")
+            or "tests" in parts
+            or "__tests__" in parts
+            or path.suffix.lower() in {".spec.js", ".test.js", ".spec.ts", ".test.ts", ".spec.tsx", ".test.tsx"}
+        )
+        if not is_test:
+            continue
+
+        abs_path = repo_root / rel_path
+        try:
+            text = abs_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+
+        reasons = []
+        score = 0
+        if symbol_name and symbol_name in text:
+            score += 4
+            reasons.append("symbol name match")
+        if source_stem and source_stem in text:
+            score += 2
+            reasons.append("source module match")
+        if source_file and source_file in text:
+            score += 3
+            reasons.append("source path match")
+        if any(symbol_name and symbol_name in cid for cid in entry.component_ids):
+            score += 2
+            reasons.append("test symbol name match")
+        if source_stem and source_stem in path.name:
+            score += 1
+            reasons.append("test filename match")
+
+        if score:
+            matches.append({
+                "file": rel_path,
+                "score": score,
+                "reasons": reasons,
+                "component_ids": entry.component_ids,
+            })
+
+    matches.sort(key=lambda item: (-item["score"], item["file"]))
+    return matches[:max_results]
+
+
+def get_edit_context(
+    symbol_id: str,
+    cfg: Config,
+    repo_root: Path,
+    padding: int = 8,
+    max_related: int = 20,
+) -> dict:
+    from indexer.manifest import load_manifest
+
+    padding = max(0, min(padding, 50))
+    max_related = max(1, min(max_related, 100))
+    seed = get_by_ids([symbol_id], cfg.vector_store, repo_root)
+    if not seed:
+        return {
+            "symbol": None,
+            "error": f"symbol '{symbol_id}' not found",
+            "index_status": get_index_status(repo_root),
+        }
+
+    symbol = seed[0]
+    meta = symbol.get("metadata", {})
+    file_path = str(meta.get("file", ""))
+    line_start = int(meta.get("line_start", 1) or 1)
+    line_end = int(meta.get("line_end", line_start) or line_start)
+    source = get_source_context(file_path, line_start, line_end, repo_root, padding=padding)
+
+    call_ids = _parse_json_list(meta.get("calls", ""))
+    caller_ids = _parse_json_list(meta.get("called_by", ""))
+    callees = get_by_ids(call_ids[:max_related], cfg.vector_store, repo_root) if call_ids else []
+    callers = get_by_ids(caller_ids[:max_related], cfg.vector_store, repo_root) if caller_ids else []
+
+    manifest = load_manifest(repo_root)
+    sibling_ids = []
+    if file_path in manifest.files:
+        sibling_ids = [cid for cid in manifest.files[file_path].component_ids if cid != symbol_id]
+    siblings = get_by_ids(sibling_ids[:max_related], cfg.vector_store, repo_root) if sibling_ids else []
+
+    return {
+        "symbol": symbol,
+        "source": source,
+        "imports": _parse_json_list(meta.get("imports", "")),
+        "callers": callers,
+        "callees": callees,
+        "siblings": siblings,
+        "candidate_tests": find_tests_for_symbol(symbol_id, cfg, repo_root, max_results=10),
+        "index_status": get_index_status(repo_root),
+    }
+
+
+def pre_edit_check(symbol_id: str, cfg: Config, repo_root: Path) -> dict:
+    context = get_edit_context(symbol_id, cfg, repo_root)
+    candidate_tests = context.get("candidate_tests", [])
+    return {
+        "symbol_id": symbol_id,
+        "index_status": context.get("index_status", get_index_status(repo_root)),
+        "dirty_files": _git_dirty_files(repo_root),
+        "candidate_tests": candidate_tests,
+        "recommended_commands": recommend_test_commands(repo_root, candidate_tests),
+        "callers": context.get("callers", []),
+        "callees": context.get("callees", []),
+    }
+
+
+def recommend_test_commands(repo_root: Path, candidate_tests: list[dict] | None = None) -> list[str]:
+    candidate_tests = candidate_tests or []
+    test_files = [m["file"] for m in candidate_tests if m.get("file")]
+    commands = []
+    if (repo_root / "pytest.ini").exists() or (repo_root / "pyproject.toml").exists():
+        if test_files:
+            commands.extend(f"python3 -m pytest {path}" for path in test_files[:5])
+        else:
+            commands.append("python3 -m pytest")
+    if (repo_root / "package.json").exists():
+        commands.append("npm test")
+    if (repo_root / "go.mod").exists():
+        commands.append("go test ./...")
+    if (repo_root / "Cargo.toml").exists():
+        commands.append("cargo test")
+    return list(dict.fromkeys(commands))
+
+
+def _git_dirty_files(repo_root: Path) -> list[str]:
+    if not (repo_root / ".git").exists():
+        return []
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={"GIT_TERMINAL_PROMPT": "0"},
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if result.returncode != 0:
+        return []
+    dirty = []
+    for line in result.stdout.splitlines():
+        if len(line) >= 4:
+            dirty.append(line[3:].strip())
+    return dirty
+
+
 def _expand_with_call_graph(
     hits: list[dict],
     cfg: Config,
@@ -155,6 +460,312 @@ def _expand_with_call_graph(
             break
 
     return expanded
+
+
+def _annotate_match_reasons(hits: list[dict], query: str) -> None:
+    terms = [t.lower() for t in query.replace("_", " ").replace("-", " ").split() if len(t) >= 2]
+    for hit in hits:
+        meta = hit.get("metadata", {})
+        haystacks = [
+            hit.get("id", ""),
+            hit.get("document", ""),
+            str(meta.get("file", "")),
+            str(meta.get("type", "")),
+        ]
+        hay = " ".join(haystacks).lower().replace("_", " ").replace("-", " ")
+        reasons = []
+        if "distance" in hit:
+            reasons.append(f"distance={hit.get('distance')}")
+        if any(term in hay for term in terms):
+            reasons.append("query token match")
+        if query.lower() in hit.get("id", "").lower():
+            reasons.append("symbol id contains query")
+        hit["match_reasons"] = list(dict.fromkeys(reasons))
+
+
+def _natural_language_alias_score(query: str, hit: dict) -> int:
+    query_terms = {t for t in query.lower().replace("_", " ").replace("-", " ").split() if len(t) >= 2}
+    if not query_terms:
+        return 0
+    meta = hit.get("metadata", {})
+    hay = " ".join([
+        hit.get("id", ""),
+        hit.get("document", ""),
+        str(meta.get("file", "")),
+        str(meta.get("type", "")),
+    ]).lower().replace("_", " ").replace("-", " ")
+    aliases = {
+        "login": {"login", "signin", "sign in", "auth", "authenticate", "/login"},
+        "endpoint": {"endpoint", "route", "handler", "api", "post", "get", "put", "delete"},
+        "index": {"index", "reindex", "rebuild", "sync"},
+        "update": {"update", "refresh", "sync", "reindex", "rebuild"},
+        "button": {"button", "click", "handler", "onclick", "submit"},
+        "permission": {"permission", "role", "authz", "authorize", "access"},
+        "auth": {"auth", "authenticate", "token", "jwt", "login"},
+    }
+    score = 0
+    for term in query_terms:
+        candidates = aliases.get(term, {term})
+        if any(candidate in hay for candidate in candidates):
+            score += 2
+    return score
+
+
+def _looks_like_entry_point(node: dict) -> bool:
+    meta = node.get("metadata", {})
+    hay = " ".join([
+        node.get("id", ""),
+        node.get("document", ""),
+        str(meta.get("file", "")),
+        str(meta.get("type", "")),
+    ]).lower()
+    markers = ["endpoint", "route", "handler", "controller", "cli", "command", "post /", "get /", "put /", "delete /"]
+    return any(marker in hay for marker in markers)
+
+
+def _freshness_risks(index_status: dict) -> list[str]:
+    if not index_status.get("is_stale"):
+        return []
+    reasons = ", ".join(index_status.get("reasons", [])) or "unknown reason"
+    return [f"Index is stale: {reasons}"]
+
+
+def _infer_entry_point_kind_from_hit(hit: dict) -> str:
+    meta = hit.get("metadata", {})
+    hay = " ".join([
+        hit.get("id", ""),
+        hit.get("document", ""),
+        str(meta.get("file", "")),
+    ]).lower()
+    if re.search(r"\b(get|post|put|patch|delete)\s+/", hay) or any(token in hay for token in ("endpoint", "route", "controller")):
+        return "api"
+    if any(token in hay for token in ("command", "cli")):
+        return "cli"
+    if any(token in hay for token in ("handler", "onclick", "on_click", "event")):
+        return "event"
+    if any(token in hay for token in ("cron", "schedule", "job", "worker")):
+        return "job"
+    if "webhook" in hay:
+        return "webhook"
+    return "unknown"
+
+
+def _extract_error_frames(text: str) -> list[dict]:
+    frames = []
+    patterns = [
+        re.compile(r'File "([^"]+)", line (\d+)'),
+        re.compile(r'([A-Za-z0-9_./\\-]+\.(?:py|js|jsx|ts|tsx|go|rs|rb|java)):(\d+)'),
+    ]
+    for pattern in patterns:
+        for match in pattern.finditer(text):
+            frames.append({"file": match.group(1).replace("\\", "/"), "line": int(match.group(2))})
+    seen = set()
+    unique = []
+    for frame in frames:
+        key = (frame["file"], frame["line"])
+        if key not in seen:
+            seen.add(key)
+            unique.append(frame)
+    return unique
+
+
+def _extract_http_paths(text: str) -> list[str]:
+    paths = []
+    for match in re.finditer(r'\b(?:GET|POST|PUT|PATCH|DELETE)\s+(/[A-Za-z0-9_./{}:-]+)', text, flags=re.IGNORECASE):
+        paths.append(match.group(1))
+    for match in re.finditer(r'\b(/[A-Za-z0-9_./{}:-]+)\b', text):
+        path = match.group(1)
+        if "/" in path.strip("/") and "." not in path.rsplit("/", 1)[-1]:
+            paths.append(path)
+    return list(dict.fromkeys(paths))
+
+
+def _extract_error_terms(text: str) -> list[str]:
+    stop = {"file", "line", "error", "exception", "traceback", "returned", "return", "none", "null"}
+    terms = []
+    for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", text.lower()):
+        if token not in stop and not token.isdigit():
+            terms.append(token)
+    return list(dict.fromkeys(terms))
+
+
+def _git_diff(repo_root: Path) -> str:
+    if not (repo_root / ".git").exists():
+        return ""
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--no-ext-diff"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            env={"GIT_TERMINAL_PROMPT": "0"},
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return result.stdout if result.returncode == 0 else ""
+
+
+def _parse_diff_changed_files(diff: str) -> list[str]:
+    files = []
+    for line in diff.splitlines():
+        if line.startswith("diff --git "):
+            parts = line.split()
+            if len(parts) >= 4:
+                path = parts[3]
+                if path.startswith("b/"):
+                    path = path[2:]
+                if path != "/dev/null":
+                    files.append(path)
+        elif line.startswith("+++ b/"):
+            files.append(line[6:])
+    return list(dict.fromkeys(files))
+
+
+def _parse_diff_new_ranges(diff: str) -> dict[str, list[tuple[int, int]]]:
+    ranges: dict[str, list[tuple[int, int]]] = {}
+    current_file = ""
+    for line in diff.splitlines():
+        if line.startswith("diff --git "):
+            parts = line.split()
+            current_file = parts[3][2:] if len(parts) >= 4 and parts[3].startswith("b/") else ""
+        elif line.startswith("+++ b/"):
+            current_file = line[6:]
+        elif current_file and line.startswith("@@"):
+            match = re.search(r"\+(\d+)(?:,(\d+))?", line)
+            if match:
+                start = int(match.group(1))
+                length = int(match.group(2) or "1")
+                ranges.setdefault(current_file, []).append((start, start + max(length - 1, 0)))
+    return ranges
+
+
+def _symbols_for_changed_files(
+    cfg: Config,
+    repo_root: Path,
+    files: list[str],
+    changed_ranges: dict[str, list[tuple[int, int]]],
+) -> list[dict]:
+    from indexer.manifest import load_manifest
+
+    manifest = load_manifest(repo_root)
+    ids = []
+    for file_path in files:
+        entry = manifest.files.get(file_path)
+        if entry:
+            ids.extend(entry.component_ids)
+    nodes = get_by_ids(ids, cfg.vector_store, repo_root) if ids else []
+    results = []
+    for node in nodes:
+        meta = node.get("metadata", {})
+        file_path = str(meta.get("file", ""))
+        line_start = int(meta.get("line_start", 0) or 0)
+        line_end = int(meta.get("line_end", 0) or 0)
+        ranges = changed_ranges.get(file_path, [])
+        if ranges and line_start and line_end:
+            overlaps = any(not (end < line_start or start > line_end) for start, end in ranges)
+            if not overlaps:
+                continue
+        results.append({
+            "id": node.get("id"),
+            "file": file_path,
+            "line_start": line_start,
+            "line_end": line_end,
+            "entry_point": bool(meta.get("entry_point")) or _looks_like_entry_point(node),
+            "entry_point_kind": meta.get("entry_point_kind") or _infer_entry_point_kind_from_hit(node),
+        })
+    results.sort(key=lambda item: (item.get("file") or "", item.get("line_start") or 0, item.get("id") or ""))
+    return results
+
+
+def _has_config_changes(files: list[str]) -> bool:
+    names = {Path(path).name for path in files}
+    return bool(names & {"pyproject.toml", "package.json", "go.mod", "Cargo.toml", "requirements.txt", "Dockerfile"})
+
+
+def _has_code_changes(files: list[str]) -> bool:
+    return any(Path(path).suffix.lower() in {".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".rb", ".java"} for path in files)
+
+
+def _limit_list(items: list, max_results: int) -> list:
+    return items[:max(1, min(max_results, 500))]
+
+
+def _normalize_source_signature(source: str) -> str:
+    if not source:
+        return ""
+    lines = []
+    for line in source.splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and not stripped.startswith("//"):
+            lines.append(re.sub(r"\s+", " ", stripped))
+    return "\n".join(lines[:20])
+
+
+def _is_test_path(path: str) -> bool:
+    p = Path(path)
+    parts = set(p.parts)
+    return p.name.startswith("test_") or p.name.endswith("_test.py") or "tests" in parts or "__tests__" in parts or ".test." in p.name or ".spec." in p.name
+
+
+def _node_edges(nodes: list[dict]) -> set[tuple[str, str]]:
+    edges = set()
+    for node in nodes:
+        sid = node.get("id")
+        if not sid:
+            continue
+        for callee in _parse_json_list(node.get("metadata", {}).get("calls", "")):
+            edges.add((sid, callee))
+    return edges
+
+
+def _stable_id_moves(before: dict[str, dict], after: dict[str, dict], removed: list[str], added: list[str]) -> list[dict]:
+    before_by_stable = {
+        node.get("metadata", {}).get("stable_symbol_id"): sid
+        for sid, node in before.items()
+        if sid in removed and node.get("metadata", {}).get("stable_symbol_id")
+    }
+    after_by_stable = {
+        node.get("metadata", {}).get("stable_symbol_id"): sid
+        for sid, node in after.items()
+        if sid in added and node.get("metadata", {}).get("stable_symbol_id")
+    }
+    moves = []
+    for stable_id in sorted(set(before_by_stable) & set(after_by_stable)):
+        moves.append({
+            "stable_symbol_id": stable_id,
+            "before": before_by_stable[stable_id],
+            "after": after_by_stable[stable_id],
+        })
+    return moves
+
+
+def _extract_graphql_operations(text: str) -> list[str]:
+    ops = []
+    for match in re.finditer(r"\b(?:query|mutation|subscription)\s+([A-Za-z_][A-Za-z0-9_]*)", text):
+        ops.append(match.group(1))
+    return list(dict.fromkeys(ops))
+
+
+def _looks_like_client_symbol(node: dict) -> bool:
+    hay = " ".join([node.get("id", ""), node.get("document", ""), str(node.get("metadata", {}).get("file", ""))]).lower()
+    return any(token in hay for token in ("fetch", "axios", "client", "api.ts", "api.js", "request"))
+
+
+def _repo_nodes_for_graph(info: dict) -> list[dict]:
+    if "nodes" in info:
+        return info.get("nodes", [])
+    root = info.get("root")
+    cfg = info.get("config")
+    if not root or not cfg:
+        return []
+    try:
+        from indexer.manifest import load_manifest
+        manifest = load_manifest(Path(root))
+        ids = [cid for entry in manifest.files.values() for cid in entry.component_ids]
+        return get_by_ids(ids, cfg.vector_store, Path(root)) if ids else []
+    except Exception:
+        return []
 
 
 def _parse_json_list(raw: str) -> list[str]:

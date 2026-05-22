@@ -1,6 +1,6 @@
 {
-  "last_indexed_commit": "a62514d910ec30aab904c9809ccccd58c6a48b21",
-  "indexed_at": "2026-05-11T02:29:39.658249+00:00",
+  "last_indexed_commit": "34b839cfaac85a325024949f19e822a070a68984",
+  "indexed_at": "2026-05-22T10:14:08.600570+00:00",
   "files": {
     "indexer/__init__.py": {
       "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -8,13 +8,14 @@
       "component_ids": []
     },
     "indexer/ast_parser.py": {
-      "hash": "sha256:c84898152b080a5db7e1268a88cf3f94063a9b6b90a1a96bdfcd0d890d2fad44",
+      "hash": "sha256:2c048df0cd40d6df864da8fbc78db84ad81cec732987b840d74a078c03bf8c20",
       "wiki_page": "wiki/indexer.md",
       "component_ids": [
         "indexer/ast_parser.py::ASTNode",
         "indexer/ast_parser.py::_extract_imports",
         "indexer/ast_parser.py::_extract_calls",
         "indexer/ast_parser.py::_get_class_method_ids",
+        "indexer/ast_parser.py::_entry_point_from_decorators",
         "indexer/ast_parser.py::parse_file",
         "indexer/ast_parser.py::compute_hash_short",
         "indexer/ast_parser.py::load_cached_nodes",
@@ -22,13 +23,20 @@
       ]
     },
     "indexer/cli.py": {
-      "hash": "sha256:d12c3bad9641d8fcb0f6b2ba81ac39c29104ec4e9de374190adaa94bd43488b8",
+      "hash": "sha256:4f55c6f9de4e741b7ee62333ee77f6f930c1000caaf295e77a4fa3371824203d",
       "wiki_page": "wiki/indexer.md",
       "component_ids": [
         "indexer/cli.py::main",
         "indexer/cli.py::init",
         "indexer/cli.py::run",
         "indexer/cli.py::status",
+        "indexer/cli.py::agent",
+        "indexer/cli.py::agent_context",
+        "indexer/cli.py::agent_verify",
+        "indexer/cli.py::agent_plan",
+        "indexer/cli.py::agent_diagnose",
+        "indexer/cli.py::agent_capabilities",
+        "indexer/cli.py::agent_schema",
         "indexer/cli.py::hook",
         "indexer/cli.py::hook_install",
         "indexer/cli.py::hook_remove",
@@ -36,6 +44,7 @@
         "indexer/cli.py::serve_api",
         "indexer/cli.py::_ensure_cache_gitignore",
         "indexer/cli.py::_is_indexable",
+        "indexer/cli.py::_json_dumps",
         "indexer/cli.py::_parse_progress"
       ]
     },
@@ -213,7 +222,7 @@
       ]
     },
     "indexer/mcp_server.py": {
-      "hash": "sha256:1d5a389092d9141925751b9e902010ad9958d77c81fdf7820ec3d3bae064ad41",
+      "hash": "sha256:8150053666fe29501b5fbbeafea40df87be713725119b1848b0e4154c7e974af",
       "wiki_page": "wiki/indexer.md",
       "component_ids": [
         "indexer/mcp_server.py::_apply_mcp_auth",
@@ -223,6 +232,24 @@
         "indexer/mcp_server.py::search_symbols_tool",
         "indexer/mcp_server.py::trace_call_tool",
         "indexer/mcp_server.py::get_source_context_tool",
+        "indexer/mcp_server.py::get_edit_context_tool",
+        "indexer/mcp_server.py::resolve_symbol_tool",
+        "indexer/mcp_server.py::find_tests_for_symbol_tool",
+        "indexer/mcp_server.py::pre_edit_check_tool",
+        "indexer/mcp_server.py::impact_analysis_tool",
+        "indexer/mcp_server.py::change_plan_tool",
+        "indexer/mcp_server.py::diagnose_index_tool",
+        "indexer/mcp_server.py::agent_protocol_tool",
+        "indexer/mcp_server.py::locate_from_error_tool",
+        "indexer/mcp_server.py::list_entry_points_tool",
+        "indexer/mcp_server.py::post_edit_verify_tool",
+        "indexer/mcp_server.py::change_set_tool",
+        "indexer/mcp_server.py::coverage_map_tool",
+        "indexer/mcp_server.py::index_diff_report_tool",
+        "indexer/mcp_server.py::cross_repo_graph_tool",
+        "indexer/mcp_server.py::agent_capabilities_manifest_tool",
+        "indexer/mcp_server.py::stable_symbol_id_tool",
+        "indexer/mcp_server.py::get_index_status_tool",
         "indexer/mcp_server.py::_api_request",
         "indexer/mcp_server.py::_api_get",
         "indexer/mcp_server.py::_api_post",
@@ -230,12 +257,30 @@
         "indexer/mcp_server.py::search_symbols_tool",
         "indexer/mcp_server.py::trace_call_tool",
         "indexer/mcp_server.py::get_source_context_tool",
+        "indexer/mcp_server.py::get_edit_context_tool",
+        "indexer/mcp_server.py::resolve_symbol_tool",
+        "indexer/mcp_server.py::find_tests_for_symbol_tool",
+        "indexer/mcp_server.py::pre_edit_check_tool",
+        "indexer/mcp_server.py::impact_analysis_tool",
+        "indexer/mcp_server.py::change_plan_tool",
+        "indexer/mcp_server.py::diagnose_index_tool",
+        "indexer/mcp_server.py::agent_protocol_tool",
+        "indexer/mcp_server.py::locate_from_error_tool",
+        "indexer/mcp_server.py::list_entry_points_tool",
+        "indexer/mcp_server.py::post_edit_verify_tool",
+        "indexer/mcp_server.py::change_set_tool",
+        "indexer/mcp_server.py::coverage_map_tool",
+        "indexer/mcp_server.py::index_diff_report_tool",
+        "indexer/mcp_server.py::cross_repo_graph_tool",
+        "indexer/mcp_server.py::agent_capabilities_manifest_tool",
+        "indexer/mcp_server.py::stable_symbol_id_tool",
+        "indexer/mcp_server.py::get_index_status_tool",
         "indexer/mcp_server.py::_MCPAuthMiddleware",
         "indexer/mcp_server.py::_MCPAuthMiddleware.dispatch"
       ]
     },
     "indexer/rest_api.py": {
-      "hash": "sha256:e1a40b4bd66a317aebd5fe6182142c692d40935249a3fd3148af083ddf9b63aa",
+      "hash": "sha256:ddd36c546675b9f658d79fe77e6273be7e4e13198729dafa1ca871f6a088b364",
       "wiki_page": "wiki/indexer.md",
       "component_ids": [
         "indexer/rest_api.py::register_repo",
@@ -257,6 +302,25 @@
         "indexer/rest_api.py::search_symbols",
         "indexer/rest_api.py::trace_call",
         "indexer/rest_api.py::get_source_context",
+        "indexer/rest_api.py::get_edit_context",
+        "indexer/rest_api.py::resolve_symbol",
+        "indexer/rest_api.py::find_tests_for_symbol",
+        "indexer/rest_api.py::pre_edit_check",
+        "indexer/rest_api.py::impact_analysis",
+        "indexer/rest_api.py::change_plan",
+        "indexer/rest_api.py::diagnose_index",
+        "indexer/rest_api.py::agent_protocol",
+        "indexer/rest_api.py::locate_from_error",
+        "indexer/rest_api.py::list_entry_points",
+        "indexer/rest_api.py::post_edit_verify",
+        "indexer/rest_api.py::change_set",
+        "indexer/rest_api.py::coverage_map",
+        "indexer/rest_api.py::index_diff_report",
+        "indexer/rest_api.py::cross_repo_graph",
+        "indexer/rest_api.py::agent_capabilities",
+        "indexer/rest_api.py::agent_schema",
+        "indexer/rest_api.py::stable_symbol_id_endpoint",
+        "indexer/rest_api.py::index_status",
         "indexer/rest_api.py::list_repos",
         "indexer/rest_api.py::health",
         "indexer/rest_api.py::repo_detail",
@@ -273,8 +337,8 @@
         "indexer/rest_api.py::_trace_call_impl",
         "indexer/rest_api.py::_expand_with_call_graph",
         "indexer/rest_api.py::_InvalidBodyError",
+        "indexer/rest_api.py::_validate_diff_payload",
         "indexer/rest_api.py::_parse_body",
-        "indexer/rest_api.py::_run_all",
         "indexer/rest_api.py::_LoggingMiddleware",
         "indexer/rest_api.py::_LoggingMiddleware.dispatch",
         "indexer/rest_api.py::_invalid_body_handler",
@@ -283,14 +347,56 @@
       ]
     },
     "indexer/retrieval.py": {
-      "hash": "sha256:3d9e16559fe6f2c38b0e425eddd428a0b925d80ad13d7d62b598cc94b7191c75",
+      "hash": "sha256:127ce4c6ea4650098e55ff50aae4c08163cb404594c2c8cd3c5b0e1663f1676b",
       "wiki_page": "wiki/indexer.md",
       "component_ids": [
         "indexer/retrieval.py::truncate_documents",
         "indexer/retrieval.py::search_symbols",
+        "indexer/retrieval.py::resolve_symbol",
+        "indexer/retrieval.py::impact_analysis",
+        "indexer/retrieval.py::change_plan",
+        "indexer/retrieval.py::diagnose_index",
+        "indexer/retrieval.py::agent_protocol_bundle",
+        "indexer/retrieval.py::list_entry_points",
+        "indexer/retrieval.py::locate_from_error",
+        "indexer/retrieval.py::post_edit_verify",
+        "indexer/retrieval.py::stable_symbol_id",
+        "indexer/retrieval.py::change_set",
+        "indexer/retrieval.py::coverage_map",
+        "indexer/retrieval.py::index_diff_report",
+        "indexer/retrieval.py::cross_repo_graph",
+        "indexer/retrieval.py::agent_capabilities_manifest",
         "indexer/retrieval.py::trace_call",
         "indexer/retrieval.py::get_source_context",
+        "indexer/retrieval.py::get_index_status",
+        "indexer/retrieval.py::find_tests_for_symbol",
+        "indexer/retrieval.py::get_edit_context",
+        "indexer/retrieval.py::pre_edit_check",
+        "indexer/retrieval.py::recommend_test_commands",
+        "indexer/retrieval.py::_git_dirty_files",
         "indexer/retrieval.py::_expand_with_call_graph",
+        "indexer/retrieval.py::_annotate_match_reasons",
+        "indexer/retrieval.py::_natural_language_alias_score",
+        "indexer/retrieval.py::_looks_like_entry_point",
+        "indexer/retrieval.py::_freshness_risks",
+        "indexer/retrieval.py::_infer_entry_point_kind_from_hit",
+        "indexer/retrieval.py::_extract_error_frames",
+        "indexer/retrieval.py::_extract_http_paths",
+        "indexer/retrieval.py::_extract_error_terms",
+        "indexer/retrieval.py::_git_diff",
+        "indexer/retrieval.py::_parse_diff_changed_files",
+        "indexer/retrieval.py::_parse_diff_new_ranges",
+        "indexer/retrieval.py::_symbols_for_changed_files",
+        "indexer/retrieval.py::_has_config_changes",
+        "indexer/retrieval.py::_has_code_changes",
+        "indexer/retrieval.py::_limit_list",
+        "indexer/retrieval.py::_normalize_source_signature",
+        "indexer/retrieval.py::_is_test_path",
+        "indexer/retrieval.py::_node_edges",
+        "indexer/retrieval.py::_stable_id_moves",
+        "indexer/retrieval.py::_extract_graphql_operations",
+        "indexer/retrieval.py::_looks_like_client_symbol",
+        "indexer/retrieval.py::_repo_nodes_for_graph",
         "indexer/retrieval.py::_parse_json_list"
       ]
     },
@@ -335,7 +441,7 @@
       ]
     },
     "indexer/vector_store.py": {
-      "hash": "sha256:1cf185f2edec87b4ff59a9d83bd94407bebd91513b4713c6f31e465bee2e2116",
+      "hash": "sha256:9a29cde9df7ec51e30b5c8c7957fd684e0bda712b245aa2e5e3527602442c523",
       "wiki_page": "wiki/indexer.md",
       "component_ids": [
         "indexer/vector_store.py::_get_client",
@@ -348,7 +454,8 @@
         "indexer/vector_store.py::_build_doc",
         "indexer/vector_store.py::_truncate_list",
         "indexer/vector_store.py::_build_meta",
-        "indexer/vector_store.py::json_dumps_compact"
+        "indexer/vector_store.py::json_dumps_compact",
+        "indexer/vector_store.py::_infer_entry_point_kind"
       ]
     },
     "indexer/wiki.py": {
@@ -423,7 +530,7 @@
       ]
     },
     "tests/test_ast_parser.py": {
-      "hash": "sha256:47cb1b0e65c16771c99810dff57e5e2f1a3333a55632d52525dfe7fdb3dac851",
+      "hash": "sha256:759e7bb940afb8633c45db27b13ba0bd88c3ddd44f2079a1c3648adbaa68b0ad",
       "wiki_page": "wiki/tests.md",
       "component_ids": [
         "tests/test_ast_parser.py::test_parse_returns_nodes",
@@ -433,6 +540,8 @@
         "tests/test_ast_parser.py::test_docstring_extracted",
         "tests/test_ast_parser.py::test_imports_extracted",
         "tests/test_ast_parser.py::test_calls_extracted",
+        "tests/test_ast_parser.py::test_python_fastapi_route_entry_point",
+        "tests/test_ast_parser.py::test_python_click_command_entry_point",
         "tests/test_ast_parser.py::test_cache_roundtrip",
         "tests/test_ast_parser.py::test_rust_parse_returns_nodes",
         "tests/test_ast_parser.py::test_rust_function_node",
@@ -509,7 +618,7 @@
       ]
     },
     "tests/test_p1_fixes.py": {
-      "hash": "sha256:1d64a29814582c514e05c91f647acf32d289a6b5b5eae91bbebc46195e284487",
+      "hash": "sha256:e80e5dffe0e6976e46005e23d003a62b4db5e2d81eecf1e0916c7e1fdae88d8b",
       "wiki_page": "wiki/tests.md",
       "component_ids": [
         "tests/test_p1_fixes.py::TestTaskStore",
@@ -693,6 +802,7 @@
         "tests/test_p1_fixes.py::TestRound15Fixes.test_sync_branch_has_try_catch",
         "tests/test_p1_fixes.py::TestRound15Fixes.test_rebuild_branch_has_try_catch",
         "tests/test_p1_fixes.py::TestRound15Fixes.test_register_missing_branch_has_try_catch",
+        "tests/test_p1_fixes.py::TestRound15Fixes.test_edit_meta_polls_reindex_task",
         "tests/test_p1_fixes.py::TestRound15Fixes.test_do_unregister_has_try_catch",
         "tests/test_p1_fixes.py::TestRound15Fixes.test_do_validate_has_try_catch",
         "tests/test_p1_fixes.py::TestRound15Fixes.test_querySelector_title_optional_chaining",
@@ -700,6 +810,9 @@
         "tests/test_p1_fixes.py::TestRound15Fixes.test_no_duplicate_anthropic_lock_test",
         "tests/test_p1_fixes.py::TestRound15Fixes.test_indexer_toml_no_dashscope_hardcoded",
         "tests/test_p1_fixes.py::TestRound16Fixes",
+        "tests/test_p1_fixes.py::TestRound16Fixes.test_reindex_allows_index_only_request",
+        "tests/test_p1_fixes.py::TestRound16Fixes.test_reindex_uses_shared_all_branches_runner",
+        "tests/test_p1_fixes.py::TestRound16Fixes.test_destructive_git_cleanup_before_checkout",
         "tests/test_p1_fixes.py::TestRound16Fixes.test_rebuild_git_before_delete",
         "tests/test_p1_fixes.py::TestRound16Fixes.test_branch_detection_after_clone",
         "tests/test_p1_fixes.py::TestRound16Fixes.test_vector_upsert_before_manifest",
@@ -766,7 +879,7 @@
       ]
     },
     "indexer/git_ops.py": {
-      "hash": "sha256:973781f9a7b1cbf948778a073174338cd62c3da0099aeeaedc0c3b7dfb2fe367",
+      "hash": "sha256:666c8bffcc8f07b5861c1e72bd0871ee0ea1dc1a79d60f8fe308bd9e25b0f804",
       "wiki_page": "wiki/indexer.md",
       "component_ids": [
         "indexer/git_ops.py::GitOperationError",
@@ -778,7 +891,8 @@
         "indexer/git_ops.py::_inject_credentials",
         "indexer/git_ops.py::_sanitize_error",
         "indexer/git_ops.py::_store_credentials",
-        "indexer/git_ops.py::_err"
+        "indexer/git_ops.py::_err",
+        "indexer/git_ops.py::_cleanup_worktree"
       ]
     },
     "indexer/repo_registry.py": {
@@ -808,6 +922,129 @@
         "indexer/task_store.py::TaskStore.create",
         "indexer/task_store.py::TaskStore.get",
         "indexer/task_store.py::TaskStore.update"
+      ]
+    },
+    "indexer/agent_context.py": {
+      "hash": "sha256:48a4eb1f65fe352b397a3773e50a76a917a6b3719c70fb539f8bd890ee44990c",
+      "wiki_page": "wiki/indexer.md",
+      "component_ids": [
+        "indexer/agent_context.py::resolve_symbol",
+        "indexer/agent_context.py::impact_analysis",
+        "indexer/agent_context.py::change_plan",
+        "indexer/agent_context.py::list_entry_points",
+        "indexer/agent_context.py::locate_from_error"
+      ]
+    },
+    "indexer/agent_contracts.py": {
+      "hash": "sha256:923ebe489855b1c184233de536c7320c6095e091bec55fe4384c283f169d694e",
+      "wiki_page": "wiki/indexer.md",
+      "component_ids": [
+        "indexer/agent_contracts.py::agent_capabilities_manifest",
+        "indexer/agent_contracts.py::agent_schema",
+        "indexer/agent_contracts.py::_capability_input_schema",
+        "indexer/agent_contracts.py::_capability_required_output",
+        "indexer/agent_contracts.py::_capability_example",
+        "indexer/agent_contracts.py::_capability_next_tools",
+        "indexer/agent_contracts.py::_object_schema",
+        "indexer/agent_contracts.py::_field_schema",
+        "indexer/agent_contracts.py::_agent_json_schema",
+        "indexer/agent_contracts.py::_endpoint_specs"
+      ]
+    },
+    "indexer/agent_diagnostics.py": {
+      "hash": "sha256:098fcabde271e2278aa2141b6cfdd31e8221ea2ad747a9cc0069054739788bbc",
+      "wiki_page": "wiki/indexer.md",
+      "component_ids": [
+        "indexer/agent_diagnostics.py::diagnose_index"
+      ]
+    },
+    "indexer/agent_diff.py": {
+      "hash": "sha256:b69b4b4dd41f64fc0c311ca5a0be35222cb56119cbb8f05d41d4f5b722a4cbaf",
+      "wiki_page": "wiki/indexer.md",
+      "component_ids": [
+        "indexer/agent_diff.py::post_edit_verify",
+        "indexer/agent_diff.py::stable_symbol_id",
+        "indexer/agent_diff.py::change_set",
+        "indexer/agent_diff.py::coverage_map",
+        "indexer/agent_diff.py::index_diff_report"
+      ]
+    },
+    "indexer/agent_graph.py": {
+      "hash": "sha256:e586b006ee9424fc4375177e865562dd6b6e568fb9ce871164e816bed76a2b78",
+      "wiki_page": "wiki/indexer.md",
+      "component_ids": [
+        "indexer/agent_graph.py::cross_repo_graph"
+      ]
+    },
+    "indexer/agent_protocol.py": {
+      "hash": "sha256:27506e2f4ce450d45de318f51dba12cab54a7968f3d4240ae01676a2c679f2aa",
+      "wiki_page": "wiki/indexer.md",
+      "component_ids": []
+    },
+    "tests/test_agent_cli.py": {
+      "hash": "sha256:7891f05638cf44e664c6f841a41999ed10fb2a26b3bbb98fc27520bd1b92efe4",
+      "wiki_page": "wiki/tests.md",
+      "component_ids": [
+        "tests/test_agent_cli.py::test_agent_capabilities_cli_outputs_contract",
+        "tests/test_agent_cli.py::test_agent_schema_cli_outputs_openapi_contract",
+        "tests/test_agent_cli.py::test_agent_context_cli_requires_symbol_id"
+      ]
+    },
+    "tests/test_agent_context.py": {
+      "hash": "sha256:e73886bb478c1f2949aa564dc0ef2392fcbcccdf0a03fbf192f412a3ae219b3c",
+      "wiki_page": "wiki/tests.md",
+      "component_ids": [
+        "tests/test_agent_context.py::test_index_status_reports_stale_manifest_entry",
+        "tests/test_agent_context.py::test_find_tests_for_symbol_matches_file_and_symbol",
+        "tests/test_agent_context.py::test_get_edit_context_includes_source_relations_tests_and_status",
+        "tests/test_agent_context.py::test_rest_routes_expose_agent_context_tools",
+        "tests/test_agent_context.py::test_mcp_servers_expose_agent_context_tools",
+        "tests/test_agent_context.py::test_resolve_symbol_ranks_exact_name_and_path",
+        "tests/test_agent_context.py::test_search_symbols_can_explain_hits",
+        "tests/test_agent_context.py::test_pre_edit_check_reports_dirty_files_and_test_commands",
+        "tests/test_agent_context.py::test_impact_analysis_collects_transitive_relations_tests_and_files",
+        "tests/test_agent_context.py::test_change_plan_returns_agent_edit_steps_and_commands",
+        "tests/test_agent_context.py::test_diagnose_index_reports_missing_wiki_vector_and_missing_sources",
+        "tests/test_agent_context.py::test_agent_protocol_bundle_is_compact_and_includes_freshness",
+        "tests/test_agent_context.py::test_resolve_symbol_uses_natural_language_alias_reasons",
+        "tests/test_agent_context.py::test_vector_metadata_marks_entry_points",
+        "tests/test_agent_context.py::test_list_entry_points_reads_first_class_metadata",
+        "tests/test_agent_context.py::test_locate_from_error_uses_stack_trace_file_and_line",
+        "tests/test_agent_context.py::test_locate_from_error_matches_http_path_to_entry_point",
+        "tests/test_agent_context.py::test_post_edit_verify_maps_diff_to_symbols_tests_and_reindex",
+        "tests/test_agent_context.py::test_diff_payload_size_guard_rejects_oversized_diff",
+        "tests/test_agent_context.py::test_stable_symbol_id_is_deterministic_and_metadata_includes_it",
+        "tests/test_agent_context.py::test_change_set_combines_target_impact_tests_and_post_edit",
+        "tests/test_agent_context.py::test_change_set_respects_max_results_and_summary",
+        "tests/test_agent_context.py::test_coverage_map_links_tests_to_source_symbols",
+        "tests/test_agent_context.py::test_coverage_map_repo_wide_respects_max_results",
+        "tests/test_agent_context.py::test_index_diff_report_compares_symbol_sets",
+        "tests/test_agent_context.py::test_cross_repo_graph_links_client_to_backend_route",
+        "tests/test_agent_context.py::test_cross_repo_graph_links_graphql_operation",
+        "tests/test_agent_context.py::test_cross_repo_graph_respects_max_results",
+        "tests/test_agent_context.py::test_index_diff_report_detects_rename_by_stable_id",
+        "tests/test_agent_context.py::test_agent_capabilities_manifest_lists_local_and_remote_tools"
+      ]
+    },
+    "tests/test_agent_e2e.py": {
+      "hash": "sha256:39d87d377656e1f12c9279dfed966f9af8598b0ad9ed310f8d53974d68ee7306",
+      "wiki_page": "wiki/tests.md",
+      "component_ids": [
+        "tests/test_agent_e2e.py::test_agent_error_to_verify_flow_on_small_repo"
+      ]
+    },
+    "tests/test_api_contracts.py": {
+      "hash": "sha256:c2177ce73dff0b1b38cb4851c632d3d1bbb8c8dd500bb314db4a9f4e52191861",
+      "wiki_page": "wiki/tests.md",
+      "component_ids": [
+        "tests/test_api_contracts.py::test_agent_capabilities_all_tools_have_schemas",
+        "tests/test_api_contracts.py::test_core_tool_contract_top_level_keys",
+        "tests/test_api_contracts.py::test_agent_capabilities_endpoint_contract",
+        "tests/test_api_contracts.py::test_agent_schema_endpoint_exports_machine_readable_contract",
+        "tests/test_api_contracts.py::test_stable_symbol_id_endpoint_contract",
+        "tests/test_api_contracts.py::test_post_edit_verify_endpoint_rejects_oversized_diff",
+        "tests/test_api_contracts.py::test_agent_modules_expose_split_boundaries",
+        "tests/test_api_contracts.py::test_agent_split_modules_own_function_bodies"
       ]
     }
   }

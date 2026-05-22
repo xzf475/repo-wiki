@@ -20,49 +20,42 @@ The wiki captures structure, relationships, and constraints in a fraction of the
 
 ## Stats
 
-- **481 symbols** across **23 files** — indexed 2026-05-11 @ `a62514d9`
+- **551 symbols** across **19 files** — indexed 2026-05-22 @ `34b839cf`
 - Wiki: `wiki/` — 3 page(s)
 - Manifest: `.indexer/manifest.json` — maps every file to its wiki page and component IDs
 
 ## System Overview
 
-The indexer is a service that indexes source code repositories into a searchable knowledge base. It uses language-specific AST parsers (e.g., js_parser, rust_parser) to extract symbols, calls, and docstrings, then builds wiki pages with cross-references. The indexed data is stored in a vector store for semantic search and a task store for tracking async rebuilds. A REST API and MCP server expose tools for repository registration, symbol search, call trace, and source context retrieval.
+The system is a multilingual code indexer and AI agent framework that ingests repositories (via git) across Python, Java, Ruby, Rust, Go, and JavaScript. It parses source into AST nodes (symbols, calls, imports), embeds them into a vector store, and generates per-module wiki pages with cross-reference graphs. The system exposes agent capabilities through a REST API and an MCP server (agent_context.py, retrieval.py, agent_graph.py), while managing indexing tasks via a TaskStore and repo state via a RepoRegistry. CLI (cli.py) and hooks (hooks.py) provide local integration, and the whole pipeline is driven by an indexing orchestrator (indexing.py) that coordinates parsers, caching, and manifest updates.
 ## Key Request Flows
-- register_repo → RepoRegistry.register → git clone → parse candidates → indexing pipeline → vector store upsert → manifest save
-- search_symbols_tool → REST API handler → retrieval.search_symbols → (embedding query → vector store search → return nodes)
-- trace_call_tool → REST API handler → retrieval.trace_call → (AST cross-reference → recursive call graph expansion → return context)
-- webhook sync → repo_registry.sync_repo → git fetch → changed files detection → re-parse changed files → incremental vector store update → manifest update
-- MCP tool (e.g., get_source_context) → mcp_server handler → retrieval.get_source_context → AST node lookup → file lines extraction → formatted response
+- Indexing Flow: CLI/REST hook → repo_registry → git_ops (clone/fetch) → ast_parser (per language) → embedding → vector_store → wiki → manifest → task_store (status)
+- Agent Context Query: MCP/REST (agent_context) → retrieval (search_symbols, trace_call) → vector_store + wiki → agent_graph (expand relations) → get_edit_context → return bundles (symbols, tests, files, status)
+- Post-Edit Verification: agent_diff (diff parsing) → pre_edit_check → impact_analysis → change_plan → post_edit_verify → reindex pipeline → change_set (target+impact+tests)
+- Repository Registration & Sync: CLI (register_repo / sync_repo) → repo_registry → git_ops (validate, clone) → task_store (create task) → indexing.py (full reindex, branch detection) → manifest + vector_store eviction → webhook callbacks
+- Error Diagnosis Flow: locate_from_error (stack trace parse) → resolve_symbol → agent_protocol (bundle freshness) → diagnose_index (missing wiki/vector) → trigger reindex if stale
 
 ## Wiki Pages
 
 | Page | Covers | Key Entry Points |
 |------|--------|-----------------|
-| [indexer](../wiki/indexer.md) | indexer/ast_parser.py, indexer/cache.py, indexer/cli.py, indexer/config.py, indexer/embedding.py, indexer/git.py, indexer/git_ops.py, indexer/go_parser.py, indexer/grouper.py, indexer/hooks.py, indexer/indexing.py, indexer/java_parser.py, indexer/js_parser.py, indexer/llm.py, indexer/manifest.py, indexer/mcp_server.py, indexer/repo_registry.py, indexer/rest_api.py, indexer/retrieval.py, indexer/ruby_parser.py, indexer/rust_parser.py, indexer/task_store.py, indexer/utils.py, indexer/vector_store.py, indexer/wiki.py | _patched_method, search_symbols_tool, trace_call_tool, get_source_context_tool, list_repos |
+| [indexer](../wiki/indexer.md) | indexer/agent_context.py, indexer/agent_contracts.py, indexer/agent_diagnostics.py, indexer/agent_diff.py, indexer/agent_graph.py, indexer/ast_parser.py, indexer/cache.py, indexer/cli.py, indexer/config.py, indexer/embedding.py, indexer/git.py, indexer/git_ops.py, indexer/go_parser.py, indexer/grouper.py, indexer/hooks.py, indexer/indexing.py, indexer/java_parser.py, indexer/js_parser.py, indexer/llm.py, indexer/manifest.py, indexer/mcp_server.py, indexer/repo_registry.py, indexer/rest_api.py, indexer/retrieval.py, indexer/ruby_parser.py, indexer/rust_parser.py, indexer/task_store.py, indexer/utils.py, indexer/vector_store.py, indexer/wiki.py | _first_char_shard, _get_type_name, describe_nodes_batch, describe_nodes, describe_files |
 | [tests_fixtures](../wiki/tests_fixtures.md) | tests/fixtures/sample_java/App.java, tests/fixtures/sample_py/auth.py, tests/fixtures/sample_ruby/app.rb, tests/fixtures/sample_rust/lib.rs | App, App.addUser, App.getUserCount, UserProfile, getDisplayName |
-| [tests](../wiki/tests.md) | tests/test_ast_parser.py, tests/test_config.py, tests/test_grouper.py, tests/test_manifest.py, tests/test_p1_fixes.py, tests/test_wiki.py | test_parse_returns_nodes, test_function_node, test_method_node, test_class_node, test_docstring_extracted |
+| [tests](../wiki/tests.md) | tests/test_agent_cli.py, tests/test_agent_context.py, tests/test_agent_e2e.py, tests/test_api_contracts.py, tests/test_ast_parser.py, tests/test_config.py, tests/test_grouper.py, tests/test_manifest.py, tests/test_p1_fixes.py, tests/test_wiki.py | test_load_defaults, test_save_and_reload, test_partial_toml_uses_defaults, test_sparse_folders_merge_to_parent, test_dense_folder_gets_own_page |
 ## Critical Constraints (read before editing)
-**indexer**
-- ASTNode.calls are extracted via static AST walk (walk); dynamic or indirect calls (e.g., via getattr) are NOT captured, leading to incomplete traces.
-- grouper.density_group groups files by prefix density, not directory hierarchy; a file at a/b/c/d.py may be grouped with a/b/x/d.py if density of 'a/b/' is low, but not with a/e.py if 'a/' density is high.
-- MCP server authentication uses _MCPAuthMiddleware which compares tokens with compare_digest; only a single static API token is supported (no multi-user or scoped tokens).
-- Hooks (install_hook, remove_hook) modify .git/hooks directly as shell scripts; they assume a Unix-like environment and will fail on Windows without WSL.
-- The ast_parser uses tree-sitter for non-Python languages (Ruby, Rust, Java, Go, JS) but falls back to Python's ast module for .py files; parsing failures on malformed code silently return empty ASTNode instead of raising.
-- Vector store operations (vector_store.py) are not transactional; concurrent indexing jobs may produce partial or duplicated vectors if not locked externally.
 **tests_fixtures**
-- TokenValidator.refresh() assumes `sign_payload` is a callable in scope; no fallback or error handling is provided (minimal test stub).
-- Router.initialize accepts no arguments; routes are stored as a hash without thread safety—single-threaded test context only.
-- Java App.getUserCount() returns the raw size of the ArrayList; no null or duplicate checks on addUser (duplicate names allowed).
-- Rust age_difference(a, b) is a pure function that returns absolute difference; it does not handle negative ages or overflow (u8).
-- The Rust Status enum has no default or unknown variant; any serialization of an uninitialized User would panic (no TryFrom/Default).
-- Ruby parse(str) calls strip on the input but does not handle nil—calling parse(nil) would raise NoMethodError.
+- Fixtures must have zero external dependencies (no imports beyond language standard library) to guarantee portability across test environments.
+- All `calls` entries are string literals extracted from source; they may reference methods that do not exist in the fixture set (e.g., `sign_payload`), as the goal is to record syntactic calls, not resolve them.
+- Java interface `UserProfile` and Rust trait `ToJson` define no implementation and serve only to verify the extractor recognizes interface/trait symbol types.
+- Ruby's `parse` function calls `strip` (a String method) but that call is recorded as a raw string — the extractor does not distinguish built-in from user-defined calls.
+- Rust `UserResult` type alias is included to ensure `type` symbols are captured alongside struct/enum/trait symbols.
+- Symbol IDs are globally unique by prepending the file path; duplicate simple names (e.g., `getDisplayName` in Java vs Ruby) are allowed only across different files.
 **tests**
-- `parse_file` selects parser based on file extension; unsupported extensions raise an exception, tested implicitly by skipping other languages.
-- Cache serialization uses JSON; node objects must be serializable (e.g., `Node` is a dataclass with simple fields), and `load_cached_nodes` reconstructs them without accessing the original code.
-- The docstring extraction test (`test_docstring_extracted`) assumes the first node in the returned list carries the docstring; it fails if node ordering changes.
-- Import extraction tests (`test_imports_extracted`) use `isinstance` with a tuple of node types, requiring the exact types (e.g., `ImportNode`, `ImportFromNode`) to match.
-- All inline sample code is embedded as raw strings in test functions; modifications to parser behavior may require updating samples that rely on specific node order or attribute values.
-- The cache round-trip test uses `TemporaryDirectory` to ensure cleanup; it assumes the cache directory is writable and non‑existent initially.
+- test_config functions use _clean_env/_restore_env to pop/restore specific env vars; they must be called in that order and are not idempotent if called outside test flow
+- density_group expects input as list of (Path, file_count) tuples; hierarchy is determined by Path.relative_to and parent anchor logic; sparse means <=1 file per folder
+- test_manifest hash test uses NamedTemporaryFile with delete=False; file remains until test ends; compute_hash reads entire file content
+- test_api_contracts modifies Config attributes via setattr to create a synthetic agent_protocol_bundle; this mutates the global Config object and is not thread-safe
+- test_wiki _make_node returns ASTNode with 'calls' and 'called_by' as lists; the symbols must be added via update() afterwards
+- test_agent_cli uses CliRunner from click.testing; each test invokes a separate Click command group; output is captured as string and parsed with json.loads
 
 ## Workflow — How to Answer Questions About This Codebase
 

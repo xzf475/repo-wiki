@@ -771,7 +771,14 @@ async function doEditMeta(){
     hideEditMeta();
     const n=(data.branches||[]).length;
     toast(`"${name}" info updated, reindexing ${n} branches (${data.task_id})`,'info');
-    openRepo(name);
+    startTaskPolling(data.task_id, name+' reindex', (task)=>{
+      if(task.status==='completed'){
+        toast(`"${name}" reindex complete`);
+        openRepo(name);
+      }else{
+        toast('Reindex failed: '+(task.error||'unknown'),'error');
+      }
+    });
   }catch(e){
     statusEl.textContent='Network error: '+e.message;
     btn.disabled=false;

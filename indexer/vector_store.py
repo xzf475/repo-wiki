@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import re
 import logging
 import threading
 from pathlib import Path
@@ -233,11 +234,14 @@ def _truncate_list(obj: list, max_json_len: int = 4000) -> str:
 
 
 def _build_meta(node, branch: str = "") -> dict:
+    from indexer.retrieval import stable_symbol_id
+
     meta: dict = {
         "type": node.type,
         "file": node.file,
         "line_start": node.line_start,
         "line_end": node.line_end,
+        "stable_symbol_id": stable_symbol_id(node.id, node.type, node.file, node.docstring or ""),
     }
     meta["branch"] = branch
     if node.calls:
@@ -246,8 +250,34 @@ def _build_meta(node, branch: str = "") -> dict:
         meta["called_by"] = _truncate_list(node.called_by)
     if node.imports:
         meta["imports"] = _truncate_list(node.imports)
+    entry_point_kind = getattr(node, "entry_point_kind", "") or _infer_entry_point_kind(node)
+    if entry_point_kind:
+        meta["entry_point"] = True
+        meta["entry_point_kind"] = entry_point_kind
+        if getattr(node, "entry_point_path", ""):
+            meta["entry_point_path"] = node.entry_point_path
     return meta
 
 
 def json_dumps_compact(obj) -> str:
     return json.dumps(obj, separators=(",", ":"))
+
+
+def _infer_entry_point_kind(node) -> str:
+    hay = " ".join([
+        getattr(node, "id", ""),
+        getattr(node, "file", ""),
+        getattr(node, "type", ""),
+        getattr(node, "docstring", "") or "",
+    ]).lower()
+    if re.search(r"\b(get|post|put|patch|delete)\s+/", hay) or any(token in hay for token in ("endpoint", "route", "controller")):
+        return "api"
+    if any(token in hay for token in ("command", "cli", "click.", "argparse", "typer.")):
+        return "cli"
+    if any(token in hay for token in ("handler", "onclick", "on_click", "event")):
+        return "event"
+    if any(token in hay for token in ("cron", "schedule", "job", "worker")):
+        return "job"
+    if "webhook" in hay:
+        return "webhook"
+    return ""

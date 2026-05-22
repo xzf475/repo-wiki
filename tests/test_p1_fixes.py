@@ -1048,6 +1048,14 @@ class TestRound15Fixes:
         assert "try{" in func_body
         assert "catch(e)" in func_body
 
+    def test_edit_meta_polls_reindex_task(self):
+        with open("indexer/static/index.html", "r") as f:
+            src = f.read()
+        idx = src.index("async function doEditMeta")
+        func_body = src[idx:idx+1600]
+        assert "startTaskPolling(data.task_id" in func_body
+        assert "Reindex failed:" in func_body
+
     def test_do_unregister_has_try_catch(self):
         with open("indexer/static/index.html", "r") as f:
             src = f.read()
@@ -1092,6 +1100,50 @@ class TestRound15Fixes:
 
 
 class TestRound16Fixes:
+    def test_reindex_allows_index_only_request(self):
+        import tempfile
+        from pathlib import Path
+
+        from starlette.testclient import TestClient
+
+        import indexer.rest_api as api
+
+        root = Path(tempfile.mkdtemp())
+        (root / ".indexer").mkdir()
+        api.registry.register("index-only-repo", root, url="", branches=["main"])
+
+        client = TestClient(api.create_app())
+        response = client.post("/api/repo/index-only-repo/reindex", json={"skip_deep": True})
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "pending"
+
+    def test_reindex_uses_shared_all_branches_runner(self):
+        import inspect
+
+        from indexer.rest_api import reindex_repo
+
+        src = inspect.getsource(reindex_repo)
+        assert "_run_all_branches" in src
+        assert "_run_rebuild_task" in src
+
+    def test_destructive_git_cleanup_before_checkout(self):
+        from pathlib import Path
+        from unittest.mock import Mock, patch
+
+        from indexer.git_ops import git_fetch_checkout_pull
+
+        mock_result = Mock(returncode=0, stderr="", stdout="")
+        with patch("indexer.git_ops.subprocess.run", return_value=mock_result) as run:
+            git_fetch_checkout_pull(Path("/tmp/repo"), "feature", destructive=True)
+
+        commands = [call.args[0] for call in run.call_args_list]
+        checkout_pos = next(i for i, cmd in enumerate(commands) if "checkout" in cmd)
+        reset_pos = next(i for i, cmd in enumerate(commands) if "reset" in cmd)
+        clean_pos = next(i for i, cmd in enumerate(commands) if "clean" in cmd)
+        assert reset_pos < checkout_pos
+        assert clean_pos < checkout_pos
+
     def test_rebuild_git_before_delete(self):
         import inspect
         from indexer.rest_api import _run_rebuild_task_inner

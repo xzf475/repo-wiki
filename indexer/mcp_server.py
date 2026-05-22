@@ -133,6 +133,157 @@ def create_server(repo_root: Path | None = None, mcp_api_key: str | None = None)
         from indexer.retrieval import get_source_context
         return get_source_context(file_path, line_start, line_end, repo_root, padding=padding)
 
+    @mcp.tool()
+    def get_edit_context_tool(symbol_id: str, padding: int = 8) -> str:
+        """Return an edit-ready context bundle for a symbol: source, callers, callees,
+        sibling symbols, candidate tests, and index freshness.
+
+        Use this before modifying code after a symbol has been located.
+        """
+        padding = max(0, min(padding, 50))
+        from indexer.retrieval import get_edit_context
+        context = get_edit_context(symbol_id, cfg, repo_root, padding=padding)
+        return json.dumps(context, indent=2)
+
+    @mcp.tool()
+    def resolve_symbol_tool(query: str, file_hint: str = "", type_hint: str = "", top_k: int = 10) -> str:
+        """Resolve a natural language query or symbol name to a concrete component_id."""
+        top_k = max(1, min(top_k, 50))
+        from indexer.retrieval import resolve_symbol
+        return json.dumps(
+            resolve_symbol(query, cfg, repo_root, file_hint=file_hint, type_hint=type_hint, top_k=top_k),
+            indent=2,
+        )
+
+    @mcp.tool()
+    def find_tests_for_symbol_tool(symbol_id: str, max_results: int = 10) -> str:
+        """Find likely test files for a symbol based on indexed files, symbol names,
+        imports, and test naming conventions.
+        """
+        max_results = max(1, min(max_results, 50))
+        from indexer.retrieval import find_tests_for_symbol
+        matches = find_tests_for_symbol(symbol_id, cfg, repo_root, max_results=max_results)
+        return json.dumps({"results": matches, "total": len(matches)}, indent=2)
+
+    @mcp.tool()
+    def pre_edit_check_tool(symbol_id: str) -> str:
+        """Run pre-edit checks for a symbol: index freshness, dirty files, tests, commands, impact hints."""
+        from indexer.retrieval import pre_edit_check
+        return json.dumps(pre_edit_check(symbol_id, cfg, repo_root), indent=2)
+
+    @mcp.tool()
+    def impact_analysis_tool(symbol_id: str, max_depth: int = 2) -> str:
+        """Analyze the likely impact of changing a symbol: callers, callees, tests,
+        entry points, affected files, risk points, and index freshness.
+        """
+        max_depth = max(1, min(max_depth, 5))
+        from indexer.retrieval import impact_analysis
+        return json.dumps(impact_analysis(symbol_id, cfg, repo_root, max_depth=max_depth), indent=2)
+
+    @mcp.tool()
+    def change_plan_tool(goal: str, symbol_id: str) -> str:
+        """Create an agent-ready modification plan for a goal and target symbol."""
+        from indexer.retrieval import change_plan
+        return json.dumps(change_plan(goal, symbol_id, cfg, repo_root), indent=2)
+
+    @mcp.tool()
+    def diagnose_index_tool() -> str:
+        """Diagnose index integrity: manifest, wiki, vector DB, source files, and freshness."""
+        from indexer.retrieval import diagnose_index
+        return json.dumps(diagnose_index(repo_root, cfg), indent=2)
+
+    @mcp.tool()
+    def agent_protocol_tool(goal: str, symbol_id: str, protocol: str = "codex") -> str:
+        """Return compact agent protocol fields: files to read, edit targets,
+        verification commands, warnings, and index freshness.
+        """
+        from indexer.retrieval import agent_protocol_bundle
+        return json.dumps(agent_protocol_bundle(goal, symbol_id, cfg, repo_root, protocol=protocol), indent=2)
+
+    @mcp.tool()
+    def locate_from_error_tool(error_text: str, top_k: int = 10) -> str:
+        """Locate likely code symbols from a stack trace, error log, HTTP path, or exception text."""
+        top_k = max(1, min(top_k, 50))
+        from indexer.retrieval import locate_from_error
+        return json.dumps(locate_from_error(error_text, cfg, repo_root, top_k=top_k), indent=2)
+
+    @mcp.tool()
+    def list_entry_points_tool(kind: str = "", max_results: int = 50) -> str:
+        """List indexed API/CLI/event/job/webhook entry points."""
+        max_results = max(1, min(max_results, 200))
+        from indexer.retrieval import list_entry_points
+        return json.dumps(list_entry_points(cfg, repo_root, kind=kind, max_results=max_results), indent=2)
+
+    @mcp.tool()
+    def post_edit_verify_tool(diff: str = "", changed_files: list[str] | None = None) -> str:
+        """Verify local edits before commit. If diff is omitted, reads local git diff."""
+        from indexer.retrieval import post_edit_verify
+        return json.dumps(post_edit_verify(cfg, repo_root, diff=diff, changed_files=changed_files), indent=2)
+
+    @mcp.tool()
+    def change_set_tool(
+        goal: str,
+        symbol_id: str = "",
+        diff: str = "",
+        changed_files: list[str] | None = None,
+        max_results: int = 50,
+        include_details: bool = True,
+    ) -> str:
+        """Build a must-change set from a goal plus target symbol or diff."""
+        max_results = max(1, min(max_results, 500))
+        from indexer.retrieval import change_set
+        return json.dumps(
+            change_set(
+                goal,
+                cfg,
+                repo_root,
+                symbol_id=symbol_id,
+                diff=diff,
+                changed_files=changed_files,
+                max_results=max_results,
+                include_details=include_details,
+            ),
+            indent=2,
+        )
+
+    @mcp.tool()
+    def coverage_map_tool(symbol_id: str = "", max_results: int = 100) -> str:
+        """Map source symbols to likely covering tests."""
+        max_results = max(1, min(max_results, 500))
+        from indexer.retrieval import coverage_map
+        return json.dumps(coverage_map(cfg, repo_root, symbol_id=symbol_id, max_results=max_results), indent=2)
+
+    @mcp.tool()
+    def index_diff_report_tool(before_nodes: list[dict] | None = None, after_nodes: list[dict] | None = None) -> str:
+        """Summarize symbol, entry point, and call graph changes between two index snapshots."""
+        from indexer.retrieval import index_diff_report
+        return json.dumps(index_diff_report(cfg, repo_root, before_nodes=before_nodes or [], after_nodes=after_nodes or []), indent=2)
+
+    @mcp.tool()
+    def cross_repo_graph_tool(max_results: int = 200) -> str:
+        """Local mode has one repo, so returns an empty cross-repo graph."""
+        max_results = max(1, min(max_results, 1000))
+        from indexer.retrieval import cross_repo_graph
+        return json.dumps(cross_repo_graph({"local": {"root": repo_root, "config": cfg}}, max_results=max_results), indent=2)
+
+    @mcp.tool()
+    def agent_capabilities_manifest_tool() -> str:
+        """Return tool capability manifest and recommended Agent flow."""
+        from indexer.retrieval import agent_capabilities_manifest
+        return json.dumps(agent_capabilities_manifest(), indent=2)
+
+    @mcp.tool()
+    def stable_symbol_id_tool(symbol_id: str, symbol_type: str = "", file_path: str = "", source: str = "") -> str:
+        """Generate deterministic stable symbol id for rename/move tracking."""
+        from indexer.retrieval import stable_symbol_id
+        return json.dumps({"stable_symbol_id": stable_symbol_id(symbol_id, symbol_type, file_path, source)}, indent=2)
+
+    @mcp.tool()
+    def get_index_status_tool() -> str:
+        """Report whether the local index is stale relative to the current workspace."""
+        from indexer.retrieval import get_index_status
+        return json.dumps(get_index_status(repo_root), indent=2)
+
     _apply_mcp_auth(mcp, mcp_api_key)
     return mcp
 
@@ -327,6 +478,219 @@ def create_api_server(api_url: str, api_key: str | None = None, mcp_api_key: str
             return f"Source error: {data['error']}"
 
         return data.get("source", "No source returned.")
+
+    @mcp.tool()
+    def get_edit_context_tool(symbol_id: str, repo: str, padding: int = 8) -> str:
+        """Return an edit-ready context bundle for a symbol in a registered repo."""
+        if not repo:
+            return "repo is required"
+        padding = max(0, min(padding, 50))
+        data = _api_post("/edit-context", {"symbol_id": symbol_id, "repo": repo, "padding": padding})
+        if data.get("error"):
+            return f"Edit context error: {data['error']}"
+        return json.dumps(data, indent=2)
+
+    @mcp.tool()
+    def resolve_symbol_tool(query: str, repo: str, file_hint: str = "", type_hint: str = "", top_k: int = 10) -> str:
+        """Resolve a query or symbol name to a concrete component_id in a registered repo."""
+        if not repo:
+            return "repo is required"
+        top_k = max(1, min(top_k, 50))
+        data = _api_post(
+            "/resolve-symbol",
+            {"query": query, "repo": repo, "file_hint": file_hint, "type_hint": type_hint, "top_k": top_k},
+        )
+        if data.get("error"):
+            return f"Resolve symbol error: {data['error']}"
+        return json.dumps(data, indent=2)
+
+    @mcp.tool()
+    def find_tests_for_symbol_tool(symbol_id: str, repo: str, max_results: int = 10) -> str:
+        """Find likely test files for a symbol in a registered repo."""
+        if not repo:
+            return "repo is required"
+        max_results = max(1, min(max_results, 50))
+        data = _api_post("/tests-for-symbol", {"symbol_id": symbol_id, "repo": repo, "max_results": max_results})
+        if data.get("error"):
+            return f"Tests lookup error: {data['error']}"
+        return json.dumps(data, indent=2)
+
+    @mcp.tool()
+    def pre_edit_check_tool(symbol_id: str, repo: str) -> str:
+        """Run pre-edit checks for a symbol in a registered repo."""
+        if not repo:
+            return "repo is required"
+        data = _api_post("/pre-edit-check", {"symbol_id": symbol_id, "repo": repo})
+        if data.get("error"):
+            return f"Pre-edit check error: {data['error']}"
+        return json.dumps(data, indent=2)
+
+    @mcp.tool()
+    def impact_analysis_tool(symbol_id: str, repo: str, max_depth: int = 2) -> str:
+        """Analyze likely impact of changing a symbol in a registered repo."""
+        if not repo:
+            return "repo is required"
+        max_depth = max(1, min(max_depth, 5))
+        data = _api_post("/impact-analysis", {"symbol_id": symbol_id, "repo": repo, "max_depth": max_depth})
+        if data.get("error"):
+            return f"Impact analysis error: {data['error']}"
+        return json.dumps(data, indent=2)
+
+    @mcp.tool()
+    def change_plan_tool(goal: str, symbol_id: str, repo: str) -> str:
+        """Create an agent-ready modification plan for a registered repo."""
+        if not repo:
+            return "repo is required"
+        data = _api_post("/change-plan", {"goal": goal, "symbol_id": symbol_id, "repo": repo})
+        if data.get("error"):
+            return f"Change plan error: {data['error']}"
+        return json.dumps(data, indent=2)
+
+    @mcp.tool()
+    def diagnose_index_tool(repo: str | None = None) -> str:
+        """Diagnose index integrity for one or all registered repos."""
+        body = {}
+        if repo:
+            body["repo"] = repo
+        data = _api_post("/diagnose-index", body)
+        if data.get("error"):
+            return f"Diagnose index error: {data['error']}"
+        return json.dumps(data, indent=2)
+
+    @mcp.tool()
+    def agent_protocol_tool(goal: str, symbol_id: str, repo: str, protocol: str = "codex") -> str:
+        """Return compact agent protocol fields for a registered repo."""
+        if not repo:
+            return "repo is required"
+        data = _api_post(
+            "/agent-protocol",
+            {"goal": goal, "symbol_id": symbol_id, "repo": repo, "protocol": protocol},
+        )
+        if data.get("error"):
+            return f"Agent protocol error: {data['error']}"
+        return json.dumps(data, indent=2)
+
+    @mcp.tool()
+    def locate_from_error_tool(error_text: str, repo: str | None = None, top_k: int = 10) -> str:
+        """Locate likely code symbols from a stack trace, error log, HTTP path, or exception text."""
+        top_k = max(1, min(top_k, 50))
+        body = {"error_text": error_text, "top_k": top_k}
+        if repo:
+            body["repo"] = repo
+        data = _api_post("/locate-from-error", body)
+        if data.get("error"):
+            return f"Locate from error error: {data['error']}"
+        return json.dumps(data, indent=2)
+
+    @mcp.tool()
+    def list_entry_points_tool(repo: str | None = None, kind: str = "", max_results: int = 50) -> str:
+        """List indexed API/CLI/event/job/webhook entry points."""
+        max_results = max(1, min(max_results, 200))
+        body = {"kind": kind, "max_results": max_results}
+        if repo:
+            body["repo"] = repo
+        data = _api_post("/entry-points", body)
+        if data.get("error"):
+            return f"List entry points error: {data['error']}"
+        return json.dumps(data, indent=2)
+
+    @mcp.tool()
+    def post_edit_verify_tool(repo: str, diff: str = "", changed_files: list[str] | None = None) -> str:
+        """Verify edits before commit. In remote mode pass local diff payload explicitly."""
+        if not repo:
+            return "repo is required"
+        body = {"repo": repo, "diff": diff, "changed_files": changed_files or []}
+        data = _api_post("/post-edit-verify", body)
+        if data.get("error"):
+            return f"Post-edit verify error: {data['error']}"
+        return json.dumps(data, indent=2)
+
+    @mcp.tool()
+    def change_set_tool(
+        repo: str,
+        goal: str,
+        symbol_id: str = "",
+        diff: str = "",
+        changed_files: list[str] | None = None,
+        max_results: int = 50,
+        include_details: bool = True,
+    ) -> str:
+        """Build a must-change set in remote mode. Pass diff for local uncommitted edits."""
+        if not repo:
+            return "repo is required"
+        max_results = max(1, min(max_results, 500))
+        data = _api_post(
+            "/change-set",
+            {
+                "repo": repo,
+                "goal": goal,
+                "symbol_id": symbol_id,
+                "diff": diff,
+                "changed_files": changed_files or [],
+                "max_results": max_results,
+                "include_details": include_details,
+            },
+        )
+        if data.get("error"):
+            return f"Change set error: {data['error']}"
+        return json.dumps(data, indent=2)
+
+    @mcp.tool()
+    def coverage_map_tool(repo: str, symbol_id: str = "", max_results: int = 100) -> str:
+        """Map source symbols to likely covering tests in a registered repo."""
+        if not repo:
+            return "repo is required"
+        max_results = max(1, min(max_results, 500))
+        data = _api_post("/coverage-map", {"repo": repo, "symbol_id": symbol_id, "max_results": max_results})
+        if data.get("error"):
+            return f"Coverage map error: {data['error']}"
+        return json.dumps(data, indent=2)
+
+    @mcp.tool()
+    def index_diff_report_tool(repo: str, before_nodes: list[dict] | None = None, after_nodes: list[dict] | None = None) -> str:
+        """Summarize symbol, entry point, and call graph changes between two index snapshots."""
+        if not repo:
+            return "repo is required"
+        data = _api_post("/index-diff-report", {"repo": repo, "before_nodes": before_nodes or [], "after_nodes": after_nodes or []})
+        if data.get("error"):
+            return f"Index diff report error: {data['error']}"
+        return json.dumps(data, indent=2)
+
+    @mcp.tool()
+    def cross_repo_graph_tool(repos: list[str] | None = None, max_results: int = 200) -> str:
+        """Build cross-repo dependency graph for registered repos."""
+        max_results = max(1, min(max_results, 1000))
+        data = _api_post("/cross-repo-graph", {"repos": repos or [], "max_results": max_results})
+        if data.get("error"):
+            return f"Cross-repo graph error: {data['error']}"
+        return json.dumps(data, indent=2)
+
+    @mcp.tool()
+    def agent_capabilities_manifest_tool() -> str:
+        """Return tool capability manifest and recommended Agent flow."""
+        data = _api_get("/agent-capabilities")
+        if data.get("error"):
+            return f"Agent capabilities error: {data['error']}"
+        return json.dumps(data, indent=2)
+
+    @mcp.tool()
+    def stable_symbol_id_tool(symbol_id: str, symbol_type: str = "", file_path: str = "", source: str = "") -> str:
+        """Generate deterministic stable symbol id for rename/move tracking."""
+        data = _api_post("/stable-symbol-id", {"symbol_id": symbol_id, "symbol_type": symbol_type, "file_path": file_path, "source": source})
+        if data.get("error"):
+            return f"Stable symbol id error: {data['error']}"
+        return json.dumps(data, indent=2)
+
+    @mcp.tool()
+    def get_index_status_tool(repo: str | None = None) -> str:
+        """Report whether registered repo indexes are stale relative to current workspace state."""
+        body = {}
+        if repo:
+            body["repo"] = repo
+        data = _api_post("/index-status", body)
+        if data.get("error"):
+            return f"Index status error: {data['error']}"
+        return json.dumps(data, indent=2)
 
     _apply_mcp_auth(mcp, mcp_api_key)
     return mcp

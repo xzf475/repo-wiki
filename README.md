@@ -65,6 +65,12 @@ repo-wiki status            # 显示上次索引提交、过期文件、统计
 repo-wiki hook install      # 手动安装 pre-commit hook
 repo-wiki hook remove       # 移除 pre-commit hook
 repo-wiki serve             # 启动 MCP 服务器
+repo-wiki agent capabilities # 输出 Agent 工具能力清单
+repo-wiki agent schema       # 输出 OpenAPI/JSON Schema 契约
+repo-wiki agent context --symbol-id src/auth.py::validate_token
+repo-wiki agent plan --goal "fix token validation" --symbol-id src/auth.py::validate_token
+repo-wiki agent verify       # 基于本地 git diff 生成提交前验证建议
+repo-wiki agent diagnose     # 诊断 manifest/wiki/vector/source/freshness
 ```
 
 每次提交时 pre-commit hook 自动运行 `repo-wiki run --staged`，仅重新索引变更文件。
@@ -123,8 +129,26 @@ repo-wiki 提供 [MCP](https://modelcontextprotocol.io) 服务器，让支持 MC
 | MCP 工具 | 说明 | 可用模式 |
 |----------|------|----------|
 | `search_symbols_tool` | 语义搜索代码符号（支持 LLM 查询改写） | 单仓库 / 多仓库 |
+| `resolve_symbol_tool` | 将自然语言/符号名/文件提示解析为具体 `component_id` | 单仓库 / 多仓库 |
 | `trace_call_tool` | 追踪调用链（向上/向下） | 单仓库 / 多仓库 |
 | `get_source_context_tool` | 获取源码上下文 | 单仓库 / 多仓库 |
+| `get_edit_context_tool` | 获取修改前上下文包（源码、调用方、被调方、同文件符号、候选测试、索引状态） | 单仓库 / 多仓库 |
+| `find_tests_for_symbol_tool` | 查找符号相关测试文件 | 单仓库 / 多仓库 |
+| `pre_edit_check_tool` | 修改前检查（索引状态、dirty 文件、候选测试、推荐命令、影响范围） | 单仓库 / 多仓库 |
+| `impact_analysis_tool` | 分析符号变更影响面（调用方、被调方、入口点、测试、风险） | 单仓库 / 多仓库 |
+| `change_plan_tool` | 为目标和符号生成 Agent 修改计划（读文件、改动目标、验证命令、风险） | 单仓库 / 多仓库 |
+| `diagnose_index_tool` | 诊断索引完整性（manifest、wiki、vector DB、源码缺失、新鲜度） | 单仓库 / 多仓库 |
+| `agent_protocol_tool` | 输出 Codex/Claude 友好的紧凑协议字段 | 单仓库 / 多仓库 |
+| `locate_from_error_tool` | 从 stack trace、错误日志、HTTP path 定位代码候选 | 单仓库 / 多仓库 |
+| `list_entry_points_tool` | 列出 API/CLI/event/job/webhook 入口点 | 单仓库 / 多仓库 |
+| `post_edit_verify_tool` | 修改后提交前验证建议；本地自动读 `git diff`，远程可传 diff | 单仓库 / 多仓库 |
+| `change_set_tool` | 从目标、符号或 diff 推导必须一起改的文件/符号集合 | 单仓库 / 多仓库 |
+| `coverage_map_tool` | 反查源码符号与候选测试覆盖关系 | 单仓库 / 多仓库 |
+| `index_diff_report_tool` | 对比索引快照中的符号、入口点、调用图变化 | 单仓库 / 多仓库 |
+| `cross_repo_graph_tool` | 构建跨仓依赖图（如 frontend client → backend route） | 多仓库 |
+| `stable_symbol_id_tool` | 生成稳定符号 ID，辅助重命名/移动追踪 | 单仓库 / 多仓库 |
+| `agent_capabilities_manifest_tool` | 输出 Agent 工具能力清单和推荐调用顺序 | 单仓库 / 多仓库 |
+| `get_index_status_tool` | 检查索引是否过期及原因 | 单仓库 / 多仓库 |
 | `list_repos` | 列出所有已注册仓库（含分支、索引提交、统计） | 多仓库 |
 
 ### 单仓库模式
@@ -138,8 +162,26 @@ repo-wiki serve           # stdio 模式，提供 3 个工具
 | MCP 工具 | 说明 |
 |----------|------|
 | `search_symbols_tool` | 语义搜索代码符号 |
+| `resolve_symbol_tool` | 解析具体 `component_id` |
 | `trace_call_tool` | 追踪调用链 |
 | `get_source_context_tool` | 获取源码上下文 |
+| `get_edit_context_tool` | 获取修改前上下文包 |
+| `find_tests_for_symbol_tool` | 查找符号相关测试文件 |
+| `pre_edit_check_tool` | 修改前检查 |
+| `impact_analysis_tool` | 分析变更影响面 |
+| `change_plan_tool` | 生成修改计划 |
+| `diagnose_index_tool` | 诊断索引健康度 |
+| `agent_protocol_tool` | 输出 Agent 紧凑协议 |
+| `locate_from_error_tool` | 从错误日志定位代码 |
+| `list_entry_points_tool` | 列出入口点 |
+| `post_edit_verify_tool` | 修改后验证建议 |
+| `change_set_tool` | 推导必须一起改的集合 |
+| `coverage_map_tool` | 测试覆盖反查 |
+| `index_diff_report_tool` | 索引差异报告 |
+| `cross_repo_graph_tool` | 跨仓依赖图 |
+| `stable_symbol_id_tool` | 生成稳定符号 ID |
+| `agent_capabilities_manifest_tool` | 工具能力清单 |
+| `get_index_status_tool` | 检查索引是否过期 |
 
 ### 多仓库模式
 
@@ -246,8 +288,27 @@ npx skills add /path/to/repo-wiki -g -y
 | 端点 | 方法 | 说明 |
 |------|------|------|
 | `/search` | POST | 语义搜索（默认启用 LLM 查询改写，设置 `"rewrite":false` 关闭） |
+| `/resolve-symbol` | POST | 将自然语言/符号名/文件提示解析为具体 `component_id` |
 | `/trace` | POST | 追踪调用链（向上/向下） |
 | `/source` | POST | 获取文件指定行范围的源码 |
+| `/edit-context` | POST | 获取修改前上下文包 |
+| `/tests-for-symbol` | POST | 查找符号相关测试文件 |
+| `/pre-edit-check` | POST | 修改前检查并返回推荐测试命令 |
+| `/impact-analysis` | POST | 分析符号变更影响面 |
+| `/change-plan` | POST | 生成 Agent 修改计划 |
+| `/diagnose-index` | POST | 诊断索引完整性和新鲜度 |
+| `/agent-protocol` | POST | 返回 Codex/Claude 友好的紧凑字段 |
+| `/locate-from-error` | POST | 从 stack trace、错误日志、HTTP path 定位代码候选 |
+| `/entry-points` | POST | 列出 API/CLI/event/job/webhook 入口点 |
+| `/post-edit-verify` | POST | 基于 diff/changed_files 生成提交前验证建议 |
+| `/change-set` | POST | 推导必须一起改的文件/符号集合 |
+| `/coverage-map` | POST | 反查源码符号候选测试覆盖 |
+| `/index-diff-report` | POST | 对比索引快照变化 |
+| `/cross-repo-graph` | POST | 构建跨仓依赖图 |
+| `/stable-symbol-id` | POST | 生成稳定符号 ID |
+| `/agent-capabilities` | GET/POST | Agent 工具能力清单 |
+| `/agent-schema` | GET/POST | Agent API 的 OpenAPI 3.1 / JSON Schema 契约 |
+| `/index-status` | POST | 检查索引是否过期 |
 | `/api/repo/{name}` | GET | 仓库详情 |
 | `/skill` | GET | 多仓库合并技能文件 |
 

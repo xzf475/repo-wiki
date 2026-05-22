@@ -1,5 +1,6 @@
 # indexer/cli.py
 from __future__ import annotations
+import json
 import logging
 import os
 import subprocess
@@ -295,6 +296,75 @@ def status():
 
 
 @main.group()
+def agent():
+    """Run local Agent code-location workflows."""
+    pass
+
+
+@agent.command("context")
+@click.option("--symbol-id", required=True, help="Component ID to inspect, e.g. src/auth.py::validate_token")
+@click.option("--padding", default=8, type=int, help="Source context padding")
+def agent_context(symbol_id: str, padding: int):
+    """Print an edit-context bundle for a symbol."""
+    from indexer.agent_context import get_edit_context
+
+    root = Path.cwd()
+    cfg = load_config(root)
+    click.echo(_json_dumps(get_edit_context(symbol_id, cfg, root, padding=padding)))
+
+
+@agent.command("verify")
+@click.option("--diff-file", type=click.Path(exists=True, dir_okay=False), help="Read a git diff from this file")
+@click.option("--changed-file", multiple=True, help="Changed file path. Can be repeated.")
+def agent_verify(diff_file: str | None, changed_file: tuple[str, ...]):
+    """Suggest verification after an Agent edit."""
+    from indexer.agent_diff import post_edit_verify
+
+    root = Path.cwd()
+    cfg = load_config(root)
+    diff = Path(diff_file).read_text(encoding="utf-8", errors="replace") if diff_file else ""
+    click.echo(_json_dumps(post_edit_verify(cfg, root, diff=diff, changed_files=list(changed_file) or None)))
+
+
+@agent.command("plan")
+@click.option("--goal", required=True, help="Change goal")
+@click.option("--symbol-id", required=True, help="Target component ID")
+def agent_plan(goal: str, symbol_id: str):
+    """Print an Agent change plan."""
+    from indexer.agent_context import change_plan
+
+    root = Path.cwd()
+    cfg = load_config(root)
+    click.echo(_json_dumps(change_plan(goal, symbol_id, cfg, root)))
+
+
+@agent.command("diagnose")
+def agent_diagnose():
+    """Print local index health diagnostics."""
+    from indexer.agent_diagnostics import diagnose_index
+
+    root = Path.cwd()
+    cfg = load_config(root)
+    click.echo(_json_dumps(diagnose_index(root, cfg)))
+
+
+@agent.command("capabilities")
+def agent_capabilities():
+    """Print the Agent tool manifest."""
+    from indexer.agent_protocol import agent_capabilities_manifest
+
+    click.echo(_json_dumps(agent_capabilities_manifest()))
+
+
+@agent.command("schema")
+def agent_schema():
+    """Print the machine-readable Agent API schema."""
+    from indexer.agent_protocol import agent_schema
+
+    click.echo(_json_dumps(agent_schema()))
+
+
+@main.group()
 def hook():
     """Manage the pre-commit hook."""
     pass
@@ -444,3 +514,7 @@ def _is_indexable(path: str, cfg: Config) -> bool:
         if fnmatch(path, pattern):
             return False
     return True
+
+
+def _json_dumps(payload: dict) -> str:
+    return json.dumps(payload, ensure_ascii=False, indent=2)
