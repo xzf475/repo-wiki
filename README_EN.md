@@ -65,6 +65,12 @@ repo-wiki status             # show last indexed commit, stale files, stats
 repo-wiki hook install       # manually install pre-commit hook
 repo-wiki hook remove        # remove pre-commit hook
 repo-wiki serve              # start MCP server
+repo-wiki agent capabilities # print Agent tool manifest
+repo-wiki agent schema       # print OpenAPI/JSON Schema contract
+repo-wiki agent context --symbol-id src/auth.py::validate_token
+repo-wiki agent plan --goal "fix token validation" --symbol-id src/auth.py::validate_token
+repo-wiki agent verify       # generate pre-commit verification guidance from local git diff
+repo-wiki agent diagnose     # diagnose manifest/wiki/vector/source/freshness
 ```
 
 The pre-commit hook runs `repo-wiki run --staged` on every commit — only changed files are re-indexed.
@@ -123,8 +129,26 @@ repo-wiki provides an [MCP](https://modelcontextprotocol.io) server, letting MCP
 | MCP Tool | Description | Available In |
 |----------|-------------|-------------|
 | `search_symbols_tool` | Semantic search (supports LLM query rewriting) | Single / Multi-repo |
+| `resolve_symbol_tool` | Resolve natural language, symbol names, or file hints to a concrete component ID | Single / Multi-repo |
 | `trace_call_tool` | Trace call graph (up/down) | Single / Multi-repo |
 | `get_source_context_tool` | Get source code context | Single / Multi-repo |
+| `get_edit_context_tool` | Get edit-ready context: source, callers, callees, sibling symbols, tests, index status | Single / Multi-repo |
+| `find_tests_for_symbol_tool` | Find likely tests for a symbol | Single / Multi-repo |
+| `pre_edit_check_tool` | Check index freshness, dirty files, candidate tests, and recommended commands | Single / Multi-repo |
+| `impact_analysis_tool` | Analyze callers, callees, entry points, affected files, tests, and risks | Single / Multi-repo |
+| `change_plan_tool` | Build an Agent edit plan for a goal and target symbol | Single / Multi-repo |
+| `diagnose_index_tool` | Diagnose manifest/wiki/vector/source/freshness health | Single / Multi-repo |
+| `agent_protocol_tool` | Return compact Codex/Claude handoff fields | Single / Multi-repo |
+| `locate_from_error_tool` | Locate code candidates from stack traces, logs, exception text, or HTTP paths | Single / Multi-repo |
+| `list_entry_points_tool` | List API/CLI/event/job/webhook entry points | Single / Multi-repo |
+| `post_edit_verify_tool` | Generate post-edit verification guidance; local mode reads `git diff`, remote mode accepts `diff` | Single / Multi-repo |
+| `change_set_tool` | Infer must-change files, related symbols, tests, commands, and risks from a goal/symbol/diff | Single / Multi-repo |
+| `coverage_map_tool` | Map source symbols to likely covering tests | Single / Multi-repo |
+| `index_diff_report_tool` | Compare index snapshots, including stable-ID move/rename detection | Single / Multi-repo |
+| `cross_repo_graph_tool` | Build cross-repo HTTP/GraphQL dependency edges | Multi-repo |
+| `stable_symbol_id_tool` | Generate deterministic symbol identity for move/rename tracking | Single / Multi-repo |
+| `agent_capabilities_manifest_tool` | Return Agent tool manifest and recommended flow | Single / Multi-repo |
+| `get_index_status_tool` | Check whether the index is stale and why | Single / Multi-repo |
 | `list_repos` | List registered repos (branches, indexed commit, stats) | Multi-repo |
 
 ### Single-Repo Mode
@@ -138,8 +162,26 @@ repo-wiki serve           # stdio mode, provides 3 tools
 | MCP Tool | Description |
 |----------|-------------|
 | `search_symbols_tool` | Semantic search for code symbols |
+| `resolve_symbol_tool` | Resolve a concrete component ID |
 | `trace_call_tool` | Trace call graph (up/down) |
 | `get_source_context_tool` | Get source code context |
+| `get_edit_context_tool` | Get edit-ready context bundle |
+| `find_tests_for_symbol_tool` | Find likely tests for a symbol |
+| `pre_edit_check_tool` | Pre-edit checks |
+| `impact_analysis_tool` | Analyze change impact |
+| `change_plan_tool` | Build an Agent edit plan |
+| `diagnose_index_tool` | Diagnose index health |
+| `agent_protocol_tool` | Return compact Agent handoff fields |
+| `locate_from_error_tool` | Locate code from errors/logs |
+| `list_entry_points_tool` | List entry points |
+| `post_edit_verify_tool` | Post-edit verification guidance |
+| `change_set_tool` | Infer must-change set |
+| `coverage_map_tool` | Map source symbols to tests |
+| `index_diff_report_tool` | Compare index snapshots |
+| `cross_repo_graph_tool` | Build cross-repo graph |
+| `stable_symbol_id_tool` | Generate stable symbol ID |
+| `agent_capabilities_manifest_tool` | Tool manifest |
+| `get_index_status_tool` | Index freshness status |
 
 ### Multi-Repo Mode
 
@@ -247,6 +289,25 @@ npx skills add /path/to/repo-wiki -g -y
 | `/search` | POST | Semantic search (LLM query rewriting enabled by default, use `"rewrite":false` to disable) |
 | `/trace` | POST | Trace call graph (up/down) |
 | `/source` | POST | Get source context for a file range |
+| `/edit-context` | POST | Return edit-ready context for a symbol |
+| `/resolve-symbol` | POST | Resolve natural language or symbol hints to a component ID |
+| `/tests-for-symbol` | POST | Find likely tests for a symbol |
+| `/pre-edit-check` | POST | Run pre-edit checks for a symbol |
+| `/impact-analysis` | POST | Analyze callers, callees, entry points, affected files, tests, and risks |
+| `/change-plan` | POST | Generate an Agent edit plan |
+| `/diagnose-index` | POST | Diagnose manifest/wiki/vector/source/freshness health |
+| `/agent-protocol` | POST | Return compact Codex/Claude handoff fields |
+| `/locate-from-error` | POST | Locate likely code from stack traces, logs, exceptions, or HTTP paths |
+| `/entry-points` | POST | List API/CLI/event/job/webhook entry points |
+| `/post-edit-verify` | POST | Generate pre-commit verification guidance from `diff`/`changed_files` |
+| `/change-set` | POST | Infer must-change files, related symbols, tests, commands, and risks |
+| `/coverage-map` | POST | Map source symbols to likely tests |
+| `/index-diff-report` | POST | Compare index snapshots and stable-ID moves |
+| `/cross-repo-graph` | POST | Build cross-repo HTTP/GraphQL dependency edges |
+| `/stable-symbol-id` | POST | Generate a deterministic stable symbol ID |
+| `/agent-capabilities` | GET/POST | Return Agent tool manifest, schemas, examples, and recommended flow |
+| `/agent-schema` | GET/POST | Return OpenAPI 3.1 / JSON Schema contract for Agent endpoints |
+| `/index-status` | POST | Report index freshness and stale/removed file counts |
 | `/api/repo/{name}` | GET | Repo detail |
 | `/skill` | GET | Multi-repo merged skill file |
 

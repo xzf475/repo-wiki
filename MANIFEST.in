@@ -1,0 +1,7 @@
+include README.md
+include README_EN.md
+include CHANGELOG.md
+recursive-include docs *.md
+prune docs/superpowers
+recursive-include skills *.md
+prune tests
