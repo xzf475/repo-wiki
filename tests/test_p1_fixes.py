@@ -1144,6 +1144,31 @@ class TestRound16Fixes:
         assert reset_pos < checkout_pos
         assert clean_pos < checkout_pos
 
+    def test_destructive_git_cleanup_before_pull_without_branch(self):
+        from pathlib import Path
+        from unittest.mock import Mock, patch
+
+        from indexer.git_ops import git_fetch_checkout_pull
+
+        mock_result = Mock(returncode=0, stderr="", stdout="")
+        with patch("indexer.git_ops.subprocess.run", return_value=mock_result) as run:
+            git_fetch_checkout_pull(Path("/tmp/repo"), "", destructive=True)
+
+        commands = [call.args[0] for call in run.call_args_list]
+        pull_pos = next(i for i, cmd in enumerate(commands) if "pull" in cmd)
+        reset_pos = next(i for i, cmd in enumerate(commands) if "reset" in cmd)
+        clean_pos = next(i for i, cmd in enumerate(commands) if "clean" in cmd)
+        assert reset_pos < pull_pos
+        assert clean_pos < pull_pos
+
+    def test_sync_managed_repo_uses_destructive_git_pull(self):
+        import inspect
+        from indexer.rest_api import _run_sync_task
+
+        src = inspect.getsource(_run_sync_task)
+
+        assert "destructive=_is_managed_repo_root" in src
+
     def test_rebuild_git_before_delete(self):
         import inspect
         from indexer.rest_api import _run_rebuild_task_inner

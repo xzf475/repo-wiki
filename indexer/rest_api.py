@@ -679,7 +679,11 @@ def _run_sync_task(task_id: str, name: str, root: Path, skip_deep: bool, branch:
 
         tasks.update(task_id, status="running", progress=10, step="git_pull")
         try:
-            git_fetch_checkout_pull(root, repo_branch if (repo_branch and is_git_repo(root)) else "")
+            git_fetch_checkout_pull(
+                root,
+                repo_branch if (repo_branch and is_git_repo(root)) else "",
+                destructive=_is_managed_repo_root(name, root),
+            )
         except GitOperationError as e:
             tasks.update(task_id, status="failed", progress=10, step=f"git_{e.step}", error=e.stderr)
             return
@@ -853,6 +857,7 @@ def _run_register_task_inner(
                 git_fetch_checkout_pull(
                     clone_dir, branch,
                     sanitize_fn=lambda s: _sanitize_error(s, url, username, password, token),
+                    destructive=True,
                 )
             except GitOperationError as e:
                 tasks.update(task_id, status="failed", progress=10, step=f"git_{e.step}", error=e.stderr)
@@ -988,6 +993,13 @@ def _run_register_task_inner(
         tasks.update(task_id, status="failed", progress=0, step=cmd, error=f"timeout: {cmd} took too long")
     except Exception as e:
         tasks.update(task_id, status="failed", progress=0, step="unknown", error=_sanitize_error(str(e), url, username, password, token))
+
+
+def _is_managed_repo_root(name: str, root: Path) -> bool:
+    try:
+        return root.resolve() == (registry.repos_dir / name).resolve()
+    except OSError:
+        return False
 
 
 async def unregister_repo(request: Request) -> JSONResponse:

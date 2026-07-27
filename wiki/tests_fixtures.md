@@ -2,13 +2,13 @@
 
 ## Overview
 
-These fixtures provide minimal, self-contained cross-language code examples used to unit-test the symbol extraction pipeline. Each file exercises a distinct language feature set: Java (`App.java`) demonstrates classes, interfaces, enums, and methods that delegate to built-in calls (e.g., `add`, `size`); Python (`auth.py`) shows a decorator and a class with a private method calling an undefined helper; Ruby (`app.rb`) implements a simple router with lambda dispatch; Rust (`lib.rs`) features structs, impl blocks, trait definitions, type aliases, and an enum. The group exists to ensure the extractor correctly handles language-specific syntactic patterns while producing uniform symbol records with `calls` fields. By keeping fixtures small and intentionally incomplete (e.g., `sign_payload` not defined anywhere), the tests validate that the extractor captures external references without requiring resolution.
+This test fixtures module provides a curated set of small, multi-language code samples (Java, Python, Ruby, Rust) designed to validate the symbol extraction, type inference, and call-graph reconstruction capabilities of the static analysis tool. Key classes include `App` (Java) demonstrating class/interface/enum relationships, `TokenValidator` (Python) testing decorator and method call chains, `Router` (Ruby) verifying dispatch and route registration, and `User` (Rust) exercising structs, traits, enums, and type aliases. The module exists to ensure the analyzer correctly handles cross-language constructs, method overrides, and implicit dependencies (e.g., `UserProfile` interface without concrete implementation) that appear in real-world codebases but are often omitted from simpler unit tests. It fits as a regression fixture suite that the tool's testing harness loads and analyzes, covering edge cases like empty argument lists (`UserResult`), trait method specifications (`ToJson.to_json`), and standalone functions (`getDisplayName`) outside classes.
 
 ## Modules
 | File | Purpose |
 |------|---------|
-| tests/fixtures/sample_java/App.java |  |
 | tests/fixtures/sample_rust/lib.rs |  |
+| tests/fixtures/sample_java/App.java |  |
 | tests/fixtures/sample_ruby/app.rb |  |
 | tests/fixtures/sample_py/auth.py |  |
 ## Key Symbols
@@ -41,17 +41,17 @@ These fixtures provide minimal, self-contained cross-language code examples used
 | `tests/fixtures/sample_rust/lib.rs::Status` | enum |  |
 | `tests/fixtures/sample_rust/lib.rs::UserResult` | type |  |
 ## Data Flows
-- Test harness → App.addUser → calls 'add' on internal list (Java)
-- HTTP request simulated → Router.dispatch → calls 'call' on matched route lambda (Ruby)
-- Auth check → TokenValidator.refresh → calls undefined 'sign_payload' (Python)
-- Age calculation → age_difference → accesses User.age fields (Rust)
+- Java: `App.addUser` → calls `add` on internal collection → `App.getUserCount` → calls `size` on same collection → returns count
+- Python: `require_auth` decorator → wraps function `func` via `wrapper` → `TokenValidator.refresh` → calls `sign_payload` (external) → validates token
+- Ruby: `Router.dispatch` → iterates registered routes → calls `call` on matched route handler → routes are added via `Router.add_route`
+- Rust: `User.to_json` → implements trait `ToJson` → returns JSON string → `age_difference` (standalone) computes age gap between two `User` instances
 ## Design Constraints
-- Fixtures must have zero external dependencies (no imports beyond language standard library) to guarantee portability across test environments.
-- All `calls` entries are string literals extracted from source; they may reference methods that do not exist in the fixture set (e.g., `sign_payload`), as the goal is to record syntactic calls, not resolve them.
-- Java interface `UserProfile` and Rust trait `ToJson` define no implementation and serve only to verify the extractor recognizes interface/trait symbol types.
-- Ruby's `parse` function calls `strip` (a String method) but that call is recorded as a raw string — the extractor does not distinguish built-in from user-defined calls.
-- Rust `UserResult` type alias is included to ensure `type` symbols are captured alongside struct/enum/trait symbols.
-- Symbol IDs are globally unique by prepending the file path; duplicate simple names (e.g., `getDisplayName` in Java vs Ruby) are allowed only across different files.
+- Java `UserProfile` is an interface with no implementing class; any code that attempts to instantiate it will fail at runtime, but the analyzer must still extract its method signatures (`getDisplayName`, `getRole`).
+- The `require_auth` decorator (Python) returns the wrapper function without actually performing authentication; it is a structural test for decorator detection, not a functional security mechanism.
+- Ruby `Router#initialize` has an empty argument list, but the `add_route` method is never called inside the fixture; the analyzer must infer routes from static registration only, not from runtime execution.
+- Rust `UserResult` is a type alias for `Result<User, String>`, but nowhere in the code is it used; it exists solely to test type alias symbol extraction.
+- The `parse` function (Ruby) calls `strip` on its input but does not check for nil; an edge case that the analyzer must handle gracefully (no crash on missing string method detection).
+- `age_difference` (Rust) is a public function that takes two `User` references but is never called internally; the analyzer must still record it as a callable symbol with no outgoing calls.
 ## Relationships
 - **Calls:** add, call, func, sign_payload, size, strip
 - **Called by:** indexer/ast_parser.py::parse_file, indexer/go_parser.py::parse_go_file, indexer/java_parser.py::parse_java_file, indexer/js_parser.py::parse_js_file, indexer/ruby_parser.py::parse_ruby_file, indexer/rust_parser.py::parse_rust_file

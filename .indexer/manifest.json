@@ -1,6 +1,6 @@
 {
-  "last_indexed_commit": "34b839cfaac85a325024949f19e822a070a68984",
-  "indexed_at": "2026-05-22T10:14:08.600570+00:00",
+  "last_indexed_commit": "5af1c57ae3f609027863cf9d0fbf87737ba34031",
+  "indexed_at": "2026-07-27T05:43:25.908505+00:00",
   "files": {
     "indexer/__init__.py": {
       "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -280,7 +280,7 @@
       ]
     },
     "indexer/rest_api.py": {
-      "hash": "sha256:ddd36c546675b9f658d79fe77e6273be7e4e13198729dafa1ca871f6a088b364",
+      "hash": "sha256:6c1668535f428c05b7d44d7ae1b8c3edded48e79e5dd07617d8eaeb32ca1fc5f",
       "wiki_page": "wiki/indexer.md",
       "component_ids": [
         "indexer/rest_api.py::register_repo",
@@ -298,6 +298,7 @@
         "indexer/rest_api.py::_run_sync_task",
         "indexer/rest_api.py::_run_register_task",
         "indexer/rest_api.py::_run_register_task_inner",
+        "indexer/rest_api.py::_is_managed_repo_root",
         "indexer/rest_api.py::unregister_repo",
         "indexer/rest_api.py::search_symbols",
         "indexer/rest_api.py::trace_call",
@@ -618,7 +619,7 @@
       ]
     },
     "tests/test_p1_fixes.py": {
-      "hash": "sha256:e80e5dffe0e6976e46005e23d003a62b4db5e2d81eecf1e0916c7e1fdae88d8b",
+      "hash": "sha256:7fe15f8b431eb8f2c11b280b2a515fefde166e1604beafc6246179e9943b08ec",
       "wiki_page": "wiki/tests.md",
       "component_ids": [
         "tests/test_p1_fixes.py::TestTaskStore",
@@ -813,6 +814,8 @@
         "tests/test_p1_fixes.py::TestRound16Fixes.test_reindex_allows_index_only_request",
         "tests/test_p1_fixes.py::TestRound16Fixes.test_reindex_uses_shared_all_branches_runner",
         "tests/test_p1_fixes.py::TestRound16Fixes.test_destructive_git_cleanup_before_checkout",
+        "tests/test_p1_fixes.py::TestRound16Fixes.test_destructive_git_cleanup_before_pull_without_branch",
+        "tests/test_p1_fixes.py::TestRound16Fixes.test_sync_managed_repo_uses_destructive_git_pull",
         "tests/test_p1_fixes.py::TestRound16Fixes.test_rebuild_git_before_delete",
         "tests/test_p1_fixes.py::TestRound16Fixes.test_branch_detection_after_clone",
         "tests/test_p1_fixes.py::TestRound16Fixes.test_vector_upsert_before_manifest",
