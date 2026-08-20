@@ -474,6 +474,77 @@ def test_tree_sitter_syntax_error_is_rejected(tmp_path: Path):
     assert index.inspect(IndexScope("web", "main")).exists is False
 
 
+def test_typescript_import_type_array_in_generic_publishes(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "repo-wiki@example.test")
+    _git(repo, "config", "user.name", "repo-wiki test")
+    (repo / "issue-pool.ts").write_text(
+        "declare function get<T>(path: string): T;\n"
+        "export function releaseSummary() {\n"
+        "  return get<import('../types').IssuePoolReleaseSummary[]>(\n"
+        "    '/release-summary',\n"
+        "  );\n"
+        "}\n"
+    )
+    _commit(repo, "valid typescript import type")
+
+    index = _index(tmp_path)
+    report = index.sync(SyncRequest(repo="web", root=repo, branch="main", revision="main"))
+    status = index.inspect(IndexScope("web", "main"))
+
+    assert report.status == "published"
+    assert status.files == 1
+    assert status.symbols == 1
+
+
+def test_modern_typescript_type_only_syntax_publishes(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "repo-wiki@example.test")
+    _git(repo, "config", "user.name", "repo-wiki test")
+    (repo / "api.ts").write_text(
+        "declare function get<T>(path: string): T;\n"
+        "export type * as Types from './types';\n"
+        "type ConfigKey = keyof import('./types').Config;\n"
+        "export function settings() {\n"
+        "  return get<import('./types').Settings>('/settings');\n"
+        "}\n"
+    )
+    _commit(repo, "modern typescript type syntax")
+
+    index = _index(tmp_path)
+    report = index.sync(SyncRequest(repo="web", root=repo, branch="main", revision="main"))
+    status = index.inspect(IndexScope("web", "main"))
+
+    assert report.status == "published"
+    assert status.files == 1
+    assert status.symbols == 1
+
+
+def test_typescript_import_type_repair_does_not_hide_other_errors(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "repo-wiki@example.test")
+    _git(repo, "config", "user.name", "repo-wiki test")
+    (repo / "broken.ts").write_text(
+        "declare function get<T>(path: string): T;\n"
+        "const releases = get<import('../types').Release[]>('/releases');\n"
+        "function broken( {\n"
+    )
+    _commit(repo, "broken typescript")
+
+    index = _index(tmp_path)
+    with pytest.raises(RepositoryIndexError) as raised:
+        index.sync(SyncRequest(repo="web", root=repo, branch="main", revision="main"))
+
+    assert raised.value.code == "PARSE_FAILED"
+    assert index.inspect(IndexScope("web", "main")).exists is False
+
+
 def test_transaction_failure_rolls_back_materialized_state(monkeypatch, tmp_path: Path):
     repo = tmp_path / "repo"
     _write_repository(repo)

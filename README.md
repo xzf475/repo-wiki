@@ -53,6 +53,58 @@ cd repo-wiki
 pip install -e .
 ```
 
+## Docker
+
+Docker Compose 默认启动 REST API 与 Web 控制台；MCP HTTP 服务可按需启用。首次启动先创建本地环境文件：
+
+```bash
+cp .env.example .env
+# 仅使用结构索引和本地检索时，无需填写 embedding API key。
+# 需要 dense enrichment 时，再在 .env 中配置对应 provider 的密钥。
+
+docker compose up -d --build
+docker compose ps
+curl --fail http://localhost:7654/health
+```
+
+启动成功后访问：
+
+- Web 控制台与 REST API：<http://localhost:7654>
+- 健康检查：<http://localhost:7654/health>
+- MCP：默认关闭；在 `.env` 中设置 `MCP_ENABLED=true` 后监听 `8000` 端口
+
+主要 Docker 环境变量：
+
+| 变量 | 默认值 | 用途 |
+|---|---:|---|
+| `API_PORT` | `7654` | REST API 与 Web 控制台端口 |
+| `REPO_WIKI_API_KEY` | 空 | REST Bearer 认证；为空时不启用认证 |
+| `MCP_ENABLED` | `false` | 是否同时启动 streamable HTTP MCP |
+| `MCP_PORT` | `8000` | MCP 监听端口 |
+| `MCP_API_KEY` | 空 | MCP Bearer 认证 |
+| `PUBLIC_DOMAIN` | 空 | 生成 Webhook URL 时使用的外部域名 |
+| `WEBHOOK_SECRET` | 空 | GitHub/GitLab Webhook 签名校验 |
+| `EMBEDDING_*` | 见 `.env.example` | 可选 dense enrichment provider 配置 |
+
+Compose 使用具名卷保存容器数据：
+
+| 卷 | 容器路径 | 内容 |
+|---|---|---|
+| `repo_wiki_repos` | `/tmp/repo_wiki_repos` | 托管仓库、注册表、各仓库索引与 Wiki 投影 |
+| `repo_wiki_data` | `/app/.indexer` | 服务工作目录下的索引状态 |
+| `repo_wiki_wiki` | `/app/wiki` | 服务工作目录下的 Wiki 投影 |
+
+常用运维命令：
+
+```bash
+docker compose logs -f repo-wiki
+docker compose restart repo-wiki
+docker compose up -d --build     # 更新代码或镜像后重建
+docker compose down              # 停止容器，保留具名卷
+```
+
+`docker compose down -v` 会删除上述具名卷及其中的托管仓库和索引数据，请仅在确认需要清空数据时使用。
+
 ## CLI
 
 ```bash

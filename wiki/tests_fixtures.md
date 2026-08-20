@@ -37,7 +37,7 @@
 | `tests/fixtures/sample_rust/lib.rs::Status` | enum | Represents a status code. |
 | `tests/fixtures/sample_rust/lib.rs::UserResult` | type | A type alias for a result type. |
 ## Relationships
-- **Called by:** indexer/ast_parser.py::parse_file, indexer/go_parser.py::parse_go_file, indexer/java_parser.py::parse_java_file, indexer/js_parser.py::parse_js_file, indexer/rest_api.py::_webhook_sign, indexer/ruby_parser.py::parse_ruby_file, indexer/rust_parser.py::parse_rust_file
+- **Called by:** indexer/ast_parser.py::parse_file, indexer/go_parser.py::parse_go_file, indexer/java_parser.py::parse_java_file, indexer/js_parser.py::_normalize_typescript_tree, indexer/js_parser.py::parse_js_file, indexer/rest_api.py::_webhook_sign, indexer/ruby_parser.py::parse_ruby_file, indexer/rust_parser.py::parse_rust_file
 - **Imports from:** hashlib, import java.util.ArrayList;, import java.util.List;, use serde::{Deserialize, Serialize};, use std::collections::HashMap;, utils.crypto.sign_payload
 ## Entry Points
 - `App`

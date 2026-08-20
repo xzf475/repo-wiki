@@ -53,6 +53,58 @@ cd repo-wiki
 pip install -e .
 ```
 
+## Docker
+
+Docker Compose starts the REST API and web console by default. The HTTP MCP service is optional. Create the local environment file before the first start:
+
+```bash
+cp .env.example .env
+# Structural indexing and local retrieval do not require an embedding API key.
+# Configure the provider key in .env only when dense enrichment is needed.
+
+docker compose up -d --build
+docker compose ps
+curl --fail http://localhost:7654/health
+```
+
+After startup:
+
+- Web console and REST API: <http://localhost:7654>
+- Health check: <http://localhost:7654/health>
+- MCP: disabled by default; set `MCP_ENABLED=true` in `.env` to listen on port `8000`
+
+Main Docker environment variables:
+
+| Variable | Default | Purpose |
+|---|---:|---|
+| `API_PORT` | `7654` | REST API and web console port |
+| `REPO_WIKI_API_KEY` | empty | REST Bearer authentication; disabled when empty |
+| `MCP_ENABLED` | `false` | Start the streamable HTTP MCP server alongside REST |
+| `MCP_PORT` | `8000` | MCP listening port |
+| `MCP_API_KEY` | empty | MCP Bearer authentication |
+| `PUBLIC_DOMAIN` | empty | Public base URL used to generate webhook URLs |
+| `WEBHOOK_SECRET` | empty | GitHub/GitLab webhook signature verification |
+| `EMBEDDING_*` | see `.env.example` | Optional dense-enrichment provider settings |
+
+Compose persists container data in named volumes:
+
+| Volume | Container path | Contents |
+|---|---|---|
+| `repo_wiki_repos` | `/tmp/repo_wiki_repos` | Managed repositories, registry, per-repository indexes, and Wiki projections |
+| `repo_wiki_data` | `/app/.indexer` | Index state under the service working directory |
+| `repo_wiki_wiki` | `/app/wiki` | Wiki projections under the service working directory |
+
+Common operations:
+
+```bash
+docker compose logs -f repo-wiki
+docker compose restart repo-wiki
+docker compose up -d --build     # rebuild after source or image changes
+docker compose down              # stop containers and retain named volumes
+```
+
+`docker compose down -v` deletes the named volumes, including managed repositories and index data. Use it only when you intentionally want to clear all persisted data.
+
 ## CLI
 
 ```bash

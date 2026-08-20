@@ -66,6 +66,68 @@ def test_python_click_command_entry_point(tmp_path):
 
     assert node.entry_point_kind == "cli"
 
+
+def test_typescript_import_type_array_in_generic_preserves_structure(tmp_path):
+    src = tmp_path / "issue-pool.ts"
+    src.write_text(
+        "declare function get<T>(path: string): T;\n"
+        "export function releaseSummary() {\n"
+        "  return get<import('../types').IssuePoolReleaseSummary[]>('/release-summary');\n"
+        "}\n"
+    )
+
+    node = next(
+        node
+        for node in parse_file(src, tmp_path, strict=True)
+        if node.id.endswith("::releaseSummary")
+    )
+
+    assert node.line_start == 2
+    assert set(node.calls) == {"get"}
+
+
+def test_typescript_import_types_in_generic_calls_preserve_structure(tmp_path):
+    src = tmp_path / "api.ts"
+    src.write_text(
+        "declare function get<T>(path: string): T;\n"
+        "export function direct() {\n"
+        "  return get<import('./types').Release>('/direct');\n"
+        "}\n"
+        "export function nested() {\n"
+        "  return get<import('./types').Page<Release>>('/nested');\n"
+        "}\n"
+        "export function union() {\n"
+        "  return get<import('./types').Release | null>('/union');\n"
+        "}\n"
+    )
+
+    nodes = {
+        node.id.rsplit("::", 1)[-1]: node
+        for node in parse_file(src, tmp_path, strict=True)
+    }
+
+    assert set(nodes["direct"].calls) == {"get"}
+    assert set(nodes["nested"].calls) == {"get"}
+    assert set(nodes["union"].calls) == {"get"}
+
+
+def test_typescript_runtime_dynamic_import_is_not_normalized(tmp_path):
+    src = tmp_path / "lazy.ts"
+    src.write_text(
+        "export function load() {\n"
+        "  return import('./feature').then(module => module.default);\n"
+        "}\n"
+    )
+
+    node = next(
+        node
+        for node in parse_file(src, tmp_path, strict=True)
+        if node.id.endswith("::load")
+    )
+
+    assert set(node.calls) == {"then"}
+
+
 # ── Rust ──────────────────────────────────────────────────────────────────────
 
 def test_rust_parse_returns_nodes():

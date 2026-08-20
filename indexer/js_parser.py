@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+import re
 from pathlib import Path
 
 from indexer.ast_parser import ASTNode
@@ -67,6 +69,107 @@ def _extract_calls(node, source: bytes) -> list[str]:
     return list(calls)
 
 
+_GENERIC_IMPORT_PREFIX = re.compile(
+    rb"(?:[A-Za-z_$][A-Za-z0-9_$]*)"
+    rb"(?:\s*\.\s*[A-Za-z_$][A-Za-z0-9_$]*)*<\s*$"
+)
+_GENERIC_CALL_SUFFIX = re.compile(rb">\s*\(")
+_KEYOF_PREFIX = re.compile(rb"\bkeyof\s*$")
+_TYPESCRIPT_NORMALIZATION_TRIGGER = re.compile(
+    rb"(?:<\s*import\s*\(|\bkeyof\s+import\s*\(|\bexport\s+type\s+\*)"
+)
+
+
+def _walk_tree(root):
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        yield node
+        stack.extend(reversed(node.children))
+
+
+def _import_type_expression(node):
+    if node.type != "call_expression":
+        return None
+    function = node.child_by_field_name("function")
+    if function is None or function.type != "import":
+        return None
+
+    expression = node
+    while expression.parent is not None and expression.parent.type == "member_expression":
+        parent = expression.parent
+        if parent.child_by_field_name("object") != expression:
+            break
+        expression = parent
+    return expression if expression != node else None
+
+
+def _is_type_only_import(expression, source: bytes) -> bool:
+    ancestor = expression.parent
+    while ancestor is not None and ancestor.type != "program":
+        prefix = source[ancestor.start_byte:expression.start_byte]
+        if _KEYOF_PREFIX.search(prefix):
+            return True
+        if ancestor.type == "binary_expression":
+            suffix = source[expression.end_byte:ancestor.end_byte]
+            if _GENERIC_IMPORT_PREFIX.search(prefix) and _GENERIC_CALL_SUFFIX.search(suffix):
+                return True
+        ancestor = ancestor.parent
+    return False
+
+
+def _export_type_star_span(node, source: bytes) -> tuple[int, int] | None:
+    if not node.is_error or node.parent is None or node.parent.type != "export_statement":
+        return None
+    if source[node.start_byte:node.end_byte].strip() != b"type":
+        return None
+    return node.start_byte, node.end_byte
+
+
+def _mask_span(
+    masked: bytearray,
+    source: bytes,
+    span: tuple[int, int],
+    placeholder: int | None,
+):
+    start, end = span
+    replacement = bytearray(b" " * (end - start))
+    for offset, byte in enumerate(source[start:end]):
+        if byte in {ord("\n"), ord("\r")}:
+            replacement[offset] = byte
+    if placeholder is not None:
+        replacement[0] = placeholder
+    masked[start:end] = replacement
+
+
+def _normalize_typescript_tree(parser, tree, source: bytes):
+    """Reparse known TypeScript grammar gaps without changing source offsets."""
+    if _TYPESCRIPT_NORMALIZATION_TRIGGER.search(source) is None:
+        return tree
+
+    type_spans: set[tuple[int, int]] = set()
+    export_spans: set[tuple[int, int]] = set()
+    for node in _walk_tree(tree.root_node):
+        expression = _import_type_expression(node)
+        if expression is not None and _is_type_only_import(expression, source):
+            type_spans.add((expression.start_byte, expression.end_byte))
+        export_span = _export_type_star_span(node, source)
+        if export_span is not None:
+            export_spans.add(export_span)
+
+    if not type_spans and not export_spans:
+        return tree
+
+    masked = bytearray(source)
+    for span in type_spans:
+        _mask_span(masked, source, span, ord("T"))
+    for span in export_spans:
+        _mask_span(masked, source, span, None)
+
+    normalized = parser.parse(bytes(masked))
+    return normalized if not normalized.root_node.has_error else tree
+
+
 def parse_js_file(path: Path, repo_root: Path, *, strict: bool = False) -> list[ASTNode]:
     try:
         from tree_sitter import Parser
@@ -88,6 +191,8 @@ def parse_js_file(path: Path, repo_root: Path, *, strict: bool = False) -> list[
         source = path.read_bytes()
         parser = Parser(language)
         tree = parser.parse(source)
+        if suffix in {".ts", ".tsx"}:
+            tree = _normalize_typescript_tree(parser, tree, source)
     except Exception as e:
         if strict:
             raise
