@@ -1,0 +1,105 @@
+{
+  "generated_at": "2026-08-20",
+  "method": "Synthetic independent Python modules; local-only IndexEngine; full, one-file incremental, then no-op incremental.",
+  "environment_note": "Elapsed time is a local directional baseline; operation counts are the acceptance contract.",
+  "ci_budgets": {
+    "incremental_elapsed_ms": 1000,
+    "noop_elapsed_ms": 500,
+    "state_bytes_per_file": 4096
+  },
+  "rows": [
+    {
+      "files": 10,
+      "full": {
+        "elapsed_ms": 35.987,
+        "parsed_files": 10,
+        "parsed_symbols": 10,
+        "loaded_cached_files": 0,
+        "remote_calls": 0,
+        "wiki_writes": 0,
+        "search_records_updated": 10
+      },
+      "incremental": {
+        "elapsed_ms": 26.056,
+        "parsed_files": 1,
+        "parsed_symbols": 1,
+        "loaded_cached_files": 0,
+        "remote_calls": 0,
+        "wiki_writes": 0,
+        "search_records_updated": 1
+      },
+      "noop": {
+        "elapsed_ms": 11.544,
+        "parsed_files": 0,
+        "parsed_symbols": 0,
+        "loaded_cached_files": 0,
+        "remote_calls": 0,
+        "wiki_writes": 0,
+        "search_records_updated": 0
+      },
+      "state_bytes": 12712
+    },
+    {
+      "files": 100,
+      "full": {
+        "elapsed_ms": 77.447,
+        "parsed_files": 100,
+        "parsed_symbols": 100,
+        "loaded_cached_files": 0,
+        "remote_calls": 0,
+        "wiki_writes": 0,
+        "search_records_updated": 100
+      },
+      "incremental": {
+        "elapsed_ms": 46.398,
+        "parsed_files": 1,
+        "parsed_symbols": 1,
+        "loaded_cached_files": 0,
+        "remote_calls": 0,
+        "wiki_writes": 0,
+        "search_records_updated": 1
+      },
+      "noop": {
+        "elapsed_ms": 26.039,
+        "parsed_files": 0,
+        "parsed_symbols": 0,
+        "loaded_cached_files": 0,
+        "remote_calls": 0,
+        "wiki_writes": 0,
+        "search_records_updated": 0
+      },
+      "state_bytes": 123682
+    },
+    {
+      "files": 500,
+      "full": {
+        "elapsed_ms": 395.214,
+        "parsed_files": 500,
+        "parsed_symbols": 500,
+        "loaded_cached_files": 0,
+        "remote_calls": 0,
+        "wiki_writes": 0,
+        "search_records_updated": 500
+      },
+      "incremental": {
+        "elapsed_ms": 179.231,
+        "parsed_files": 1,
+        "parsed_symbols": 1,
+        "loaded_cached_files": 0,
+        "remote_calls": 0,
+        "wiki_writes": 0,
+        "search_records_updated": 1
+      },
+      "noop": {
+        "elapsed_ms": 99.3,
+        "parsed_files": 0,
+        "parsed_symbols": 0,
+        "loaded_cached_files": 0,
+        "remote_calls": 0,
+        "wiki_writes": 0,
+        "search_records_updated": 0
+      },
+      "state_bytes": 621682
+    }
+  ]
+}

@@ -17,6 +17,22 @@ class GitOperationError(Exception):
         super().__init__(f"git {step} failed: {stderr}")
 
 
+def git_fetch_refs(cwd: Path, *, sanitize_fn=None) -> None:
+    """Refresh remote refs without changing or cleaning the active worktree."""
+    git_env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    result = subprocess.run(
+        ["git", "-c", "http.followRedirects=true", "fetch", "--all", "--prune"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=git_env,
+    )
+    if result.returncode != 0:
+        message = sanitize_fn(result.stderr.strip()) if sanitize_fn else result.stderr.strip()
+        raise GitOperationError("fetch", message)
+
+
 def git_fetch_checkout_pull(
     cwd: Path,
     branch: str = "",

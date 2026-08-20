@@ -26,15 +26,8 @@ from starlette.routing import Route
 from starlette.responses import HTMLResponse, JSONResponse
 from starlette.requests import Request
 
-from indexer.config import Config, load_config, save_config
-from indexer.manifest import Manifest
-from indexer.embedding import embed_query
-from indexer.vector_store import search, get_by_ids
+from indexer.config import load_config, save_config
 from indexer.retrieval import (
-    trace_call as _trace_call_retrieval,
-    _expand_with_call_graph as _expand_retrieval,
-    _parse_json_list,
-    _annotate_match_reasons,
     truncate_documents,
     get_edit_context as _get_edit_context_impl,
     find_tests_for_symbol as _find_tests_for_symbol_impl,
@@ -55,22 +48,16 @@ from indexer.retrieval import (
     agent_capabilities_manifest as _agent_capabilities_manifest_impl,
     stable_symbol_id as _stable_symbol_id_impl,
 )
-from indexer.indexing import (
-    cross_reference, load_existing_nodes, parse_candidates,
-    build_batches, write_wiki_pages, write_index_and_skill,
-    update_manifest, upsert_vectors,
-)
-from indexer.grouper import density_group
 from indexer.task_store import TaskStore
-from indexer.repo_registry import RepoRegistry, _get_repo_lock, _repo_locks, _locks_lock
+from indexer.repo_registry import RepoRegistry, _get_repo_lock
 from indexer.git_ops import (
     _detect_default_branch, _match_branch_rule, _discover_remote_branches,
     _inject_credentials, _store_credentials, _sanitize_error,
-    git_fetch_checkout_pull, GitOperationError,
+    git_fetch_checkout_pull, git_fetch_refs, GitOperationError,
 )
 from indexer.agent_contracts import agent_schema as _agent_schema_impl
-
-from indexer.utils import FATAL_EXCEPTIONS
+from indexer.repository_index import RepositoryIndexError
+from indexer.repository_service import RepositoryService, default_branch
 
 tasks = TaskStore()
 registry = RepoRegistry()
@@ -98,8 +85,9 @@ async def register_repo(request: Request) -> JSONResponse:
     if not isinstance(branches, list):
         return JSONResponse({"error": "branches must be a list"}, status_code=400)
     branch_rule = body.get("branch_rule", "")
-    skip_deep = body.get("skip_deep", True)
-    force_reindex = body.get("force_reindex", False)
+    enrich = body.get("enrich", False)
+    if not isinstance(enrich, bool):
+        return JSONResponse({"error": "enrich must be a boolean"}, status_code=400)
 
     if not branches and branch:
         branches = [branch]
@@ -130,7 +118,7 @@ async def register_repo(request: Request) -> JSONResponse:
 
     with registry._lock:
         existing = registry.get(name)
-        if existing and not force_reindex:
+        if existing:
             return JSONResponse({
                 "error": f"repo '{name}' already registered",
                 "existing": str(existing["root"]),
@@ -146,14 +134,12 @@ async def register_repo(request: Request) -> JSONResponse:
     webhook_url = _get_webhook_url(name)
 
     first_branch = branches[0] if branches else ""
-    if not first_branch:
-        first_branch = "main"
 
     loop = asyncio.get_running_loop()
     loop.run_in_executor(
         None,
         _run_register_task,
-        task_id, name, url, username, password, token, first_branch, skip_deep, force_reindex, branch_rule,
+        task_id, name, url, username, password, token, first_branch, enrich, branch_rule,
     )
 
     return JSONResponse({
@@ -186,84 +172,69 @@ async def validate_repo(request: Request) -> JSONResponse:
 
     root = info["root"]
     cfg = info["config"]
-
-    checks = {}
-
-    indexer_toml = root / ".indexer.toml"
-    checks["config_file"] = indexer_toml.exists()
-
-    manifest_path = root / ".indexer" / "manifest.json"
-    manifest_ok = manifest_path.exists()
-    checks["manifest_file"] = manifest_ok
-    checks["last_indexed_commit"] = None
-    checks["indexed_at"] = None
-    checks["tracked_files"] = 0
-    checks["total_symbols"] = 0
-
-    manifest_data = None
-    if manifest_ok:
-        from indexer.manifest import load_manifest
-        manifest_data = load_manifest(root)
-        checks["last_indexed_commit"] = manifest_data.last_indexed_commit
-        checks["indexed_at"] = manifest_data.indexed_at
-        checks["tracked_files"] = len(manifest_data.files)
-        checks["total_symbols"] = sum(len(e.component_ids) for e in manifest_data.files.values())
-
-    index_md = root / cfg.wiki_dir / "INDEX.md"
-    checks["wiki_index"] = index_md.exists()
-
-    skill_md = root / ".indexer" / "skills" / "codebase.md"
-    checks["skill_file"] = skill_md.exists()
-
-    vector_dir = root / cfg.vector_store.persist_dir
-    checks["vector_db"] = vector_dir.exists()
-
-    missing_pages = []
-    if manifest_data:
-        from indexer.wiki import sanitize_group_label, resolve_wiki_page_path
-        wiki_dir = root / cfg.wiki_dir
-        for rel_path, entry in manifest_data.files.items():
-            if not entry.component_ids:
-                continue
-            resolved = resolve_wiki_page_path(entry.wiki_page, wiki_dir)
-            if not resolved:
-                missing_pages.append(entry.wiki_page)
-    checks["missing_wiki_pages"] = missing_pages
-    checks["missing_wiki_count"] = len(missing_pages)
-
-    stale_files = []
-    if manifest_data:
-        from indexer.git import all_tracked_files, is_git_repo
-        from indexer.manifest import compute_hash
-        from indexer.cli import _is_indexable
-        all_code = [f for f in all_tracked_files(root) if _is_indexable(f, cfg)]
-        stale_files = manifest_data.stale_files(root, all_code)
-    checks["stale_files"] = stale_files
-    checks["stale_count"] = len(stale_files)
-
-    cache_dir = root / ".indexer" / "cache"
-    checks["cache_dir"] = cache_dir.exists()
-
-    all_ok = (
+    branches = info.get("branches", []) or [default_branch(root)]
+    try:
+        services = [
+            RepositoryService(name, root, branch, config=cfg)
+            for branch in branches
+        ]
+        statuses = [service.inspect() for service in services]
+        integrity = services[0].index.integrity() if services else None
+    except RepositoryIndexError as error:
+        return JSONResponse({
+            "config_file": (root / ".indexer.toml").exists(),
+            "index_database": (root / ".indexer" / "state" / "repository-index.sqlite3").exists(),
+            "wiki_index": (root / cfg.wiki_dir / "INDEX.md").exists(),
+            "skill_file": (root / ".indexer" / "skills" / "codebase.md").exists(),
+            "branches": [],
+            "tracked_files": 0,
+            "total_symbols": 0,
+            "stale_count": 0,
+            "dense_ready": False,
+            "database_integrity": {
+                "ok": False,
+                "message": str(error),
+                "foreign_key_violations": 0,
+            },
+            "healthy": False,
+        })
+    checks = {
+        "config_file": (root / ".indexer.toml").exists(),
+        "index_database": (root / ".indexer" / "state" / "repository-index.sqlite3").exists(),
+        "wiki_index": (root / cfg.wiki_dir / "INDEX.md").exists(),
+        "skill_file": (root / ".indexer" / "skills" / "codebase.md").exists(),
+        "branches": statuses,
+        "tracked_files": sum(int(status["indexed_files"]) for status in statuses),
+        "total_symbols": sum(int(status["symbols"]) for status in statuses),
+        "stale_count": sum(int(status["stale_file_count"]) for status in statuses),
+        "dense_ready": all(status["dense_state"] == "ready" for status in statuses),
+        "database_integrity": {
+            "ok": integrity.ok,
+            "message": integrity.message,
+            "foreign_key_violations": integrity.foreign_key_violations,
+        } if integrity else None,
+    }
+    checks["healthy"] = bool(
         checks["config_file"]
-        and checks["manifest_file"]
-        and checks["last_indexed_commit"] is not None
+        and checks["index_database"]
         and checks["wiki_index"]
         and checks["skill_file"]
-        and checks["vector_db"]
-        and checks["missing_wiki_count"] == 0
+        and integrity is not None
+        and integrity.ok
+        and statuses
+        and all(status["generation"] is not None for status in statuses)
         and checks["stale_count"] == 0
     )
-    checks["healthy"] = all_ok
-
     return JSONResponse(checks)
 
 
 async def sync_repo(request: Request) -> JSONResponse:
     body = await _parse_body(request)
     name = body.get("name", "")
-    skip_deep = body.get("skip_deep", True)
+    enrich = body.get("enrich", False)
     branch = body.get("branch", "")
+    if not isinstance(enrich, bool):
+        return JSONResponse({"error": "enrich must be a boolean"}, status_code=400)
 
     if not name:
         return JSONResponse({"error": "name is required"}, status_code=400)
@@ -286,66 +257,78 @@ async def sync_repo(request: Request) -> JSONResponse:
     task_id = tasks.create(name, info.get("url", ""))
 
     loop = asyncio.get_running_loop()
-    loop.run_in_executor(None, _run_sync_task, task_id, name, info["root"], skip_deep, branch)
+    loop.run_in_executor(None, _run_sync_task, task_id, name, info["root"], enrich, branch)
 
     return JSONResponse({"task_id": task_id, "name": name, "status": "pending"})
 
 
-async def rebuild_repo(request: Request) -> JSONResponse:
-    body = await _parse_body(request)
-    name = body.get("name", "")
-    skip_deep = body.get("skip_deep", True)
-    confirm = body.get("confirm", "")
-    branch = body.get("branch", "")
-
-    if not name:
-        return JSONResponse({"error": "name is required"}, status_code=400)
-
-    if confirm != name:
-        return JSONResponse({"error": f"confirmation failed: confirm field must match repo name '{name}'"}, status_code=400)
-
-    info = registry.get(name)
-    if not info:
-        return JSONResponse({"error": f"repo '{name}' not registered"}, status_code=404)
-
-    # If branch is not in the registered list, auto-register it first
-    if branch:
-        existing_branches = info.get("branches", [])
-        if branch not in existing_branches:
-            updated_branches = list(existing_branches) + [branch]
-            registry.register(name, info["root"], url=info.get("url", ""),
-                              branches=updated_branches,
-                              branch_rule=info.get("branch_rule", ""),
-                              description=info.get("description", ""),
-                              tags=info.get("tags", []))
-
-    task_id = tasks.create(name, info.get("url", ""))
-
-    loop = asyncio.get_running_loop()
-    loop.run_in_executor(None, _run_rebuild_task, task_id, name, info["root"], skip_deep, branch)
-
-    return JSONResponse({"task_id": task_id, "name": name, "status": "pending"})
-
-
-def _run_all_branches(name: str, branches: list[str], task_id: str, run_fn, **fn_kwargs):
+def _run_all_branches(
+    name: str,
+    branches: list[str],
+    task_id: str,
+    *,
+    root: Path,
+    enrich: bool = False,
+    _skip_lock: bool = False,
+):
     lock = _get_repo_lock(name)
-    if not lock.acquire(blocking=False):
+    if not _skip_lock and not lock.acquire(blocking=False):
         tasks.update(task_id, status="failed", progress=0, step="locked", error="Another operation is running on this repo")
         return
     try:
-        for br in branches:
-            current = tasks.get(task_id)
-            if current and current.get("status") == "failed":
-                break
-            run_fn(task_id, name, **fn_kwargs, branch=br, _skip_lock=True)
+        root = Path(root).resolve()
+        tasks.update(task_id, status="running", progress=5, step="git_fetch")
+        git_fetch_refs(root)
+
+        branch_results: dict[str, dict] = {}
+        for position, branch in enumerate(branches, 1):
+            tasks.update(
+                task_id,
+                status="running",
+                progress=10 + int(80 * (position - 1) / max(1, len(branches))),
+                step=f"{branch}:sync",
+            )
+            service = RepositoryService(name, root, branch, config=load_config(root))
+            result = service.sync(enrich=enrich)
+            status = service.index.inspect(service.scope)
+            branch_results[branch] = {
+                **result,
+                "files": status.files,
+                "symbols": status.symbols,
+            }
+        tasks.update(task_id, status="running", progress=95, step="project")
+        projection = RepositoryService(
+            name,
+            root,
+            branches[0],
+            config=load_config(root),
+        ).project()
+        tasks.update(task_id, status="completed", progress=100, step="complete", result={
+            "name": name,
+            "path": str(root),
+            "indexed_branches": list(branches),
+            "skipped_branches": [],
+            "max_concurrency": 1,
+            "branches": branch_results,
+            "projection_branch": branches[0],
+            "projection": projection,
+            "symbol_count": sum(item["symbols"] for item in branch_results.values()),
+        })
+    except GitOperationError as exc:
+        tasks.update(task_id, status="failed", progress=5, step=f"git_{exc.step}", error=exc.stderr)
+    except Exception as exc:
+        tasks.update(task_id, status="failed", progress=0, step="branch_index", error=str(exc))
     finally:
-        lock.release()
+        if not _skip_lock:
+            lock.release()
 
 
 async def sync_all_branches(request: Request) -> JSONResponse:
     body = await _parse_body(request)
     name = body.get("name", "")
-    skip_deep = body.get("skip_deep", True)
+    enrich = body.get("enrich", False)
+    if not isinstance(enrich, bool):
+        return JSONResponse({"error": "enrich must be a boolean"}, status_code=400)
 
     if not name:
         return JSONResponse({"error": "name is required"}, status_code=400)
@@ -369,13 +352,22 @@ async def sync_all_branches(request: Request) -> JSONResponse:
     task_id = tasks.create(name, info.get("url", ""))
 
     loop = asyncio.get_running_loop()
-    loop.run_in_executor(None, lambda: _run_all_branches(name, branches, task_id, _run_sync_task, root=info["root"], skip_deep=skip_deep))
+    loop.run_in_executor(
+        None,
+        lambda: _run_all_branches(
+            name,
+            branches,
+            task_id,
+            root=info["root"],
+            enrich=enrich,
+        ),
+    )
 
     return JSONResponse({"task_id": task_id, "name": name, "branches": branches, "status": "pending"})
 
 
-async def reindex_repo(request: Request) -> JSONResponse:
-    """Atomically update repo meta + re-discover branches + rebuild all."""
+async def update_repo_and_sync(request: Request) -> JSONResponse:
+    """Atomically update repo metadata, discover branches, and synchronize them."""
     repo_name = request.path_params.get("name", "")
     info = registry.get(repo_name)
     if not info:
@@ -385,7 +377,9 @@ async def reindex_repo(request: Request) -> JSONResponse:
     description = body.get("description")
     tags = body.get("tags")
     branch_rule = body.get("branch_rule")
-    skip_deep = body.get("skip_deep", True)
+    enrich = body.get("enrich", False)
+    if not isinstance(enrich, bool):
+        return JSONResponse({"error": "enrich must be a boolean"}, status_code=400)
 
     # 1. Update meta
     if description is not None or tags is not None or branch_rule is not None:
@@ -400,11 +394,11 @@ async def reindex_repo(request: Request) -> JSONResponse:
         else:
             logger.warning("No branches matched branch_rule '%s' for repo %s", branch_rule, repo_name)
 
-    # 3. Rebuild all branches
+    # 3. Synchronize all branches
     updated_info = registry.get(repo_name)
-    branches_to_rebuild = updated_info.get("branches", []) if updated_info else []
-    if not branches_to_rebuild:
-        return JSONResponse({"error": f"no branches to rebuild for '{repo_name}'"}, status_code=400)
+    branches_to_sync = updated_info.get("branches", []) if updated_info else []
+    if not branches_to_sync:
+        return JSONResponse({"error": f"no branches to sync for '{repo_name}'"}, status_code=400)
 
     task_id = tasks.create(repo_name, url)
 
@@ -413,397 +407,89 @@ async def reindex_repo(request: Request) -> JSONResponse:
         None,
         lambda: _run_all_branches(
             repo_name,
-            branches_to_rebuild,
+            branches_to_sync,
             task_id,
-            _run_rebuild_task,
             root=updated_info["root"],
-            skip_deep=skip_deep,
+            enrich=enrich,
         ),
     )
 
     return JSONResponse({
         "task_id": task_id,
         "name": repo_name,
-        "branches": branches_to_rebuild,
+        "branches": branches_to_sync,
         "status": "pending",
     })
 
 
-async def rebuild_all_branches(request: Request) -> JSONResponse:
-    body = await _parse_body(request)
-    name = body.get("name", "")
-    skip_deep = body.get("skip_deep", True)
-    confirm = body.get("confirm", "")
-
-    if not name:
-        return JSONResponse({"error": "name is required"}, status_code=400)
-
-    if confirm != name:
-        return JSONResponse({"error": f"confirmation failed: confirm field must match repo name '{name}'"}, status_code=400)
-
-    info = registry.get(name)
-    if not info:
-        return JSONResponse({"error": f"repo '{name}' not registered"}, status_code=404)
-
-    # Re-discover branches if branch_rule is set
-    branches = info.get("branches", [])
-    branch_rule = info.get("branch_rule", "")
-    if branch_rule and info.get("url"):
-        discovered = _discover_remote_branches(info["url"], branch_rule)
-        if discovered:
-            branches = discovered
-            registry.register(name, info["root"], url=info.get("url", ""), branches=branches, branch_rule=branch_rule)
-
-    if not branches:
-        return JSONResponse({"error": f"no branches to rebuild for '{name}'"}, status_code=400)
-
-    task_id = tasks.create(name, info.get("url", ""))
-
-    loop = asyncio.get_running_loop()
-    loop.run_in_executor(None, lambda: _run_all_branches(name, branches, task_id, _run_rebuild_task, root=info["root"], skip_deep=skip_deep))
-
-    return JSONResponse({"task_id": task_id, "name": name, "branches": branches, "status": "pending"})
-
-
-def _run_indexing_pipeline(
-    task_id: str,
-    name: str,
-    root: Path,
-    skip_deep: bool,
-    candidates: list[str],
-    cfg: Config,
-    manifest: Manifest,
-    branch: str = "",
-    progress_offset: int = 0,
-) -> int:
-    from indexer.git import all_tracked_files, is_git_repo
-    total_files = len(candidates)
-    tasks.update(task_id, status="running", progress=progress_offset + 20, step="parsing", detail=f"0/{total_files} files")
-
-    all_nodes = parse_candidates(root, candidates, cfg, use_cache=True,
-        progress_callback=lambda i, t, p, **kw: tasks.update(
-            task_id, status="running",
-            progress=progress_offset + 20 + int((i / t) * 20),
-            step="parsing",
-            detail=f"{i}/{t} — {p}",
-        ),
+def _run_sync_task_inner(task_id: str, name: str, root: Path, enrich: bool, branch: str = "", repo_url: str = "", repo_branches: list[str] | None = None) -> None:
+    selected_branch = branch or (
+        repo_branches[0] if repo_branches else default_branch(root)
     )
-
-    if not all_nodes:
-        return 0
-
-    total_symbols = len(all_nodes)
-    tasks.update(task_id, status="running", progress=progress_offset + 40, step="cross_ref", detail=f"{total_symbols} symbols")
-
-    existing_nodes = load_existing_nodes(root, manifest, cfg)
-    candidate_set = set(candidates)
-    existing_nodes = [n for n in existing_nodes if n.file not in candidate_set]
-    pre_cross_called_by = {n.id: list(n.called_by) for n in existing_nodes + all_nodes}
-    cross_reference(existing_nodes + all_nodes)
-    from indexer.indexing import _collect_affected_files
-    affected_files = _collect_affected_files(set(candidates), existing_nodes + all_nodes, pre_cross_called_by)
-
-    tasks.update(task_id, status="running", progress=progress_offset + 45, step="describing_symbols", detail="batches (concurrent)")
-    from indexer.indexing import prepare_descriptions
-    from indexer.llm import deep_enrich_pages, deep_enrich_index
-
-    descriptions, file_descriptions = prepare_descriptions(root, all_nodes, existing_nodes, manifest, cfg)
-
-    tasks.update(task_id, status="running", progress=progress_offset + 65, step="writing_wiki")
-    page_enrichments: dict[str, dict] = {}
-    all_manifest_files = list(set(manifest.files.keys()) | set(candidates)) if manifest.files else candidates
-    groups = density_group(all_manifest_files, merge_threshold=cfg.merge_threshold)
-    all_nodes_for_wiki = existing_nodes + all_nodes
-    if not skip_deep:
-        tasks.update(task_id, status="running", progress=progress_offset + 70, step="deep_enrichment")
-        group_nodes: dict[str, list] = {}
-        for node in all_nodes_for_wiki:
-            group = groups.get(node.file, node.file)
-            group_nodes.setdefault(group, []).append(node)
-        affected_group_labels = {groups.get(f, f) for f in affected_files} if affected_files else set(groups.values())
-        pages_args = [
-            (group_label, list({n.file for n in nodes}), nodes, descriptions)
-            for group_label, nodes in group_nodes.items()
-            if group_label in affected_group_labels
-        ]
-        page_enrichments = deep_enrich_pages(pages_args, cfg)
-
-    index_entries, groups = write_wiki_pages(
-        root, cfg, candidates, all_nodes_for_wiki, descriptions, file_descriptions,
-        page_enrichments, skip_deep, precomputed_groups=groups,
-        all_files=all_manifest_files, affected_files=affected_files,
-    )
-
-    index_overview = ""
-    index_flows: list[str] = []
-    if not skip_deep:
-        skill_pages_for_deep = [
-            {"label": e.path.split("/")[-1].replace(".md", ""), "covers": e.covers, "entry_points": e.entry_points}
-            for e in index_entries
-        ]
-        idx_enrichment = deep_enrich_index(skill_pages_for_deep, cfg)
-        index_overview = idx_enrichment.get("overview", "")
-        index_flows = idx_enrichment.get("flows", [])
-
-    write_index_and_skill(
-        root, cfg, index_entries, page_enrichments,
-        index_overview, index_flows, total_symbols, len(candidates),
-    )
-
-    removed = manifest.removed_files(root, all_tracked_files(root) if is_git_repo(root) else [])
-    tasks.update(task_id, status="running", progress=progress_offset + 85, step="embedding", detail=f"{total_symbols} symbols")
-    existing_nids = {n.id for n in existing_nodes}
-    upsert_vectors(root, cfg, manifest, all_nodes, descriptions, removed_files=removed, branch=branch, existing_node_ids=existing_nids)
-    update_manifest(root, cfg, manifest, candidates, all_nodes, groups)
-
-    return total_symbols
-
-
-def _run_rebuild_task(task_id: str, name: str, root: Path, skip_deep: bool, branch: str = "", _skip_lock: bool = False) -> None:
-    lock = _get_repo_lock(name)
-    if not _skip_lock and not lock.acquire(blocking=False):
-        tasks.update(task_id, status="failed", progress=0, step="locked", error="Another operation is running on this repo")
-        return
-    repo_url = ""
     try:
-        existing = registry.get(name)
-        repo_url = existing.get("url", "") if existing else ""
-        repo_branches = existing.get("branches", []) if existing else []
-        _run_rebuild_task_inner(task_id, name, root, skip_deep, branch=branch, repo_url=repo_url, repo_branches=repo_branches)
-    finally:
-        if not _skip_lock:
-            lock.release()
-
-
-def _run_rebuild_task_inner(task_id: str, name: str, root: Path, skip_deep: bool, branch: str = "", repo_url: str = "", repo_branches: list[str] | None = None) -> None:
-    repo_branch = branch or (repo_branches[0] if repo_branches else "")
-
-    try:
-        tasks.update(task_id, status="running", progress=5, step="rebuild_init")
-        from indexer.config import Config, load_config, save_config
-        from indexer.manifest import Manifest, save_manifest, compute_hash, FileEntry
-        from indexer.git import all_tracked_files, current_commit, is_git_repo
-        from indexer.hooks import install_hook
-        from indexer.cli import _is_indexable
-        from indexer.grouper import density_group
-
-        if repo_branch and is_git_repo(root):
-            try:
-                git_fetch_checkout_pull(root, repo_branch, destructive=True)
-            except GitOperationError as e:
-                tasks.update(task_id, status="failed", progress=15, step=f"git_{e.step}", error=e.stderr)
-                return
-
-        tasks.update(task_id, status="running", progress=10, step="cleaning")
-        wiki_dir = root / "wiki"
-        indexer_dir = root / ".indexer"
-        if wiki_dir.exists():
-            shutil.rmtree(wiki_dir)
-        cache_dir = indexer_dir / "cache"
-        vector_dir = indexer_dir / "vector_db"
-        if cache_dir.exists():
-            shutil.rmtree(cache_dir)
-        if vector_dir.exists():
-            try:
-                from indexer.vector_store import evict_client
-                evict_client(str(vector_dir))
-            except Exception as e:
-                logger.debug("evict_client failed during rebuild: %s", e)
-            shutil.rmtree(vector_dir)
-        manifest_file = indexer_dir / "manifest.json"
-        if manifest_file.exists():
-            manifest_file.unlink()
-
-        cfg = load_config(root)
-        save_config(root, cfg)
-
-        if is_git_repo(root) and cfg.pre_commit:
-            install_hook(root, skip_deep=not cfg.deep_hook)
-
-        tasks.update(task_id, status="running", progress=15, step="detecting_files")
-        all_files = [f for f in all_tracked_files(root) if _is_indexable(f, cfg)]
-        candidates = all_files
-
-        logger.info("Rebuild repo=%s branch=%s files=%d", name, repo_branch or "(default)", len(candidates))
-
-        if not candidates:
-            tasks.update(task_id, status="completed", progress=100, step="complete", detail="Nothing to index")
-            return
-
-        manifest = Manifest(last_indexed_commit=None, indexed_at="")
-        total_symbols = _run_indexing_pipeline(task_id, name, root, skip_deep, candidates, cfg, manifest, branch=repo_branch)
-
-        if total_symbols == 0:
-            tasks.update(task_id, status="completed", progress=100, step="complete", detail="No symbols found")
-            registry.register(name, root, url=repo_url, branches=repo_branches)
-            return
-
-        registry.register(name, root, url=repo_url, branches=repo_branches)
-        info = registry.get(name)
-        if not info:
-            tasks.update(task_id, status="failed", error="repo was unregistered during task")
-            return
-        manifest_data = load_manifest(root)
-        symbol_count = sum(len(entry.component_ids) for entry in manifest_data.files.values())
-        webhook_url = _get_webhook_url(name)
-
-        tasks.update(task_id, status="completed", progress=100, step="complete", result={
-            "name": name, "path": str(root),
-            "has_vector_db": (root / info["config"].vector_store.persist_dir).exists(),
-            "symbol_count": symbol_count, "rebuilt": True,
-            "webhook_url": webhook_url,
-        })
-    except subprocess.TimeoutExpired as e:
-        tasks.update(task_id, status="failed", progress=0, step="git_timeout", error=f"git operation timed out: {e.cmd}")
-    except Exception as e:
-        tasks.update(task_id, status="failed", progress=0, step="unknown", error=_sanitize_error(str(e), repo_url, "", "", ""))
-
-
-
-def _run_sync_task(task_id: str, name: str, root: Path, skip_deep: bool, branch: str = "", _skip_lock: bool = False) -> None:
-    logger.info("Sync task started: repo=%s branch=%s", name, branch or "(any)")
-    lock = _get_repo_lock(name)
-    if not _skip_lock and not lock.acquire(blocking=False):
-        logger.warning("Sync task skipped: repo=%s lock held by another operation", name)
-        tasks.update(task_id, status="failed", progress=0, step="locked", error="Another operation is running on this repo")
-        return
-
-    repo_url = ""
-    try:
-        existing = registry.get(name)
-        repo_url = existing.get("url", "") if existing else ""
-        repo_branches = existing.get("branches", []) if existing else []
-        repo_branch = branch or (repo_branches[0] if repo_branches else "")
-
-        from indexer.git import is_git_repo, all_tracked_files, current_commit, changed_files_since
-
-        tasks.update(task_id, status="running", progress=10, step="git_pull")
-        try:
-            git_fetch_checkout_pull(
-                root,
-                repo_branch if (repo_branch and is_git_repo(root)) else "",
-                destructive=_is_managed_repo_root(name, root),
-            )
-        except GitOperationError as e:
-            tasks.update(task_id, status="failed", progress=10, step=f"git_{e.step}", error=e.stderr)
-            return
-
-        from indexer.config import Config, load_config, save_config
-        from indexer.manifest import load_manifest, save_manifest, compute_hash, FileEntry
-        from indexer.cli import _is_indexable
-        from indexer.grouper import density_group
-        from indexer.wiki import resolve_wiki_page_path, sanitize_group_label
-
+        tasks.update(task_id, status="running", progress=10, step="git_fetch")
+        git_fetch_refs(root)
         cfg = load_config(root)
         if not (root / ".indexer.toml").exists():
             save_config(root, cfg)
-
-        manifest = load_manifest(root)
-
-        tasks.update(task_id, status="running", progress=35, step="detecting_files")
-        all_files = [f for f in all_tracked_files(root) if _is_indexable(f, cfg)]
-
-        if manifest.last_indexed_commit is None:
-            candidates = list(all_files)
-        else:
-            git_changed = changed_files_since(root, manifest.last_indexed_commit) if is_git_repo(root) else []
-            stale = manifest.stale_files(root, all_files)
-            candidates = list(set(git_changed + stale))
-
-        wiki_dir = root / cfg.wiki_dir
-
-        missing_wiki = []
-        for rel_path, entry in manifest.files.items():
-            if not entry.component_ids:
-                continue
-            resolved = resolve_wiki_page_path(entry.wiki_page, wiki_dir)
-            if not resolved and rel_path not in candidates:
-                missing_wiki.append(rel_path)
-        if missing_wiki:
-            candidates.extend(missing_wiki)
-
-        vector_dir = root / cfg.vector_store.persist_dir
-        if not vector_dir.exists() and all_files:
-            for f in all_files:
-                if f not in candidates:
-                    candidates.append(f)
-
-        wiki_index_missing = not (root / cfg.wiki_dir / "INDEX.md").exists()
-        skill_missing = not (root / ".indexer" / "skills" / "codebase.md").exists()
-
-        candidates = [f for f in candidates if _is_indexable(f, cfg)]
-
-        logger.info("Sync repo=%s branch=%s candidates=%d missing_wiki=%d", name, repo_branch or "(default)", len(candidates), len(missing_wiki))
-
-        need_regen_meta = (wiki_index_missing or skill_missing) and not candidates
-
-        if not candidates and not need_regen_meta:
-            tasks.update(task_id, status="completed", progress=100, step="complete", detail="Nothing to sync")
-            return
-
-        if need_regen_meta and not candidates:
-            tasks.update(task_id, status="running", progress=40, step="writing_wiki", detail="Repairing missing meta files")
-            wiki_dir = root / cfg.wiki_dir
-            wiki_dir.mkdir(parents=True, exist_ok=True)
-            index_entries = []
-            for rel_path, entry in manifest.files.items():
-                if entry.wiki_page.startswith(cfg.wiki_dir + "/"):
-                    raw_label = entry.wiki_page[len(cfg.wiki_dir) + 1:].removesuffix(".md")
-                    safe_name = sanitize_group_label(raw_label)
-                    actual_path = f"{cfg.wiki_dir}/{safe_name}.md"
-                else:
-                    actual_path = entry.wiki_page
-                wiki_path = root / actual_path
-                if wiki_path.exists():
-                    from indexer.wiki import IndexEntry
-                    index_entries.append(IndexEntry(
-                        path=str(wiki_path.relative_to(root)),
-                        covers=rel_path,
-                        entry_points=entry.component_ids[:5] if entry.component_ids else [],
-                    ))
-            commit = current_commit(root) or manifest.last_indexed_commit or "unknown"
-            from datetime import datetime, timezone
-            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            if wiki_index_missing:
-                from indexer.wiki import build_index, write_index
-                index_content = build_index(index_entries, commit, today)
-                write_index(wiki_dir, index_content)
-            if skill_missing:
-                sym_count = sum(len(entry.component_ids) for entry in manifest.files.values())
-                write_index_and_skill(root, cfg, index_entries, {}, "", [], sym_count, len(manifest.files))
-            webhook_url = _get_webhook_url(name)
-            registry.register(name, root, url=repo_url, branches=repo_branches)
-            tasks.update(task_id, status="completed", progress=100, step="complete", result={
-                "name": name, "path": str(root),
-                "has_vector_db": (root / cfg.vector_store.persist_dir).exists(),
-                "symbol_count": sum(len(e.component_ids) for e in manifest.files.values()),
-                "synced": True, "repaired": True,
-                "webhook_url": webhook_url,
-            })
-            return
-
-        total_symbols = _run_indexing_pipeline(task_id, name, root, skip_deep, candidates, cfg, manifest, branch=repo_branch)
-
-        webhook_url = _get_webhook_url(name)
-        registry.register(name, root, url=repo_url, branches=repo_branches)
-        info = registry.get(name)
-        if not info:
-            tasks.update(task_id, status="failed", error="repo was unregistered during task")
-            return
-        manifest_data = load_manifest(root)
-        symbol_count = sum(len(entry.component_ids) for entry in manifest_data.files.values())
-
+        service = RepositoryService(name, root, selected_branch, config=cfg)
+        tasks.update(task_id, status="running", progress=40, step="sync")
+        result = service.sync(enrich=enrich)
+        projection = service.project()
+        status = service.index.inspect(service.scope)
+        registered = registry.get(name) or {}
+        registry.register(
+            name,
+            root,
+            url=repo_url or registered.get("url", ""),
+            branches=repo_branches or [selected_branch],
+            branch_rule=registered.get("branch_rule", ""),
+            description=registered.get("description", ""),
+            tags=registered.get("tags", []),
+        )
         tasks.update(task_id, status="completed", progress=100, step="complete", result={
-            "name": name, "path": str(root),
-            "has_vector_db": (root / info["config"].vector_store.persist_dir).exists(),
-            "symbol_count": symbol_count, "synced": True,
-            "webhook_url": webhook_url,
+            "name": name,
+            "path": str(root),
+            "branch": selected_branch,
+            "generation": status.generation,
+            "tree_id": status.tree_id,
+            "symbol_count": status.symbols,
+            "dense_state": status.dense_state,
+            "sync": result,
+            "projection": projection,
+            "webhook_url": _get_webhook_url(name),
         })
+    except GitOperationError as error:
+        tasks.update(task_id, status="failed", progress=10, step=f"git_{error.step}", error=error.stderr)
+    except Exception as error:
+        tasks.update(
+            task_id,
+            status="failed",
+            progress=0,
+            step="sync",
+            error=_sanitize_error(str(error), repo_url, "", "", ""),
+        )
 
-    except subprocess.TimeoutExpired as e:
-        tasks.update(task_id, status="failed", progress=10, step="git_timeout", error=f"git operation timed out: {e.cmd}")
-    except Exception as e:
-        tasks.update(task_id, status="failed", progress=0, step="unknown", error=_sanitize_error(str(e), repo_url, "", "", ""))
+
+
+def _run_sync_task(task_id: str, name: str, root: Path, enrich: bool, branch: str = "", _skip_lock: bool = False) -> None:
+    lock = _get_repo_lock(name)
+    if not _skip_lock and not lock.acquire(blocking=False):
+        tasks.update(task_id, status="failed", progress=0, step="locked", error="Another operation is running on this repo")
+        return
+    try:
+        existing = registry.get(name)
+        repo_url = existing.get("url", "") if existing else ""
+        repo_branches = existing.get("branches", []) if existing else []
+        _run_sync_task_inner(
+            task_id,
+            name,
+            root,
+            enrich,
+            branch=branch,
+            repo_url=repo_url,
+            repo_branches=repo_branches,
+        )
     finally:
         if not _skip_lock:
             lock.release()
@@ -817,8 +503,7 @@ def _run_register_task(
     password: str,
     token: str,
     branch: str,
-    skip_deep: bool,
-    force_reindex: bool,
+    enrich: bool,
     branch_rule: str = "",
 ) -> None:
     lock = _get_repo_lock(name)
@@ -826,7 +511,7 @@ def _run_register_task(
         tasks.update(task_id, status="failed", progress=0, step="locked", error="Another operation is running on this repo")
         return
     try:
-        _run_register_task_inner(task_id, name, url, username, password, token, branch, skip_deep, force_reindex, branch_rule)
+        _run_register_task_inner(task_id, name, url, username, password, token, branch, enrich, branch_rule)
     finally:
         lock.release()
 
@@ -839,8 +524,7 @@ def _run_register_task_inner(
     password: str,
     token: str,
     branch: str,
-    skip_deep: bool,
-    force_reindex: bool,
+    enrich: bool,
     branch_rule: str = "",
 ) -> None:
     clone_url = _inject_credentials(url, username, password, token)
@@ -848,11 +532,10 @@ def _run_register_task_inner(
 
     from indexer.git import _GIT_ENV
     git_env = _GIT_ENV
-    git_cfg = ["-c", "http.followRedirects=true"]
 
     try:
         if clone_dir.exists() and (clone_dir / ".git").exists():
-            tasks.update(task_id, status="running", progress=10, step="git_pull")
+            tasks.update(task_id, status="running", progress=10, step="git_fetch")
             try:
                 git_fetch_checkout_pull(
                     clone_dir, branch,
@@ -887,44 +570,44 @@ def _run_register_task_inner(
 
         _store_credentials(clone_dir, url, username, password, token)
 
-        from indexer.config import Config, load_config, save_config
-        from indexer.manifest import load_manifest, Manifest
-        from indexer.git import all_tracked_files, current_commit, is_git_repo, changed_files_since
-        from indexer.cli import _is_indexable, _ensure_cache_gitignore
+        from indexer.git import is_git_repo
+        from indexer.cli import _ensure_cache_gitignore
         from indexer.hooks import install_hook
 
         root = clone_dir
 
+        registered = registry.get(name)
+        configured_branches = list(registered.get("branches", [])) if registered else []
         detected_branch = _detect_default_branch(clone_dir) if is_git_repo(clone_dir) else ""
         if detected_branch and not branch:
             branch = detected_branch
-
-        if detected_branch:
-            registry.register(name, clone_dir, url=url, branches=[detected_branch], branch_rule=branch_rule)
 
         tasks.update(task_id, status="running", progress=30, step="init")
         cfg = load_config(root)
         save_config(root, cfg)
         _ensure_cache_gitignore(root, verbose=False)
         if is_git_repo(root) and cfg.pre_commit:
-            install_hook(root, skip_deep=not cfg.deep_hook)
+            install_hook(root)
 
         tasks.update(task_id, status="running", progress=35, step="detecting_files")
-        manifest = load_manifest(root)
-        all_files = [f for f in all_tracked_files(root) if _is_indexable(f, cfg)]
-
         # If branch_rule is set, discover and register all matching branches
         if branch_rule and url:
             discovered = _discover_remote_branches(url, branch_rule)
             if discovered:
-                registry.register(name, clone_dir, url=url, branches=discovered, branch_rule=branch_rule)
+                configured_branches = discovered
             else:
                 logger.warning("No branches matched branch_rule '%s' for repo %s", branch_rule, name)
 
-        # Determine which branches to index
-        repo_info = registry.get(name)
-        registered_branches = repo_info.get("branches", []) if repo_info else ([] if not branch else [branch])
-        branches_to_index = registered_branches if branch_rule else ([branch] if branch else registered_branches[:1])
+        branches_to_index = configured_branches or ([branch] if branch else [])
+        registry.register(
+            name,
+            clone_dir,
+            url=url,
+            branches=branches_to_index,
+            branch_rule=branch_rule,
+            description=registered.get("description", "") if registered else "",
+            tags=registered.get("tags", []) if registered else [],
+        )
 
         if not branches_to_index:
             tasks.update(task_id, status="completed", progress=100, step="complete", result={
@@ -932,60 +615,49 @@ def _run_register_task_inner(
             })
             return
 
-        for idx, current_branch in enumerate(branches_to_index):
-            if not current_branch:
-                continue
-
-            tasks.update(task_id, status="running", progress=40 + (50 * idx // len(branches_to_index)),
-                         step=f"checkout_{current_branch}")
-
-            # Checkout the branch
-            r = subprocess.run(
-                ["git"] + git_cfg + ["checkout", current_branch],
-                cwd=root, capture_output=True, text=True, timeout=30, env=git_env,
+        if len(branches_to_index) > 1:
+            _run_all_branches(
+                name,
+                branches_to_index,
+                task_id,
+                _skip_lock=True,
+                root=root,
+                enrich=enrich,
             )
-            if r.returncode != 0:
-                tasks.update(task_id, status="failed", progress=40, step=f"checkout_{current_branch}", error=_sanitize_error(r.stderr, url, username, password, token))
+            branch_task = tasks.get(task_id) or {}
+            if branch_task.get("status") == "failed":
                 return
-            r = subprocess.run(
-                ["git"] + git_cfg + ["pull", "--rebase", "origin", current_branch],
-                cwd=root, capture_output=True, text=True, timeout=60, env=git_env,
-            )
-            if r.returncode != 0:
-                tasks.update(task_id, status="failed", progress=40, step=f"pull_{current_branch}", error=_sanitize_error(r.stderr, url, username, password, token))
-                return
-
-            # Index this branch
-            manifest = load_manifest(root)
-            all_files = [f for f in all_tracked_files(root) if _is_indexable(f, cfg)]
-            if manifest.last_indexed_commit is None:
-                candidates = all_files
-            else:
-                git_changed = changed_files_since(root, manifest.last_indexed_commit) if is_git_repo(root) else []
-                stale = manifest.stale_files(root, all_files)
-                candidates = list(set(git_changed + stale))
-            candidates = [f for f in candidates if _is_indexable(f, cfg)]
-
-            logger.info("Register repo=%s branch=%s candidates=%d all_files=%d", name, current_branch, len(candidates), len(all_files))
-
-            _run_indexing_pipeline(task_id, name, root, skip_deep, candidates, cfg, manifest, branch=current_branch, progress_offset=40 + (50 * idx // len(branches_to_index)))
-
-        webhook_url = _get_webhook_url(name)
-        info = registry.get(name)
-        if not info:
-            tasks.update(task_id, status="failed", error="repo was unregistered during task")
+            result = dict(branch_task.get("result") or {})
+            result.update({
+                "name": name,
+                "path": str(clone_dir),
+                "url": url,
+                "indexed": True,
+                "webhook_url": _get_webhook_url(name),
+            })
+            tasks.update(task_id, status="completed", progress=100, step="complete", result=result)
             return
-        manifest_data = load_manifest(root)
-        symbol_count = sum(len(entry.component_ids) for entry in manifest_data.files.values())
+
+        current_branch = branches_to_index[0]
+        service = RepositoryService(name, root, current_branch, config=cfg)
+        tasks.update(task_id, status="running", progress=50, step=f"{current_branch}:sync")
+        sync_result = service.sync(enrich=enrich)
+        projection = service.project()
+        status = service.index.inspect(service.scope)
 
         tasks.update(task_id, status="completed", progress=100, step="complete", result={
             "name": name,
             "path": str(clone_dir),
             "url": url,
-            "has_vector_db": (clone_dir / info["config"].vector_store.persist_dir).exists(),
-            "symbol_count": symbol_count,
+            "branch": current_branch,
+            "generation": status.generation,
+            "tree_id": status.tree_id,
+            "dense_state": status.dense_state,
+            "symbol_count": status.symbols,
+            "sync": sync_result,
+            "projection": projection,
             "indexed": True,
-            "webhook_url": webhook_url,
+            "webhook_url": _get_webhook_url(name),
         })
 
     except subprocess.TimeoutExpired as e:
@@ -993,13 +665,6 @@ def _run_register_task_inner(
         tasks.update(task_id, status="failed", progress=0, step=cmd, error=f"timeout: {cmd} took too long")
     except Exception as e:
         tasks.update(task_id, status="failed", progress=0, step="unknown", error=_sanitize_error(str(e), url, username, password, token))
-
-
-def _is_managed_repo_root(name: str, root: Path) -> bool:
-    try:
-        return root.resolve() == (registry.repos_dir / name).resolve()
-    except OSError:
-        return False
 
 
 async def unregister_repo(request: Request) -> JSONResponse:
@@ -1022,92 +687,142 @@ async def search_symbols(request: Request) -> JSONResponse:
     body = await _parse_body(request)
     query = body.get("query", "")
     repo = body.get("repo")
+    requested_branch = body.get("branch", "")
+    if not isinstance(requested_branch, str):
+        return JSONResponse({"error": "branch must be a string"}, status_code=400)
     try:
         top_k = max(1, min(int(body.get("top_k", 10)), 100))
-        expand_depth = max(1, min(int(body.get("expand_depth", 1)), 5))
+        expand_depth = max(0, min(int(body.get("expand_depth", 1)), 5))
     except (ValueError, TypeError):
         return JSONResponse({"error": "top_k and expand_depth must be integers"}, status_code=400)
-    rewrite = body.get("rewrite", True)
-    explain = body.get("explain", False)
+    retrieval = body.get("retrieval", "preferred")
+    if retrieval not in {"local", "preferred", "required"}:
+        return JSONResponse({
+            "error": "retrieval must be local, preferred, or required",
+        }, status_code=400)
 
     if not query:
         return JSONResponse({"error": "query is required"}, status_code=400)
 
-    queries = [query]
     targets = _resolve_repos(repo)
     if not targets:
         return JSONResponse({"error": "no repos available"}, status_code=404)
 
-    if rewrite:
-        any_repo = next(iter(targets), None)
-        if any_repo:
-            from indexer.llm import rewrite_query
-            queries = rewrite_query(query, any_repo[1]["config"])
-
-    from collections import defaultdict
-    by_emb: dict[tuple, list[tuple[str, dict]]] = defaultdict(list)
-    for name, info in targets:
-        cfg = info["config"]
-        key = (cfg.embedding.provider, cfg.embedding.dimensions)
-        by_emb[key].append((name, info))
+    ambiguous = [
+        name for name, info in targets
+        if len(info.get("branches", [])) > 1 and not requested_branch
+    ]
+    if ambiguous:
+        return JSONResponse({
+            "error": "branch is required for multi-branch repositories",
+            "repos": ambiguous,
+        }, status_code=400)
+    invalid = [
+        name for name, info in targets
+        if requested_branch
+        and info.get("branches", [])
+        and requested_branch not in info.get("branches", [])
+    ]
+    if invalid:
+        return JSONResponse({
+            "error": f"branch '{requested_branch}' is not registered",
+            "repos": invalid,
+        }, status_code=400)
 
     all_hits = []
-    seen_ids: set[str] = set()
-
-    for emb_key, group in by_emb.items():
-        emb_cfg = group[0][1]["config"].embedding
-        all_query_vectors = [embed_query(q, emb_cfg) for q in queries]
-
-        for name, info in group:
-            cfg = info["config"]
-            root = info["root"]
-            repo_branches = info.get("branches", [])
-            if len(repo_branches) > 1:
-                branch_conditions = [{"branch": b} for b in repo_branches]
-                where_clause = {"$or": branch_conditions} if branch_conditions else None
-            elif len(repo_branches) == 1:
-                where_clause = {"branch": repo_branches[0]}
-            else:
-                where_clause = None
-            for qv in all_query_vectors:
-                hits = search(qv, cfg.vector_store, root, top_k=top_k * 2, where=where_clause)
-                if explain:
-                    _annotate_match_reasons(hits, query)
-                for h in hits:
-                    h["repo"] = name
-                    if h["id"] not in seen_ids:
-                        seen_ids.add(h["id"])
-                        all_hits.append(h)
+    all_related = []
+    search_metrics = []
+    seen_matches: set[tuple[str, str, str]] = set()
+    seen_related: set[tuple[str, str, str]] = set()
+    for name, info in targets:
+        cfg = info["config"]
+        root = info["root"]
+        repo_branches = info.get("branches", [])
+        branch = requested_branch or (
+            repo_branches[0] if repo_branches else default_branch(root)
+        )
+        service = RepositoryService(name, root, branch, config=cfg)
+        try:
+            response = service.search(
+                query,
+                limit=top_k,
+                related_limit=top_k if expand_depth else 0,
+                retrieval=retrieval,
+            )
+        except RepositoryIndexError as error:
+            status_code = 503 if error.code == "HYBRID_REQUIRED_UNAVAILABLE" else 404
+            if error.code == "INVALID_REQUEST":
+                status_code = 400
+            return JSONResponse({
+                "error": str(error),
+                "code": error.code,
+                "phase": error.phase,
+                "repo": name,
+                "branch": branch,
+            }, status_code=status_code)
+        search_metrics.append({
+            "repo": name,
+            "branch": branch,
+            "query": query,
+            **response["search_metrics"],
+        })
+        for hit in response["matches"]:
+            key = (name, branch, hit["id"])
+            if key in seen_matches:
+                continue
+            seen_matches.add(key)
+            item = dict(hit)
+            item["repo"] = name
+            item["branch"] = branch
+            all_hits.append(item)
+        related_items = list(response["related"])
+        if expand_depth > 1:
+            expanded_ids = {item["id"] for item in related_items}
+            for hit in response["matches"]:
+                for related in service.trace(
+                    hit["id"],
+                    direction="down",
+                    max_depth=expand_depth,
+                )[1:]:
+                    if related["id"] in expanded_ids:
+                        continue
+                    related["relation"] = "call"
+                    related_items.append(related)
+                    expanded_ids.add(related["id"])
+                    if len(related_items) >= top_k:
+                        break
+        for related in related_items[:top_k]:
+            key = (name, branch, related["id"])
+            if key in seen_matches or key in seen_related:
+                continue
+            seen_related.add(key)
+            item = dict(related)
+            item["repo"] = name
+            item["branch"] = branch
+            all_related.append(item)
 
     truncate_documents(all_hits)
-
-    all_hits.sort(key=lambda h: h.get("distance", 1.0))
-    all_hits = all_hits[:top_k]
-
-    if expand_depth > 0:
-        expanded = []
-        expanded_ids: set[str] = set()
-        for name, info in targets:
-            cfg = info["config"]
-            root = info["root"]
-            repo_hits = [h for h in all_hits if h.get("repo") == name]
-            expanded_hits = _expand_with_call_graph(repo_hits, cfg, root, name, expand_depth)
-            truncate_documents(expanded_hits)
-            for h in expanded_hits:
-                if h["id"] not in expanded_ids:
-                    expanded_ids.add(h["id"])
-                    expanded.append(h)
-        all_hits = expanded
-
-    all_hits.sort(key=lambda h: h.get("distance", 1.0))
+    truncate_documents(all_related)
+    all_hits.sort(key=lambda hit: (-float(hit.get("score", 0.0)), hit.get("repo", ""), hit.get("id", "")))
     all_hits = all_hits[:top_k]
 
     return JSONResponse({
         "results": all_hits,
+        "matches": all_hits,
+        "related": all_related,
         "total": len(all_hits),
-        "rewritten_queries": queries if len(queries) > 1 else None,
+        "search_metrics": search_metrics,
         "index_status": [
-            {**_get_index_status_impl(info["root"]), "repo": name}
+            RepositoryService(
+                name,
+                info["root"],
+                requested_branch or (
+                    info.get("branches", [""])[0]
+                    if info.get("branches")
+                    else default_branch(info["root"])
+                ),
+                config=info["config"],
+            ).inspect()
             for name, info in targets
         ],
     })
@@ -1122,19 +837,52 @@ async def trace_call(request: Request) -> JSONResponse:
     except (ValueError, TypeError):
         return JSONResponse({"error": "max_depth must be an integer"}, status_code=400)
     repo = body.get("repo")
+    requested_branch = body.get("branch", "")
+    if not isinstance(requested_branch, str):
+        return JSONResponse({"error": "branch must be a string"}, status_code=400)
 
     if not symbol_id:
         return JSONResponse({"error": "symbol_id is required"}, status_code=400)
 
     all_nodes = []
     targets = _resolve_repos(repo)
+    if not targets:
+        return JSONResponse({"error": "no repos available"}, status_code=404)
+    ambiguous = [
+        name for name, info in targets
+        if len(info.get("branches", [])) > 1 and not requested_branch
+    ]
+    if ambiguous:
+        return JSONResponse({
+            "error": "branch is required for multi-branch repositories",
+            "repos": ambiguous,
+        }, status_code=400)
+    invalid = [
+        name for name, info in targets
+        if requested_branch
+        and info.get("branches", [])
+        and requested_branch not in info.get("branches", [])
+    ]
+    if invalid:
+        return JSONResponse({
+            "error": f"branch '{requested_branch}' is not registered",
+            "repos": invalid,
+        }, status_code=400)
 
     for name, info in targets:
-        cfg = info["config"]
-        root = info["root"]
-        nodes = _trace_call_impl(symbol_id, cfg, root, direction, max_depth)
+        branches = info.get("branches", [])
+        branch = requested_branch or (
+            branches[0] if branches else default_branch(info["root"])
+        )
+        nodes = RepositoryService(
+            name,
+            info["root"],
+            branch,
+            config=info["config"],
+        ).trace(symbol_id, direction=direction, max_depth=max_depth)
         for n in nodes:
             n["repo"] = name
+            n["branch"] = branch
         all_nodes.extend(nodes)
 
     return JSONResponse({"results": all_nodes, "total": len(all_nodes)})
@@ -1587,54 +1335,43 @@ async def stable_symbol_id_endpoint(request: Request) -> JSONResponse:
 async def index_status(request: Request) -> JSONResponse:
     body = await _parse_body(request)
     repo = body.get("repo")
+    requested_branch = body.get("branch", "")
+    if not isinstance(requested_branch, str):
+        return JSONResponse({"error": "branch must be a string"}, status_code=400)
     targets = _resolve_repos(repo)
     if not targets:
         return JSONResponse({"error": f"repo '{repo}' not registered"}, status_code=404)
 
     statuses = []
     for name, info in targets:
-        status = _get_index_status_impl(info["root"])
-        status["repo"] = name
-        statuses.append(status)
+        branches = [requested_branch] if requested_branch else (
+            info.get("branches", []) or [default_branch(info["root"])]
+        )
+        for branch in branches:
+            statuses.append(RepositoryService(
+                name,
+                info["root"],
+                branch,
+                config=info["config"],
+            ).inspect())
 
-    if repo:
+    if repo and len(statuses) == 1:
         return JSONResponse(statuses[0])
     return JSONResponse({"results": statuses, "total": len(statuses)})
 
 
 async def list_repos(request: Request) -> JSONResponse:
-    from indexer.manifest import load_manifest
     result = []
     for name in registry.list_names():
         info = registry.get(name)
         if not info:
             continue
         root = info["root"]
-        has_vectors = (root / info["config"].vector_store.persist_dir).exists()
-        manifest_path = root / ".indexer" / "manifest.json"
-        symbol_count = 0
-        last_synced_at = ""
-        last_indexed_commit = ""
-        if manifest_path.exists():
-            manifest = load_manifest(root)
-            symbol_count = sum(len(entry.component_ids) for entry in manifest.files.values())
-            last_synced_at = manifest.indexed_at or ""
-            if manifest.last_indexed_commit:
-                last_indexed_commit = manifest.last_indexed_commit[:7]
-        if not last_synced_at:
-            try:
-                from indexer.git import current_commit, _GIT_ENV
-                commit = current_commit(root)
-                if commit:
-                    out = subprocess.run(
-                        ["git", "log", "-1", "--format=%cI", commit],
-                        cwd=root, capture_output=True, text=True, timeout=10, env=_GIT_ENV,
-                    )
-                    if out.returncode == 0 and out.stdout.strip():
-                        last_synced_at = out.stdout.strip()
-            except Exception:
-                pass
         branches = info.get("branches", [])
+        statuses = [
+            RepositoryService(name, root, branch, config=info["config"]).inspect()
+            for branch in (branches or [default_branch(root)])
+        ]
         webhook_url = _get_webhook_url(name, request)
         result.append({
             "name": name,
@@ -1644,10 +1381,16 @@ async def list_repos(request: Request) -> JSONResponse:
             "description": info.get("description", ""),
             "tags": info.get("tags", []),
             "webhook_url": webhook_url,
-            "has_vector_db": has_vectors,
-            "symbol_count": symbol_count,
-            "last_synced_at": last_synced_at,
-            "last_indexed_commit": last_indexed_commit,
+            "dense_ready": all(status["dense_state"] == "ready" for status in statuses),
+            "symbol_count": sum(int(status["symbols"]) for status in statuses),
+            "generations": {
+                status["current_branch"]: status["generation"]
+                for status in statuses
+            },
+            "trees": {
+                status["current_branch"]: status["indexed_tree"]
+                for status in statuses
+            },
         })
     return JSONResponse({"repos": result})
 
@@ -1666,7 +1409,6 @@ async def repo_detail(request: Request) -> JSONResponse:
     cfg = info["config"]
 
     wiki_dir = root / cfg.wiki_dir
-    manifest_path = root / ".indexer" / "manifest.json"
     skill_path = root / ".indexer" / "skills" / "codebase.md"
 
     wiki_pages = []
@@ -1679,129 +1421,38 @@ async def repo_detail(request: Request) -> JSONResponse:
                 "size": md_file.stat().st_size,
             })
 
-    manifest_data = {}
-    if manifest_path.exists():
-        from indexer.manifest import load_manifest
-        manifest = load_manifest(root)
-        manifest_data = {
-            "last_indexed_commit": manifest.last_indexed_commit,
-            "indexed_at": manifest.indexed_at,
-            "files": {
-                k: {
-                    "hash": v.hash,
-                    "wiki_page": v.wiki_page,
-                    "component_ids": v.component_ids,
-                }
-                for k, v in manifest.files.items()
-            },
-        }
-
     skill_content = ""
     if skill_path.exists():
         skill_content = skill_path.read_text(encoding="utf-8", errors="replace")
 
     webhook_url = _get_webhook_url(repo_name, request)
 
-    # Gather per-branch detail: commit hash + index status
     branches = info.get("branches", [])
     branch_rule = info.get("branch_rule", "")
     branches_detail = []
     branches_missing = []
 
-    # If branch_rule is set, discover what's on remote vs what's registered
     if branch_rule and info.get("url"):
         try:
             discovered = _discover_remote_branches(info["url"], branch_rule)
             registered_set = set(branches)
             for br in discovered:
                 if br not in registered_set:
-                    branches_missing.append({"name": br, "commit": ""})
-            # Also get commit for missing branches
-            is_git = (root / ".git").exists()
-            if is_git:
-                for br in branches_missing:
-                    try:
-                        from indexer.git import _GIT_ENV as _git_env_ls
-                        r = subprocess.run(
-                            ["git", "ls-remote", info["url"], f"refs/heads/{br['name']}"],
-                            capture_output=True, text=True, timeout=15, env=_git_env_ls,
-                        )
-                        if r.returncode == 0 and r.stdout.strip():
-                            br["commit"] = r.stdout.strip().split("\t")[0]
-                    except Exception:
-                        pass
+                    branches_missing.append({"name": br})
         except Exception as e:
             logger.warning("Failed to discover branches for %s: %s", repo_name, e)
 
-    is_git = (root / ".git").exists()
-    # Pre-setup vector store client for branch status checks
-    vector_collection = None
-    persist_dir_path = root / cfg.vector_store.persist_dir
-    has_vector_files = False
-    if persist_dir_path.exists():
-        has_vector_files = any(
-            f.suffix in (".sqlite3", ".bin", ".pkl") or
-            (f.is_dir() and f.name.startswith("chroma"))
-            for f in persist_dir_path.iterdir()
-        )
-        if not has_vector_files:
-            has_vector_files = len(list(persist_dir_path.iterdir())) > 0
-
-    try:
-        from indexer.vector_store import _get_client
-        if persist_dir_path.exists():
-            vector_client = _get_client(str(persist_dir_path))
-            try:
-                vector_collection = vector_client.get_collection(cfg.vector_store.collection_name)
-            except Exception:
-                vector_collection = None
-    except Exception:
-        pass
-
-    for b in branches:
-        commit_hash = ""
-        if is_git:
-            try:
-                from indexer.git import _GIT_ENV as _git_env_detail
-                r = subprocess.run(
-                    ["git", "rev-parse", "refs/remotes/origin/" + b],
-                    cwd=root, capture_output=True, text=True, timeout=10, env=_git_env_detail,
-                )
-                if r.returncode == 0:
-                    commit_hash = r.stdout.strip()
-            except Exception:
-                pass
-
-        # Check vector store for this branch
-        has_branch_vectors = False
-        if vector_collection is not None:
-            try:
-                total_count = vector_collection.count()
-                if total_count > 0:
-                    # Try exact branch match
-                    branch_chunk = vector_collection.get(
-                        where={"branch": b}, limit=1, include=["metadatas"],
-                    )
-                    has_branch_vectors = bool(branch_chunk and branch_chunk.get("ids"))
-                    # Fallback: if no branch metadata found, check if this is old-style
-                    # data (no branch field in any vector). If so, treat as indexed
-                    # since the data IS there, just without branch discrimination.
-                    if not has_branch_vectors:
-                        any_sample = vector_collection.get(limit=1, include=["metadatas"])
-                        if any_sample and any_sample.get("metadatas"):
-                            first_meta = any_sample["metadatas"][0]
-                            if "branch" not in first_meta or not first_meta["branch"]:
-                                has_branch_vectors = True
-            except Exception:
-                pass
-        # Fallback: if chroma failed but vector files exist on disk, trust the filesystem
-        if not has_branch_vectors and has_vector_files:
-            has_branch_vectors = True
-
+    for branch in (branches or [default_branch(root)]):
+        status = RepositoryService(repo_name, root, branch, config=cfg).inspect()
         branches_detail.append({
-            "name": b,
-            "commit": commit_hash,
-            "indexed": has_branch_vectors,
+            "name": branch,
+            "tree_id": status["indexed_tree"],
+            "generation": status["generation"],
+            "indexed": status["generation"] is not None,
+            "dense_state": status["dense_state"],
+            "files": status["indexed_files"],
+            "symbols": status["symbols"],
+            "is_stale": status["is_stale"],
         })
 
     return JSONResponse({
@@ -1816,10 +1467,9 @@ async def repo_detail(request: Request) -> JSONResponse:
         "branch_rule": info.get("branch_rule", ""),
         "webhook_url": webhook_url,
         "wiki_pages": wiki_pages,
-        "manifest": manifest_data,
+        "index": branches_detail,
         "skill": skill_content,
-        "has_vector_db": (root / cfg.vector_store.persist_dir).exists(),
-        "last_synced_at": manifest_data.get("indexed_at", "") if manifest_data else "",
+        "dense_ready": all(item["dense_state"] == "ready" for item in branches_detail),
     })
 
 
@@ -1869,15 +1519,10 @@ async def update_repo_meta(request: Request) -> JSONResponse:
 
 
 async def multi_repo_skill(request: Request) -> JSONResponse:
-    from indexer.wiki import sanitize_group_label
-    from indexer.config import load_config
-    from indexer.manifest import load_manifest
-
     all_repos = []
     for name, info in registry.items():
         root = info["root"]
         cfg = info["config"]
-        manifest = load_manifest(root)
         wiki_dir = root / cfg.wiki_dir
         skill_path = root / ".indexer" / "skills" / "codebase.md"
 
@@ -1889,10 +1534,21 @@ async def multi_repo_skill(request: Request) -> JSONResponse:
                     "path": str(md_file.relative_to(root)),
                 })
 
-        total_symbols = sum(len(e.component_ids) for e in manifest.files.values())
-        total_files = len(manifest.files)
-        commit = manifest.last_indexed_commit or "unknown"
-        indexed_date = manifest.indexed_at or "unknown"
+        branches = info.get("branches", []) or [default_branch(root)]
+        statuses = [
+            RepositoryService(name, root, branch, config=cfg).inspect()
+            for branch in branches
+        ]
+        total_symbols = sum(int(status["symbols"]) for status in statuses)
+        total_files = sum(int(status["indexed_files"]) for status in statuses)
+        generations = {
+            status["current_branch"]: status["generation"]
+            for status in statuses
+        }
+        trees = {
+            status["current_branch"]: status["indexed_tree"]
+            for status in statuses
+        }
 
         skill_content = ""
         if skill_path.exists():
@@ -1903,11 +1559,11 @@ async def multi_repo_skill(request: Request) -> JSONResponse:
             "path": str(root),
             "total_symbols": total_symbols,
             "total_files": total_files,
-            "commit": commit,
-            "indexed_date": indexed_date,
+            "generations": generations,
+            "trees": trees,
             "wiki_pages": wiki_pages,
             "skill": skill_content,
-            "has_vector_db": (root / cfg.vector_store.persist_dir).exists(),
+            "dense_ready": all(status["dense_state"] == "ready" for status in statuses),
         })
 
     if not all_repos:
@@ -1938,10 +1594,10 @@ async def multi_repo_skill(request: Request) -> JSONResponse:
         combined_lines.append(f"### {r['name']}")
         combined_lines.append(
             f"- **{r['total_symbols']} symbols** across **{r['total_files']} files**"
-            f" — indexed {r['indexed_date']} @ `{r['commit'][:8]}`"
+            f" — generations {r['generations']}"
         )
         combined_lines.append(f"- Path: `{r['path']}`")
-        combined_lines.append(f"- Vector DB: {'yes' if r['has_vector_db'] else 'no'}")
+        combined_lines.append(f"- Dense enrichment: {'ready' if r['dense_ready'] else 'not ready'}")
 
         if r["wiki_pages"]:
             combined_lines.append("- Wiki pages:")
@@ -2080,7 +1736,7 @@ def create_app(repos: dict[str, Path] | None = None, repos_dir: Path | None = No
 
     if repos:
         for name, path in repos.items():
-            registry.register(name, path, url="", branches=[])
+            registry.register(name, path, url="", branches=[default_branch(path)])
 
     from starlette.staticfiles import StaticFiles
     from starlette.middleware import Middleware
@@ -2152,12 +1808,10 @@ def create_app(repos: dict[str, Path] | None = None, repos_dir: Path | None = No
             Route("/unregister", unregister_repo, methods=["POST"]),
             Route("/sync", sync_repo, methods=["POST"]),
             Route("/sync-all", sync_all_branches, methods=["POST"]),
-            Route("/rebuild", rebuild_repo, methods=["POST"]),
-            Route("/rebuild-all", rebuild_all_branches, methods=["POST"]),
             Route("/webhook/{name}", webhook_by_name, methods=["POST"]),
             Route("/api/repo/{name}", repo_detail),
             Route("/api/repo/{name}", update_repo_meta, methods=["PATCH"]),
-            Route("/api/repo/{name}/reindex", reindex_repo, methods=["POST"]),
+            Route("/api/repo/{name}/sync", update_repo_and_sync, methods=["POST"]),
             Route("/api/repo/{name}/wiki/{page}", wiki_page_content),
             Route("/api/validate/{name}", validate_repo),
             Route("/api/task/{task_id}", task_status),
@@ -2185,29 +1839,6 @@ def _resolve_repos(repo: str | None) -> list[tuple[str, dict]]:
             return []
         return [(repo, info)]
     return registry.items()
-
-
-def _trace_call_impl(
-    symbol_id: str,
-    cfg: Config,
-    repo_root: Path,
-    direction: str,
-    max_depth: int,
-) -> list[dict]:
-    return _trace_call_retrieval(symbol_id, cfg, repo_root, direction=direction, max_depth=max_depth)
-
-
-def _expand_with_call_graph(
-    hits: list[dict],
-    cfg: Config,
-    repo_root: Path,
-    repo_name: str,
-    depth: int = 1,
-) -> list[dict]:
-    expanded = _expand_retrieval(hits, cfg, repo_root, depth=depth)
-    for h in expanded:
-        h["repo"] = repo_name
-    return expanded
 
 
 class _InvalidBodyError(Exception):

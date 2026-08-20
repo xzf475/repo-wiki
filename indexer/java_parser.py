@@ -2,7 +2,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from indexer.ast_parser import ASTNode
-from indexer.utils import _rel, _node_text
+from indexer.utils import _rel, _node_name as _get_name, _node_text
 
 
 def _get_java_language():
@@ -63,24 +63,12 @@ def _extract_calls(node, source: bytes) -> list[str]:
     return list(calls)
 
 
-def _get_name(node, source: bytes) -> str | None:
-    name_node = node.child_by_field_name("name")
-    if name_node:
-        return _node_text(name_node, source)
-    return None
-
-
-def _get_type_name(node, source: bytes) -> str | None:
-    type_node = node.child_by_field_name("type")
-    if type_node:
-        return _node_text(type_node, source)
-    return None
-
-
-def parse_java_file(path: Path, repo_root: Path) -> list[ASTNode]:
+def parse_java_file(path: Path, repo_root: Path, *, strict: bool = False) -> list[ASTNode]:
     try:
         from tree_sitter import Parser
     except ImportError as e:
+        if strict:
+            raise
         import warnings
         warnings.warn(f"tree-sitter not installed, skipping {path}: {e}")
         return []
@@ -91,13 +79,20 @@ def parse_java_file(path: Path, repo_root: Path) -> list[ASTNode]:
         parser = Parser(language)
         tree = parser.parse(source)
     except ImportError as e:
+        if strict:
+            raise
         import warnings
         warnings.warn(f"tree-sitter-java not installed, skipping {path}: {e}")
         return []
     except Exception as e:
+        if strict:
+            raise
         import warnings
         warnings.warn(f"Failed to parse {path}: {e}")
         return []
+
+    if strict and tree.root_node.has_error:
+        raise SyntaxError("invalid Java syntax")
 
     rel_path = _rel(path, repo_root)
     file_imports = _extract_imports(tree, source)

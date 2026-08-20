@@ -23,7 +23,7 @@ def test_core_tool_contract_top_level_keys(monkeypatch, tmp_path):
     )
 
     monkeypatch.setattr("indexer.retrieval.get_index_status", lambda repo_root: {"is_stale": False, "reasons": []})
-    monkeypatch.setattr("indexer.retrieval.get_by_ids", lambda ids, vector_store, repo_root: [])
+    monkeypatch.setattr("indexer.retrieval.get_by_ids", lambda ids, *args, **kwargs: [])
 
     assert {"changed_files", "changed_symbols", "verify_commands"} <= set(post_edit_verify(Config(), tmp_path, changed_files=[]))
     assert {"must_change_files", "related_symbols", "verify_commands"} <= set(change_set("goal", Config(), tmp_path, changed_files=[]))

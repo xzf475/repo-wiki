@@ -1,49 +1,51 @@
 # repo-wiki
 
-**Your codebase, understood by any LLM.**
+**Give code agents one verifiable view of a repository.**
 
-Generate a checked-in wiki, skill files, and vector search index from any repo. Forked from [kiwiskil](https://github.com/ximihoque/kiwiskil), adds REST API, ChromaDB semantic search, query rewriting, call graph tracing, webhook auto-sync, MCP server, and Rust/Java/Ruby/Go support.
+repo-wiki builds a structural index from immutable Git trees, combines exact symbol lookup, SQLite FTS5, call-graph expansion, and optional dense enrichment, then projects Wiki pages and an Agent skill. CLI, REST, and MCP all use the same `RepositoryIndex` module and return results from the same generation.
 
-[![Python >=3.11](https://img.shields.io/badge/python-%3E%3D3.11-blue)](https://pypi.org/project/repo-wiki/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[中文](README.md)
 
-[中文文档](README.md)
+## Architecture
 
----
+```text
+Git tree / staged / worktree snapshot
+                 │
+                 ▼
+content-addressed parse artifacts
+                 │
+                 ▼
+SQLite generation + branch head ──► Wiki / Skill projection
+                 │
+        ┌────────┼────────┐
+        ▼        ▼        ▼
+      Exact     FTS5    Call graph
+        └────────┼────────┘
+                 ▼
+            ranked matches
+                 │
+          optional embedding revision
+```
 
-## Table of Contents
+Core invariants:
 
-- [How It Works](#how-it-works)
-- [Install](#install)
-- [CLI Mode](#cli-mode)
-- [REST API Mode](#rest-api-mode)
-- [Docker](#docker)
-- [MCP Server](#mcp-server)
-- [API Endpoints](#api-endpoints)
-- [Configuration](#configuration)
-- [Supported Languages](#supported-languages)
+- Inputs are Git trees, not mutable checkouts. `@staged` and `@worktree` are materialized as deterministic trees.
+- A branch head moves only after a complete transaction commits; parse or store failures preserve the last visible generation.
+- Parse artifacts and embeddings are content-addressed and reusable across branches.
+- Local retrieval always works. `preferred` degrades on dense failure; `required` reports an explicit error.
+- Each branch retains its two newest generations; unreachable generations, parse artifacts, and embeddings are collected automatically.
 
----
-
-## How It Works
-
-1. **AST parsing** — extracts symbols, imports, and call graphs from source files
-2. **LLM descriptions** — generates one-line descriptions per symbol via LiteLLM (any provider)
-3. **Density-based grouping** — organizes files into wiki pages by logical density
-4. **Embedding** — generates vectors for every symbol, stored in ChromaDB
-5. **Skill file** — generates `.indexer/skills/codebase.md` so any LLM agent can navigate your codebase
-
-Output: `wiki/` (structured markdown), `.indexer/manifest.json` (symbol manifest), `.indexer/skills/codebase.md` (agent skill file), `.indexer/vector_db/` (vector search index).
-
----
+Runtime state lives in `.indexer/state/repository-index.sqlite3` with SQLite WAL, foreign keys, and FTS5. Synthetic staged/worktree objects live in `.indexer/state/git-objects` and never modify `.git`. Commit-friendly projections live in `wiki/` and `.indexer/skills/codebase.md`.
 
 ## Install
+
+Python 3.11+ and Git are required.
 
 ```bash
 pip install repo-wiki
 ```
 
-From source (when not yet published to PyPI):
+From source:
 
 ```bash
 git clone https://github.com/xzf475/repo-wiki.git
@@ -51,356 +53,123 @@ cd repo-wiki
 pip install -e .
 ```
 
----
-
-## CLI Mode
+## CLI
 
 ```bash
-repo-wiki init               # create .indexer.toml, install pre-commit hook
-repo-wiki run                # generate wiki/ and skill (deep enrichment enabled by default)
-repo-wiki run --skip-deep    # skip LLM enrichment (faster)
-repo-wiki run --force        # force full re-index
-repo-wiki run --staged       # incremental on staged files only (hook)
-repo-wiki status             # show last indexed commit, stale files, stats
-repo-wiki hook install       # manually install pre-commit hook
-repo-wiki hook remove        # remove pre-commit hook
-repo-wiki serve              # start MCP server
-repo-wiki agent capabilities # print Agent tool manifest
-repo-wiki agent schema       # print OpenAPI/JSON Schema contract
+repo-wiki init
+repo-wiki run                 # structural generation + projections
+repo-wiki run --enrich        # publish dense enrichment after the structural generation
+repo-wiki run --staged
+repo-wiki status
+repo-wiki maintain            # recover jobs, collect state, verify SQLite
+```
+
+The pre-commit hook installed by `repo-wiki init` runs `repo-wiki run --staged`. It publishes one complete structural generation for the staged tree without calling a remote provider.
+
+Agent helpers:
+
+```bash
+repo-wiki agent capabilities
+repo-wiki agent schema
+repo-wiki agent diagnose
 repo-wiki agent context --symbol-id src/auth.py::validate_token
 repo-wiki agent plan --goal "fix token validation" --symbol-id src/auth.py::validate_token
-repo-wiki agent verify       # generate pre-commit verification guidance from local git diff
-repo-wiki agent diagnose     # diagnose manifest/wiki/vector/source/freshness
+repo-wiki agent verify
 ```
 
-The pre-commit hook runs `repo-wiki run --staged` on every commit — only changed files are re-indexed.
-
-**Deep enrichment** (default): Uses your LLM to generate system overview, key request flows, and design constraints — written into `wiki/INDEX.md` and the skill file. Use `--skip-deep` for structural-only indexing when speed matters.
-
----
-
-## REST API Mode
+## REST
 
 ```bash
-# Start the server
 repo-wiki serve-api --port 7654
+```
 
-# Register a repo (clones + indexes + returns webhook URL)
+Register and structurally index a repository:
+
+```bash
 curl -X POST http://localhost:7654/register \
   -H 'Content-Type: application/json' \
-  -d '{"url": "https://github.com/org/repo.git", "token": "ghp_xxx"}'
+  -d '{"url":"https://github.com/org/repo.git","branch":"main","enrich":false}'
+```
 
-# Semantic search across repos
+Search:
+
+```bash
 curl -X POST http://localhost:7654/search \
   -H 'Content-Type: application/json' \
-  -d '{"query": "authentication middleware", "top_k": 10}'
+  -d '{"query":"authentication middleware","repo":"repo","branch":"main","top_k":10,"retrieval":"preferred"}'
 ```
 
-Web dashboard: [http://localhost:7654](http://localhost:7654)
+Multi-branch repositories require an explicit `branch`. Search responses include `generation`, `tree_id`, `retrieval`, and `degradations`; direct hits are in `matches`, graph expansion is in `related`.
 
----
+Main repository endpoints:
 
-## Docker
+| Path | Method | Purpose |
+|---|---|---|
+| `/register` | POST | Clone, register, and synchronize a repository |
+| `/unregister` | POST | Remove registry metadata without deleting repository files |
+| `/sync` | POST | Synchronize one branch; a new branch is registered automatically |
+| `/sync-all` | POST | Synchronize every branch without checkout switching |
+| `/search` | POST | Exact + FTS5 + Graph, with optional dense retrieval |
+| `/trace` | POST | Upstream or downstream call graph |
+| `/index-status` | POST | Generation, tree, and freshness |
+| `/api/validate/{name}` | GET | Projection, generation, and SQLite integrity checks |
+| `/repos` | GET | Registered repositories and branch generations |
+| `/health` | GET | Service health |
+
+See [API Reference](docs/api-reference.md) and [Agent Integration](docs/agent-integration.md) for full request contracts. The web console is served at `/`.
+
+## MCP
+
+Single-repository stdio mode:
 
 ```bash
-git clone https://github.com/xzf475/repo-wiki.git && cd repo-wiki
-cp .env.example .env          # fill in your API keys
-docker compose up -d          # build & start
-docker compose logs -f        # follow logs
-curl -X POST http://localhost:7654/register \
-  -H 'Content-Type: application/json' \
-  -d '{"url": "https://github.com/org/repo.git", "token": "ghp_xxx"}'
-docker compose down           # stop
+cd /path/to/repo
+repo-wiki serve
 ```
 
-- `.env` goes in the project root — `docker-compose.yml` mounts it automatically
-- Index data is persisted in Docker volumes
-- First build takes ~2-3 min (compiles tree-sitter); subsequent: `docker compose up -d --build`
-- For `.env` changes only: `docker compose restart`
-
----
-
-## MCP Server
-
-repo-wiki provides an [MCP](https://modelcontextprotocol.io) server, letting MCP-capable LLM clients search your codebase directly.
-
-### MCP Tools
-
-| MCP Tool | Description | Available In |
-|----------|-------------|-------------|
-| `search_symbols_tool` | Semantic search (supports LLM query rewriting) | Single / Multi-repo |
-| `resolve_symbol_tool` | Resolve natural language, symbol names, or file hints to a concrete component ID | Single / Multi-repo |
-| `trace_call_tool` | Trace call graph (up/down) | Single / Multi-repo |
-| `get_source_context_tool` | Get source code context | Single / Multi-repo |
-| `get_edit_context_tool` | Get edit-ready context: source, callers, callees, sibling symbols, tests, index status | Single / Multi-repo |
-| `find_tests_for_symbol_tool` | Find likely tests for a symbol | Single / Multi-repo |
-| `pre_edit_check_tool` | Check index freshness, dirty files, candidate tests, and recommended commands | Single / Multi-repo |
-| `impact_analysis_tool` | Analyze callers, callees, entry points, affected files, tests, and risks | Single / Multi-repo |
-| `change_plan_tool` | Build an Agent edit plan for a goal and target symbol | Single / Multi-repo |
-| `diagnose_index_tool` | Diagnose manifest/wiki/vector/source/freshness health | Single / Multi-repo |
-| `agent_protocol_tool` | Return compact Codex/Claude handoff fields | Single / Multi-repo |
-| `locate_from_error_tool` | Locate code candidates from stack traces, logs, exception text, or HTTP paths | Single / Multi-repo |
-| `list_entry_points_tool` | List API/CLI/event/job/webhook entry points | Single / Multi-repo |
-| `post_edit_verify_tool` | Generate post-edit verification guidance; local mode reads `git diff`, remote mode accepts `diff` | Single / Multi-repo |
-| `change_set_tool` | Infer must-change files, related symbols, tests, commands, and risks from a goal/symbol/diff | Single / Multi-repo |
-| `coverage_map_tool` | Map source symbols to likely covering tests | Single / Multi-repo |
-| `index_diff_report_tool` | Compare index snapshots, including stable-ID move/rename detection | Single / Multi-repo |
-| `cross_repo_graph_tool` | Build cross-repo HTTP/GraphQL dependency edges | Multi-repo |
-| `stable_symbol_id_tool` | Generate deterministic symbol identity for move/rename tracking | Single / Multi-repo |
-| `agent_capabilities_manifest_tool` | Return Agent tool manifest and recommended flow | Single / Multi-repo |
-| `get_index_status_tool` | Check whether the index is stale and why | Single / Multi-repo |
-| `list_repos` | List registered repos (branches, indexed commit, stats) | Multi-repo |
-
-### Single-Repo Mode
+Multi-repository mode through REST:
 
 ```bash
-cd my-project
-repo-wiki run
-repo-wiki serve           # stdio mode, provides 3 tools
+repo-wiki serve --api http://localhost:7654
 ```
 
-| MCP Tool | Description |
-|----------|-------------|
-| `search_symbols_tool` | Semantic search for code symbols |
-| `resolve_symbol_tool` | Resolve a concrete component ID |
-| `trace_call_tool` | Trace call graph (up/down) |
-| `get_source_context_tool` | Get source code context |
-| `get_edit_context_tool` | Get edit-ready context bundle |
-| `find_tests_for_symbol_tool` | Find likely tests for a symbol |
-| `pre_edit_check_tool` | Pre-edit checks |
-| `impact_analysis_tool` | Analyze change impact |
-| `change_plan_tool` | Build an Agent edit plan |
-| `diagnose_index_tool` | Diagnose index health |
-| `agent_protocol_tool` | Return compact Agent handoff fields |
-| `locate_from_error_tool` | Locate code from errors/logs |
-| `list_entry_points_tool` | List entry points |
-| `post_edit_verify_tool` | Post-edit verification guidance |
-| `change_set_tool` | Infer must-change set |
-| `coverage_map_tool` | Map source symbols to tests |
-| `index_diff_report_tool` | Compare index snapshots |
-| `cross_repo_graph_tool` | Build cross-repo graph |
-| `stable_symbol_id_tool` | Generate stable symbol ID |
-| `agent_capabilities_manifest_tool` | Tool manifest |
-| `get_index_status_tool` | Index freshness status |
-
-### Multi-Repo Mode
-
-```bash
-repo-wiki serve-api &                    # start REST API first
-repo-wiki serve --api http://localhost:7654  # MCP proxies to API
-```
-
-Adds a `list_repos` tool.
-
-### Client Configuration
-
-**Local install** (`pip install repo-wiki`):
-
-```json
-{
-  "mcpServers": {
-    "repo-wiki": {
-      "command": "repo-wiki",
-      "args": ["serve"]
-    }
-  }
-}
-```
-
-**npx mode** (no install required):
-
-```json
-{
-  "mcpServers": {
-    "repo-wiki": {
-      "command": "npx",
-      "args": ["-y", "repo-wiki", "serve"]
-    }
-  }
-}
-```
-
-For remote mode: `"args": ["-y", "repo-wiki", "serve", "--api", "http://localhost:7654"]`.
-
-**Remote server mode** (no local install, server deployed in cloud):
-
-```json
-{
-  "mcpServers": {
-    "repo-wiki": {
-      "url": "http://your-server.com:8000/mcp",
-      "transport": "streamable-http"
-    }
-  }
-}
-```
-
-> **Auth**: When `MCP_API_KEY` is set, clients must send `Authorization: Bearer <key>`.
-> **DNS Rebinding Protection**: MCP SDK only accepts `localhost`/`127.0.0.1` Host headers by default.
-> Protection is automatically disabled for remote access — no extra config needed.
-
-Server-side startup:
-
-```bash
-# Run these on your cloud server
-repo-wiki serve-api --port 7654 &
-repo-wiki serve --transport streamable-http --port 8000 --api http://localhost:7654
-```
-
-### Loading the Skill
-
-```bash
-mkdir -p ~/.claude/skills/codebase
-cp .indexer/skills/codebase.md ~/.claude/skills/codebase/SKILL.md
-```
-
-A **repo-wiki MCP Agent skill** (`skills/SKILL.md`) is also included. It teaches AI agents to automatically use MCP tools for semantic search, call graph tracing, and source code reading:
-
-```bash
-# Copy to Trae/Claude Code skills directory
-cp -r skills ~/.trae-cn/skills/repo-wiki-code-analysis
-
-# Or install via npx skills
-npx skills add /path/to/repo-wiki -g -y
-```
-
----
-
-## API Endpoints
-
-### Repository Management
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/repos` | GET | List all registered repos |
-| `/register` | POST | Register and index a repo. Supports `branches` array, `branch` string, or `branch_rule` glob pattern (e.g. `release/*`, `feature/*`). Defaults to `["main"]` |
-| `/sync` | POST | Sync a specific branch, optional `branch` param |
-| `/sync-all` | POST | Sync all registered branches |
-| `/rebuild` | POST | Full rebuild of a specific branch |
-| `/rebuild-all` | POST | Full rebuild of all registered branches |
-| `/unregister` | POST | Remove a repo |
-| `/api/validate/{name}` | GET | Health check a repo |
-| `/api/task/{task_id}` | GET | Poll async task progress |
-
-### Search & Navigation
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/search` | POST | Semantic search (LLM query rewriting enabled by default, use `"rewrite":false` to disable) |
-| `/trace` | POST | Trace call graph (up/down) |
-| `/source` | POST | Get source context for a file range |
-| `/edit-context` | POST | Return edit-ready context for a symbol |
-| `/resolve-symbol` | POST | Resolve natural language or symbol hints to a component ID |
-| `/tests-for-symbol` | POST | Find likely tests for a symbol |
-| `/pre-edit-check` | POST | Run pre-edit checks for a symbol |
-| `/impact-analysis` | POST | Analyze callers, callees, entry points, affected files, tests, and risks |
-| `/change-plan` | POST | Generate an Agent edit plan |
-| `/diagnose-index` | POST | Diagnose manifest/wiki/vector/source/freshness health |
-| `/agent-protocol` | POST | Return compact Codex/Claude handoff fields |
-| `/locate-from-error` | POST | Locate likely code from stack traces, logs, exceptions, or HTTP paths |
-| `/entry-points` | POST | List API/CLI/event/job/webhook entry points |
-| `/post-edit-verify` | POST | Generate pre-commit verification guidance from `diff`/`changed_files` |
-| `/change-set` | POST | Infer must-change files, related symbols, tests, commands, and risks |
-| `/coverage-map` | POST | Map source symbols to likely tests |
-| `/index-diff-report` | POST | Compare index snapshots and stable-ID moves |
-| `/cross-repo-graph` | POST | Build cross-repo HTTP/GraphQL dependency edges |
-| `/stable-symbol-id` | POST | Generate a deterministic stable symbol ID |
-| `/agent-capabilities` | GET/POST | Return Agent tool manifest, schemas, examples, and recommended flow |
-| `/agent-schema` | GET/POST | Return OpenAPI 3.1 / JSON Schema contract for Agent endpoints |
-| `/index-status` | POST | Report index freshness and stale/removed file counts |
-| `/api/repo/{name}` | GET | Repo detail |
-| `/skill` | GET | Multi-repo merged skill file |
-
-### Webhook
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/webhook/{name}` | POST | Triggers sync by repo name. URL template: `https://your-server.com/webhook/{name}?sign={sign}`, generated from `WEBHOOK_SECRET` |
-
-### Authentication
-
-When `REPO_WIKI_API_KEY` is set, all endpoints (except `/health` and paths starting with `/webhook/`) require `Authorization: Bearer <key>`.
-
----
+Core tools include `search_symbols_tool`, `trace_call_tool`, `get_source_context_tool`, `resolve_symbol_tool`, `impact_analysis_tool`, `change_plan_tool`, and `get_index_status_tool`. Search supports `local`, `preferred`, and `required` retrieval.
 
 ## Configuration
 
-### `.indexer.toml` (per-repo, created by `repo-wiki init`)
+`.indexer.toml`:
 
 ```toml
-[llm]
-provider = "openai/qwen-plus-2025-04-28"
-api_key_env = "DASHSCOPE_API_KEY"
-base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-
 [indexer]
 wiki_dir = "wiki"
-ignore = ["node_modules", ".venv", "dist", "build", "__pycache__", "*.test.*"]
-max_tokens_per_batch = 8000
-
-[embedding]
-provider = "dashscope/text-embedding-v4"
-api_key_env = "DASHSCOPE_API_KEY"
-dimensions = 1024
-
-[vector_store]
-backend = "chromadb"
-persist_dir = ".indexer/vector_db"
-collection_name = "repo_wiki_code"
+merge_threshold = 2
 
 [hooks]
 pre_commit = true
-synthesize_commit_message = true
-deep = true
+
+[embedding]
+provider = "text-embedding-3-small"
+api_key_env = "OPENAI_API_KEY"
+base_url = ""
+dimensions = 1536
 ```
 
-Any LiteLLM-compatible provider works: OpenAI, Anthropic, Gemini, Ollama, etc.
+Embedding is optional enrichment. Without a configured or available provider, structural generations, Wiki projection, and Exact/FTS5/Graph retrieval remain available.
 
-### `.env` (REST API / MCP mode)
-
-```bash
-# LLM
-LLM_PROVIDER=openai/deepseek-v4-flash
-LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-LLM_API_KEY_ENV=DASHSCOPE_API_KEY
-
-# Embedding
-EMBEDDING_PROVIDER=dashscope/text-embedding-v4
-EMBEDDING_API_KEY_ENV=DASHSCOPE_API_KEY
-EMBEDDING_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-EMBEDDING_DIMENSIONS=1024
-
-# Vector DB
-VECTOR_BACKEND=chromadb
-VECTOR_PERSIST_DIR=.indexer/vector_db
-VECTOR_COLLECTION_NAME=repo_wiki_code
-
-# REST API
-API_PORT=7654
-REPO_WIKI_API_KEY=                       # API auth key
-PUBLIC_DOMAIN=https://your-server.com    # Public domain for webhook URL
-WEBHOOK_SECRET=your-webhook-secret       # Webhook signature key
-
-# MCP Server
-MCP_ENABLED=false                        # Start MCP server alongside REST API
-MCP_PORT=8000                            # MCP server port
-MCP_API_KEY=                             # MCP auth key (optional, requires Bearer Token)
-```
-
----
+Set `REPO_WIKI_API_KEY` for REST Bearer authentication and `WEBHOOK_SECRET` for webhook signature verification.
 
 ## Supported Languages
 
-| Language | Parser |
-|----------|--------|
-| Python | stdlib `ast` |
-| JavaScript / TypeScript | tree-sitter |
-| Go | tree-sitter-go |
-| Rust | tree-sitter-rust |
-| Java | tree-sitter-java |
-| Ruby | tree-sitter-ruby |
+Python, JavaScript, TypeScript, Go, Rust, Java, Ruby, plus a generic text fallback parser.
 
----
+## Verification
+
+```bash
+python -m pytest -q
+python -m indexer.repository_benchmarks
+```
+
+The current quality and performance baseline is recorded in [docs/plans/2026-08-20-repository-index-baseline.json](docs/plans/2026-08-20-repository-index-baseline.json).
 
 ## License
 

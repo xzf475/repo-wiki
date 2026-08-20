@@ -3,28 +3,17 @@ from __future__ import annotations
 import json
 import logging
 import os
-import subprocess
-from fnmatch import fnmatch
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 import click
 
-from indexer.config import Config, load_config, save_config
-from indexer.manifest import load_manifest, save_manifest
-from indexer.git import (
-    staged_files, all_tracked_files, current_commit, current_branch,
-    changed_files_since, is_git_repo
-)
-from indexer.llm import deep_enrich_pages, deep_enrich_index, synthesize_commit_message
-from indexer.grouper import density_group
+from indexer.config import load_config, save_config
+from indexer.git import is_git_repo
+from indexer.git_snapshot import STAGED_REVISION, WORKTREE_REVISION
 from indexer.hooks import install_hook, remove_hook
-from indexer.indexing import (
-    cross_reference, load_existing_nodes, parse_candidates,
-    write_wiki_pages, write_index_and_skill,
-    update_manifest, upsert_vectors, prepare_descriptions,
-)
+from indexer.repository_service import RepositoryService, default_branch
 
 CLAUDEMD_SNIPPET = """
 ## Codebase Navigation
@@ -38,7 +27,7 @@ This repo is indexed with repo-wiki. Before reading any source file or answering
 Do not read source files speculatively. The wiki gives you structure and relationships in a fraction of the tokens.
 
 - Wiki pages: `wiki/` — grouped by logical density, not directory structure
-- Manifest: `.indexer/manifest.json` — maps every file to its wiki page and component IDs
+- Index state: `.indexer/state/repository-index.sqlite3` — transactional generations
 - Component IDs: `relative/path.py::ClassName.method_name`
 """
 
@@ -59,8 +48,8 @@ def init():
     _ensure_cache_gitignore(root, verbose=True)
 
     if is_git_repo(root) and cfg.pre_commit:
-        install_hook(root, skip_deep=not cfg.deep_hook)
-        mode = "--staged --skip-deep" if not cfg.deep_hook else "--staged"
+        install_hook(root)
+        mode = "--staged"
         click.echo(f"Installed pre-commit hook  (repo-wiki run {mode})")
 
     claude_md = root / "CLAUDE.md"
@@ -76,223 +65,67 @@ def init():
 
 @main.command()
 @click.option("--staged", is_flag=True, help="Incremental: only staged files (used by hook)")
-@click.option("--force", is_flag=True, help="Force full re-index regardless of manifest")
-@click.option("--skip-deep", is_flag=True, help="Skip narrative, data flows, and design constraints (faster, fewer tokens)")
-def run(staged: bool, force: bool, skip_deep: bool):
+@click.option("--enrich", is_flag=True, help="Publish an embedding enrichment revision after the structural generation")
+def run(staged: bool, enrich: bool):
     """Index the codebase and generate wiki pages."""
     root = Path.cwd()
     cfg = load_config(root)
-    manifest = load_manifest(root)
-
     _ensure_cache_gitignore(root)
-
-    if is_git_repo(root):
-        all_git_files = all_tracked_files(root)
-    else:
-        all_git_files = [
-            str(p.relative_to(root))
-            for p in root.rglob("*")
-            if p.is_file() and not any(part.startswith(".") for part in p.relative_to(root).parts)
-        ]
-    tracked_files = [f for f in all_git_files if _is_indexable(f, cfg)]
-
-    if staged:
-        candidates = staged_files(root)
-    elif force or manifest.last_indexed_commit is None:
-        candidates = tracked_files
-    else:
-        try:
-            git_changed = changed_files_since(root, manifest.last_indexed_commit) if is_git_repo(root) else []
-        except (ValueError, Exception) as e:
-            from indexer.git_ops import GitOperationError
-            if isinstance(e, GitOperationError):
-                logger.warning("Git operation failed: %s, falling back to full index", e)
-            else:
-                logger.warning("Last indexed commit %s is no longer valid, falling back to full index", manifest.last_indexed_commit)
-            git_changed = all_git_files
-        stale = manifest.stale_files(root, tracked_files)
-        candidates = list(dict.fromkeys(git_changed + stale))
-
-    candidates = [f for f in candidates if _is_indexable(f, cfg)]
-
-    if not candidates:
-        click.echo("  Nothing to index.")
-        return
-
-    mode = "staged" if staged else ("full re-index" if force else "incremental")
-    click.echo(f"\n  repo-wiki  —  {mode}  —  {len(candidates)} file(s)\n")
-
-    # ── Phase 1: Parse (parallel) ──────────────────────────────────────────────
-    click.echo("  Parsing")
-    _cached_count = 0
-
-    def _parse_progress(i, total, rel_path, cached=False, count=0, **kw):
-        nonlocal _cached_count
-        if cached:
-            _cached_count += 1
-            click.echo(f"    ✓  {rel_path}  (cached)")
-        else:
-            click.echo(f"    ✓  {rel_path}  ({count} symbol{'s' if count != 1 else ''})")
-
-    all_nodes = parse_candidates(root, candidates, cfg, use_cache=True, progress_callback=_parse_progress)
-
-    if not all_nodes:
-        click.echo("\n  No symbols found.")
-        update_manifest(root, cfg, manifest, candidates, all_nodes, {})
-        return
-
-    total_symbols = len(all_nodes)
-    click.echo(f"\n    {total_symbols} symbols across {len(candidates)} files  ({_cached_count} from cache)\n")
-
-    # ── Phase 2: Cross-reference (with existing nodes for complete called_by) ──
-    click.echo("  Cross-referencing calls")
-    affected_files: set[str] | None = None
-    existing_nodes: list = []
-    if not force and manifest.last_indexed_commit is not None:
-        existing_nodes = load_existing_nodes(root, manifest, cfg)
-        candidate_set = set(candidates)
-        existing_nodes = [n for n in existing_nodes if n.file not in candidate_set]
-        pre_cross_called_by = {n.id: list(n.called_by) for n in existing_nodes + all_nodes}
-        cross_reference(existing_nodes + all_nodes)
-        from indexer.indexing import _collect_affected_files
-        affected_files = _collect_affected_files(set(candidates), existing_nodes + all_nodes, pre_cross_called_by)
-    else:
-        cross_reference(all_nodes)
-    linked = sum(1 for n in all_nodes if n.called_by)
-    click.echo(f"    {linked} symbols linked via call graph\n")
-
-    # ── Phase 3: LLM descriptions ─────────────────────────────────────────────
-    descriptions, file_descriptions = prepare_descriptions(root, all_nodes, existing_nodes, manifest, cfg)
-    new_nodes = [n for n in all_nodes if n.id in descriptions and descriptions[n.id]]
-    filled = sum(1 for v in descriptions.values() if v)
-    filled_files = sum(1 for v in file_descriptions.values() if v)
-    if new_nodes:
-        click.echo(f"  Describing symbols  ({len(new_nodes)} new/changed)")
-    click.echo(f"    {filled} symbols described, {filled_files} modules described\n")
-
-    # ── Phase 5: Deep enrichment + wiki pages ─────────────────────────────────
-    page_enrichments: dict[str, dict] = {}
-    all_manifest_files = list(set(manifest.files.keys()) | set(candidates)) if manifest.files else candidates
-    groups = density_group(all_manifest_files, merge_threshold=cfg.merge_threshold)
-    all_nodes_for_wiki = existing_nodes + all_nodes
-    if not skip_deep:
-        affected_group_labels = {groups.get(f, f) for f in affected_files} if affected_files else set(groups.values())
-        click.echo(f"\n  Deep enrichment  ({len(affected_group_labels)} pages, concurrent)  —  narrative + flows + constraints")
-        group_nodes: dict[str, list] = {}
-        for node in all_nodes_for_wiki:
-            group = groups.get(node.file, node.file)
-            group_nodes.setdefault(group, []).append(node)
-        pages_args = [
-            (group_label, list({n.file for n in nodes}), nodes, descriptions)
-            for group_label, nodes in group_nodes.items()
-            if group_label in affected_group_labels
-        ]
-        page_enrichments = deep_enrich_pages(pages_args, cfg)
-        for group_label, enrichment in page_enrichments.items():
-            parts = []
-            if enrichment["narrative"]: parts.append("narrative")
-            if enrichment["data_flows"]: parts.append(f"{len(enrichment['data_flows'])} flows")
-            if enrichment["constraints"]: parts.append(f"{len(enrichment['constraints'])} constraints")
-            click.echo(f"    {group_label}  {', '.join(parts) or 'empty'}")
-        click.echo()
-
-    click.echo("  Writing wiki")
-    index_entries, groups = write_wiki_pages(
-        root, cfg, candidates, all_nodes_for_wiki, descriptions, file_descriptions,
-        page_enrichments, skip_deep, precomputed_groups=groups,
-        all_files=all_manifest_files, affected_files=affected_files,
+    branch = default_branch(root)
+    service = RepositoryService(
+        root.name,
+        root,
+        branch,
+        config=cfg,
     )
-    for entry in index_entries:
-        page_name = entry.path.split("/")[-1]
-        symbol_count = sum(1 for n in all_nodes if any(n.file == f for f in entry.covers.split(", ")))
-        click.echo(f"    ✓  {entry.path}  ({symbol_count} symbols)")
-
-    # ── Phase 6: INDEX + skill ────────────────────────────────────────────────
-    index_overview = ""
-    index_flows: list[str] = []
-    if not skip_deep:
-        click.echo("\n  Deep enrichment  (INDEX overview)  ...", nl=False)
-        skill_pages_for_deep = [
-            {"label": Path(e.path).stem, "covers": e.covers, "entry_points": e.entry_points}
-            for e in index_entries
-        ]
-        idx_enrichment = deep_enrich_index(skill_pages_for_deep, cfg)
-        index_overview = idx_enrichment.get("overview", "")
-        index_flows = idx_enrichment.get("flows", [])
-        click.echo(f"  {'overview + ' + str(len(index_flows)) + ' flows' if index_overview else 'empty'}\n")
-
-    write_index_and_skill(
-        root, cfg, index_entries, page_enrichments,
-        index_overview, index_flows, total_symbols, len(candidates),
+    result = service.sync(
+        revision=STAGED_REVISION if staged else WORKTREE_REVISION,
+        enrich=enrich,
     )
-    click.echo(f"    ✓  {cfg.wiki_dir}/INDEX.md")
-    click.echo(f"    ✓  .indexer/skills/codebase.md")
+    projection = service.project()
+    sync = result["sync"]
 
-    # ── Update manifest ────────────────────────────────────────────────────────
-    removed = manifest.removed_files(root, all_git_files)
-    update_manifest(root, cfg, manifest, candidates, all_nodes, groups)
-
-    # ── Auto-stage ALL generated files (pre-commit hook) ──────────────────────
-    if staged and is_git_repo(root):
-        git_env_cli = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
-        r = subprocess.run(
-            ["git", "add",
-             cfg.wiki_dir,
-             ".indexer/manifest.json",
-             ".indexer/skills/codebase.md",
-             ".gitignore"],
-            cwd=root,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            env=git_env_cli,
-        )
-        if r.returncode != 0:
-            click.echo(f"  Warning: git add failed: {r.stderr.strip()}", err=True)
-        else:
-            click.echo(f"\n  Staged wiki + manifest + skill file")
-
-    # ── Commit message synthesis ───────────────────────────────────────────────
-    if cfg.synthesize_commit_message and staged:
-        click.echo("  Synthesizing commit message  ...", nl=False)
-        msg = synthesize_commit_message(candidates, descriptions, cfg)
-        if msg:
-            click.echo(f"\n\n  Suggested commit message:\n    {msg}\n")
-        else:
-            click.echo("  (skipped)\n")
-
-    # ── Phase 7: Vector store ────────────────────────────────────────────────
-    click.echo("\n  Embedding + vector store")
-    try:
-        branch = current_branch(root) or ""
-        existing_nids = {n.id for n in existing_nodes}
-        upsert_vectors(root, cfg, manifest, all_nodes, descriptions, removed_files=removed, branch=branch, existing_node_ids=existing_nids)
-        click.echo(f"    ✓  {total_symbols} vectors upserted")
-    except Exception as e:
-        logger.error("Vector store indexing failed: %s", e)
-        click.echo(f"    ⚠  Skipped vector store (error: {e})")
-
-    click.echo(f"\n  Done  —  {len(index_entries)} wiki page(s)  —  {total_symbols} symbols indexed\n")
+    click.echo(
+        f"\n  {sync['status']} generation {sync['generation']}  —  "
+        f"{projection['pages']} wiki page(s)  —  "
+        f"{projection['symbols']} symbols  —  "
+        f"{sync['parsed_blobs']} parsed blob(s)\n"
+    )
+    if result["degradation"]:
+        click.echo(f"  Enrichment degraded: {result['degradation']}", err=True)
 
 
 @main.command()
 def status():
-    """Show last indexed commit, stale files, manifest stats."""
+    """Show the current generation and workspace freshness."""
     root = Path.cwd()
-    cfg = load_config(root)
-    manifest = load_manifest(root)
+    service = RepositoryService(root.name, root, default_branch(root))
+    report = service.inspect(revision=WORKTREE_REVISION)
+    click.echo(f"Generation:           {report['generation'] or 'never'}")
+    click.echo(f"Indexed tree:         {report['indexed_tree'] or 'n/a'}")
+    click.echo(f"Indexed files:        {report['indexed_files']}")
+    click.echo(f"Symbols:              {report['symbols']}")
+    click.echo(f"Dense state:          {report['dense_state']}")
+    click.echo(f"Stale files:          {report['stale_file_count']}")
+    for file_path in report["stale_files"][:10]:
+        click.echo(f"  {file_path}")
 
-    click.echo(f"Last indexed commit: {manifest.last_indexed_commit or 'never'}")
-    click.echo(f"Indexed at:          {manifest.indexed_at or 'n/a'}")
-    click.echo(f"Tracked files:       {len(manifest.files)}")
 
-    if is_git_repo(root):
-        all_files = [f for f in all_tracked_files(root) if _is_indexable(f, cfg)]
-        stale = manifest.stale_files(root, all_files)
-        click.echo(f"Stale files:         {len(stale)}")
-        if stale:
-            for f in stale[:10]:
-                click.echo(f"  {f}")
+@main.command()
+@click.option("--retain-generations", default=2, type=click.IntRange(min=1))
+def maintain(retain_generations: int):
+    """Recover interrupted jobs, collect unreachable state, and verify SQLite."""
+    root = Path.cwd()
+    service = RepositoryService(root.name, root, default_branch(root))
+    report = service.index.maintain(retain_generations=retain_generations)
+    click.echo(f"Retained generations:    {report.retained_generations}")
+    click.echo(f"Recovered jobs:          {report.recovered_jobs}")
+    click.echo(f"Deleted generations:     {report.deleted_generations}")
+    click.echo(f"Deleted revisions:       {report.deleted_revisions}")
+    click.echo(f"Deleted parse artifacts: {report.deleted_artifacts}")
+    click.echo(f"Deleted embeddings:      {report.deleted_embeddings}")
+    click.echo(f"Deleted Git objects:     {report.deleted_snapshot_objects}")
+    click.echo(f"SQLite integrity:        {'ok' if report.integrity.ok else 'failed'}")
 
 
 @main.group()
@@ -375,8 +208,8 @@ def hook_install():
     """Install the pre-commit hook in the current repo."""
     root = Path.cwd()
     cfg = load_config(root)
-    install_hook(root, skip_deep=not cfg.deep_hook)
-    mode = "--staged --skip-deep" if not cfg.deep_hook else "--staged"
+    install_hook(root)
+    mode = "--staged"
     click.echo(f"Pre-commit hook installed  (repo-wiki run {mode})")
 
 
@@ -478,10 +311,11 @@ def serve_api(host: str, port: int, repos_dir: str | None, repo: tuple[str, ...]
     uvicorn.run(app, host=host, port=port)
 
 
-CACHE_GITIGNORE_ENTRY = ".indexer/cache/"
-VECTOR_GITIGNORE_ENTRY = ".indexer/vector_db/"
+STATE_GITIGNORE_ENTRY = ".indexer/state/"
 
-CACHE_GITIGNORE_ENTRIES = [CACHE_GITIGNORE_ENTRY, VECTOR_GITIGNORE_ENTRY]
+CACHE_GITIGNORE_ENTRIES = [
+    STATE_GITIGNORE_ENTRY,
+]
 
 
 def _ensure_cache_gitignore(root: Path, verbose: bool = False) -> None:
@@ -502,18 +336,6 @@ def _ensure_cache_gitignore(root: Path, verbose: bool = False) -> None:
         if verbose:
             for e in CACHE_GITIGNORE_ENTRIES:
                 click.echo(f"Created .gitignore with {e}")
-
-
-def _is_indexable(path: str, cfg: Config) -> bool:
-    p = Path(path)
-    if p.suffix not in {".py", ".js", ".ts", ".mjs", ".cjs", ".jsx", ".tsx", ".go", ".rs", ".java", ".rb"}:
-        return False
-    for pattern in cfg.ignore:
-        if any(fnmatch(part, pattern) for part in p.parts):
-            return False
-        if fnmatch(path, pattern):
-            return False
-    return True
 
 
 def _json_dumps(payload: dict) -> str:

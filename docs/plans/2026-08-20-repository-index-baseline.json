@@ -1,0 +1,65 @@
+{
+  "generated_at": "2026-08-20",
+  "environment": "local Python 3.12.1, 30 search samples per size; 5000-file row is the median of three isolated runs",
+  "quality": {
+    "corpus": "real temporary Git repository with exact, path, English, Chinese, and graph cases; compared with legacy local retrieval on the same corpus",
+    "cases": 5,
+    "recall_at_5": 1.0,
+    "mrr_at_10": 1.0,
+    "ndcg_at_10": 1.0
+  },
+  "rows": [
+    {
+      "files": 10,
+      "full_ms": 37.343,
+      "incremental_ms": 42.483,
+      "unchanged_ms": 9.636,
+      "query_p95_ms": 1.788,
+      "query_max_ms": 1.812,
+      "incremental_parsed_blobs": 1,
+      "incremental_tree_entries_scanned": 1,
+      "database_bytes": 266240,
+      "parse_artifacts": 10,
+      "retained_generations": 2
+    },
+    {
+      "files": 100,
+      "full_ms": 68.633,
+      "incremental_ms": 40.12,
+      "unchanged_ms": 10.459,
+      "query_p95_ms": 1.613,
+      "query_max_ms": 1.693,
+      "incremental_parsed_blobs": 1,
+      "incremental_tree_entries_scanned": 1,
+      "database_bytes": 487424,
+      "parse_artifacts": 100,
+      "retained_generations": 2
+    },
+    {
+      "files": 500,
+      "full_ms": 245.406,
+      "incremental_ms": 55.417,
+      "unchanged_ms": 11.571,
+      "query_p95_ms": 3.266,
+      "query_max_ms": 4.322,
+      "incremental_parsed_blobs": 1,
+      "incremental_tree_entries_scanned": 1,
+      "database_bytes": 1396736,
+      "parse_artifacts": 500,
+      "retained_generations": 2
+    },
+    {
+      "files": 5000,
+      "full_ms": 2624.603,
+      "incremental_ms": 49.503,
+      "unchanged_ms": 11.978,
+      "query_p95_ms": 9.754,
+      "query_max_ms": 11.261,
+      "incremental_parsed_blobs": 1,
+      "incremental_tree_entries_scanned": 1,
+      "database_bytes": 11694080,
+      "parse_artifacts": 5000,
+      "retained_generations": 2
+    }
+  ]
+}

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from indexer.config import Config
+from indexer.repository_service import RepositoryService, default_branch
 import indexer.retrieval as _retrieval
 from indexer.retrieval import (
     _extract_error_frames,
@@ -75,7 +76,7 @@ def impact_analysis(
     max_depth: int = 2,
 ) -> dict:
     max_depth = max(1, min(max_depth, 5))
-    seed = _retrieval.get_by_ids([symbol_id], cfg.vector_store, repo_root)
+    seed = _retrieval.get_by_ids([symbol_id], repo_root)
     if not seed:
         return {
             "symbol": None,
@@ -87,8 +88,8 @@ def impact_analysis(
     meta = symbol.get("metadata", {})
     caller_ids = _parse_json_list(meta.get("called_by", ""))
     callee_ids = _parse_json_list(meta.get("calls", ""))
-    direct_callers = _retrieval.get_by_ids(caller_ids, cfg.vector_store, repo_root) if caller_ids else []
-    direct_callees = _retrieval.get_by_ids(callee_ids, cfg.vector_store, repo_root) if callee_ids else []
+    direct_callers = _retrieval.get_by_ids(caller_ids, repo_root) if caller_ids else []
+    direct_callees = _retrieval.get_by_ids(callee_ids, repo_root) if callee_ids else []
     upstream = _retrieval.trace_call(symbol_id, cfg, repo_root, direction="up", max_depth=max_depth)
     downstream = _retrieval.trace_call(symbol_id, cfg, repo_root, direction="down", max_depth=max_depth)
 
@@ -181,14 +182,15 @@ def list_entry_points(
     kind: str = "",
     max_results: int = 50,
 ) -> dict:
-    from indexer.manifest import load_manifest
-
     max_results = max(1, min(max_results, 200))
-    manifest = load_manifest(repo_root)
-    ids = []
-    for entry in manifest.files.values():
-        ids.extend(entry.component_ids)
-    nodes = _retrieval.get_by_ids(ids, cfg.vector_store, repo_root) if ids else []
+    service = RepositoryService(
+        repo_root.name,
+        repo_root,
+        default_branch(repo_root),
+        config=cfg,
+    )
+    ids = [record.component_id for record in service.index.symbols(service.scope)]
+    nodes = service.lookup(ids) if ids else []
 
     results = []
     for node in nodes:
@@ -221,17 +223,18 @@ def locate_from_error(
     repo_root: Path,
     top_k: int = 10,
 ) -> dict:
-    from indexer.manifest import load_manifest
-
     top_k = max(1, min(top_k, 50))
     frames = _extract_error_frames(error_text)
     http_paths = _extract_http_paths(error_text)
     terms = _extract_error_terms(error_text)
-    manifest = load_manifest(repo_root)
-    ids = []
-    for entry in manifest.files.values():
-        ids.extend(entry.component_ids)
-    indexed_nodes = _retrieval.get_by_ids(ids, cfg.vector_store, repo_root) if ids else []
+    service = RepositoryService(
+        repo_root.name,
+        repo_root,
+        default_branch(repo_root),
+        config=cfg,
+    )
+    ids = [record.component_id for record in service.index.symbols(service.scope)]
+    indexed_nodes = service.lookup(ids) if ids else []
 
     scored = []
     for node in indexed_nodes:

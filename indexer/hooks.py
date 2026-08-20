@@ -5,27 +5,27 @@ from pathlib import Path
 HOOK_MARKER = "# managed by repo-wiki"
 
 
-def _hook_command(skip_deep: bool = False) -> str:
-    return "repo-wiki run --staged --skip-deep" if skip_deep else "repo-wiki run --staged"
+def _hook_command() -> str:
+    return "repo-wiki run --staged"
 
 
-def _hook_script_fresh(skip_deep: bool = False) -> str:
-    return f"#!/bin/sh\n{HOOK_MARKER}\n{_hook_command(skip_deep)}\n"
+def _hook_script_fresh() -> str:
+    return f"#!/bin/sh\n{HOOK_MARKER}\n{_hook_command()}\n"
 
 
-def _hook_script_append(skip_deep: bool = False) -> str:
-    return f"\n{HOOK_MARKER}\n{_hook_command(skip_deep)}\n"
+def _hook_script_append() -> str:
+    return f"\n{HOOK_MARKER}\n{_hook_command()}\n"
 
 
-def install_hook(repo_root: Path, skip_deep: bool = False) -> None:
+def install_hook(repo_root: Path) -> None:
     """Install or update the pre-commit hook.
 
     - Fresh install: writes a new hook script
-    - Existing repo-wiki hook: updates the command in-place (e.g. adds/removes --skip-deep)
+    - Existing repo-wiki hook: updates the command in-place
     - Existing non-repo-wiki hook: appends our block
     """
     hook_path = repo_root / ".git" / "hooks" / "pre-commit"
-    cmd = _hook_command(skip_deep)
+    cmd = _hook_command()
 
     if hook_path.exists():
         existing = hook_path.read_text()
@@ -38,10 +38,10 @@ def install_hook(repo_root: Path, skip_deep: bool = False) -> None:
             ]
             hook_path.write_text("\n".join(updated) + "\n")
         else:
-            hook_path.write_text(existing.rstrip() + _hook_script_append(skip_deep))
+            hook_path.write_text(existing.rstrip() + _hook_script_append())
     else:
         hook_path.parent.mkdir(parents=True, exist_ok=True)
-        hook_path.write_text(_hook_script_fresh(skip_deep))
+        hook_path.write_text(_hook_script_fresh())
 
     hook_path.chmod(0o755)
 

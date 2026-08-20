@@ -47,7 +47,7 @@ def create_server(repo_root: Path | None = None, mcp_api_key: str | None = None)
     mcp = FastMCP("repo-wiki-rag")
 
     @mcp.tool()
-    def search_symbols_tool(query: str, top_k: int = 10, expand_depth: int = 1) -> str:
+    def search_symbols_tool(query: str, top_k: int = 10, expand_depth: int = 1, retrieval: str = "preferred") -> str:
         """Search code symbols by semantic query. Returns matching symbols with descriptions,
         file locations, and optionally related symbols via call graph expansion.
 
@@ -58,24 +58,46 @@ def create_server(repo_root: Path | None = None, mcp_api_key: str | None = None)
             query: Natural language description of what you're looking for (e.g. "JWT token validation", "database connection pool")
             top_k: Number of top results to return (default 10)
             expand_depth: How many hops in the call graph to expand (0=no expansion, 1=direct callers/callees)
+            retrieval: local, preferred, or required dense retrieval
         """
-        from indexer.retrieval import search_symbols
+        from indexer.retrieval import search_code
         top_k = max(1, min(top_k, 100))
         expand_depth = max(0, min(expand_depth, 5))
-        hits = search_symbols(query, cfg, repo_root, top_k=top_k, expand_depth=expand_depth)
+        response = search_code(
+            query,
+            cfg,
+            repo_root,
+            top_k=top_k,
+            expand_depth=expand_depth,
+            retrieval=retrieval,
+        )
+        hits = response["matches"]
         if not hits:
             return "No matching symbols found. Try a different query or ensure the repo has been indexed with `repo-wiki run`."
 
-        lines = []
+        degradation = ", ".join(response.get("degradations", [])) or "none"
+        lines = [
+            f"Generation {response['generation']} @ {response['tree_id'][:12]} "
+            f"({response['retrieval']}; degradation: {degradation})",
+            "## Matches",
+        ]
         for h in hits:
             meta = h.get("metadata", {})
-            dist = h.get("distance", 0.0)
+            score = h.get("score", 0.0)
             lines.append(
-                f"**{h['id']}** (distance: {dist:.4f})\n"
+                f"**{h['id']}** (score: {score:.4f})\n"
                 f"  Type: {meta.get('type', '?')} | File: {meta.get('file', '?')} | "
                 f"Lines: {meta.get('line_start', '?')}-{meta.get('line_end', '?')}\n"
                 f"  {h.get('document', '')}"
             )
+        if response["related"]:
+            lines.append("## Related")
+            for h in response["related"]:
+                meta = h.get("metadata", {})
+                lines.append(
+                    f"**{h['id']}** ({h.get('relation', 'related')})\n"
+                    f"  Type: {meta.get('type', '?')} | File: {meta.get('file', '?')}"
+                )
         return "\n\n".join(lines)
 
     @mcp.tool()
@@ -97,7 +119,7 @@ def create_server(repo_root: Path | None = None, mcp_api_key: str | None = None)
         from indexer.retrieval import trace_call
         nodes = trace_call(symbol_id, cfg, repo_root, direction=direction, max_depth=max_depth)
         if not nodes:
-            return f"Symbol '{symbol_id}' not found in vector store. Ensure the repo has been indexed."
+            return f"Symbol '{symbol_id}' not found in the current generation. Ensure the repo has been indexed."
 
         chain = []
         for n in nodes:
@@ -188,7 +210,7 @@ def create_server(repo_root: Path | None = None, mcp_api_key: str | None = None)
 
     @mcp.tool()
     def diagnose_index_tool() -> str:
-        """Diagnose index integrity: manifest, wiki, vector DB, source files, and freshness."""
+        """Diagnose generation integrity, Wiki projection, source files, and freshness."""
         from indexer.retrieval import diagnose_index
         return json.dumps(diagnose_index(repo_root, cfg), indent=2)
 
@@ -335,20 +357,20 @@ def create_api_server(api_url: str, api_key: str | None = None, mcp_api_key: str
 
         lines = ["**Registered Repositories:**\n"]
         for r in repos:
-            commit_tag = f" @{r.get('last_indexed_commit', '')}" if r.get('last_indexed_commit') else ""
+            generation_tag = f" generations={r.get('generations', {})}" if r.get("generations") else ""
             desc = r.get("description", "")
             tags = r.get("tags", [])
             desc_tag = f" — {desc}" if desc else ""
             tags_tag = f"  `{' '.join(f'#{t}' for t in tags)}`" if tags else ""
             lines.append(
-                f"- **{r['name']}**{commit_tag}{desc_tag}{tags_tag}\n"
+                f"- **{r['name']}**{generation_tag}{desc_tag}{tags_tag}\n"
                 f"  {r.get('symbol_count', '?')} symbols"
-                f"{', has vector DB' if r.get('has_vector_db') else ', no vector DB'}"
+                f"{', dense ready' if r.get('dense_ready') else ', local retrieval only'}"
             )
         return "\n".join(lines)
 
     @mcp.tool()
-    def search_symbols_tool(query: str, repo: str | None = None, top_k: int = 10, expand_depth: int = 1, rewrite: bool = True) -> str:
+    def search_symbols_tool(query: str, repo: str | None = None, branch: str | None = None, top_k: int = 10, expand_depth: int = 1, retrieval: str = "preferred") -> str:
         """Search code symbols by semantic query across one or all registered repos.
         Returns matching symbols with descriptions, file locations, and related symbols.
 
@@ -358,18 +380,21 @@ def create_api_server(api_url: str, api_key: str | None = None, mcp_api_key: str
         Args:
             query: Natural language description of what you're looking for (e.g. "JWT token validation", "database connection pool")
             repo: Repository name to search in. If omitted, searches across all repos.
+            branch: Required when the selected repository indexes multiple branches.
             top_k: Number of top results to return (default 10)
             expand_depth: How many hops in the call graph to expand (0=no expansion, 1=direct callers/callees)
-            rewrite: Whether to use LLM query rewriting for better recall (default true)
+            retrieval: local, preferred, or required dense retrieval
         """
         body = {
             "query": query,
             "top_k": top_k,
             "expand_depth": expand_depth,
-            "rewrite": rewrite,
+            "retrieval": retrieval,
         }
         if repo:
             body["repo"] = repo
+        if branch:
+            body["branch"] = branch
 
         data = _api_post("/search", body)
 
@@ -380,10 +405,14 @@ def create_api_server(api_url: str, api_key: str | None = None, mcp_api_key: str
         if not hits:
             return "No matching symbols found. Try a different query or ensure repos have been indexed."
 
-        rewritten = data.get("rewritten_queries")
         header = f"**Search results** ({data.get('total', len(hits))} hits)"
-        if rewritten:
-            header += f"\nExpanded queries: {', '.join(rewritten)}"
+        metrics = data.get("search_metrics", [])
+        if metrics:
+            scopes = ", ".join(
+                f"{item.get('repo')}:{item.get('branch')}@g{item.get('generation')}"
+                for item in metrics
+            )
+            header += f"\nScopes: {scopes}"
         header += "\n"
 
         lines = [header]

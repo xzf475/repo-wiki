@@ -5,10 +5,8 @@ from pathlib import Path
 from indexer.config import Config, load_config, save_config
 
 _ENV_VARS = [
-    "LLM_PROVIDER", "LLM_BASE_URL", "LLM_API_KEY_ENV",
     "EMBEDDING_PROVIDER", "EMBEDDING_API_KEY_ENV", "EMBEDDING_BASE_URL", "EMBEDDING_DIMENSIONS",
-    "VECTOR_BACKEND", "VECTOR_PERSIST_DIR", "VECTOR_COLLECTION_NAME",
-    "DASHSCOPE_API_KEY", "ANTHROPIC_API_KEY",
+    "DASHSCOPE_API_KEY",
 ]
 
 
@@ -42,14 +40,9 @@ def test_save_and_reload():
     try:
         with tempfile.TemporaryDirectory() as d:
             cfg = Config(
-                provider="openai/gpt-4o",
-                api_key_env="OPENAI_API_KEY",
-                base_url="https://api.openai.com/v1",
                 wiki_dir="docs/wiki",
-                ignore=["node_modules"],
-                max_tokens_per_batch=4000,
+                merge_threshold=4,
                 pre_commit=True,
-                synthesize_commit_message=False,
             )
             save_config(Path(d), cfg)
             reloaded = load_config(Path(d))
@@ -62,11 +55,11 @@ def test_partial_toml_uses_defaults():
     saved = _clean_env()
     try:
         with tempfile.TemporaryDirectory() as d:
-            toml_content = b"[llm]\nprovider = \"openai/gpt-4o\"\n"
+            toml_content = b"[indexer]\nwiki_dir = \"docs/wiki\"\n"
             (Path(d) / ".indexer.toml").write_bytes(toml_content)
             cfg = load_config(Path(d))
-            assert cfg.provider == "openai/gpt-4o"
-            assert cfg.wiki_dir == Config().wiki_dir
+            assert cfg.wiki_dir == "docs/wiki"
+            assert cfg.embedding == Config().embedding
             assert cfg.pre_commit == Config().pre_commit
     finally:
         _restore_env(saved)

@@ -1,13 +1,13 @@
 # indexer/retrieval.py
 from __future__ import annotations
 import json
-import hashlib
+import os
 import re
 import subprocess
 from pathlib import Path
 from indexer.config import Config
-from indexer.embedding import embed_query
-from indexer.vector_store import search, get_by_ids
+from indexer.git_snapshot import WORKTREE_REVISION
+from indexer.repository_service import RepositoryService, default_branch
 
 MAX_DOC_LEN = 2000
 
@@ -27,22 +27,77 @@ def search_symbols(
     branch: str = "",
     explain: bool = False,
 ) -> list[dict]:
-    top_k = max(1, min(top_k, 100))
-    query_vector = embed_query(query, cfg.embedding)
-    where_clause = {"branch": branch} if branch else None
-    hits = search(query_vector, cfg.vector_store, repo_root, top_k=top_k, where=where_clause)
-    if explain:
-        _annotate_match_reasons(hits, query)
+    response = search_code(
+        query,
+        cfg,
+        repo_root,
+        top_k=top_k,
+        expand_depth=expand_depth,
+        branch=branch,
+        explain=explain,
+    )
+    matches = response["matches"]
+    truncate_documents(matches)
+    return matches
 
-    truncate_documents(hits)
 
-    if expand_depth > 0:
-        hits = _expand_with_call_graph(hits, cfg, repo_root, expand_depth)
-        if explain:
-            _annotate_match_reasons(hits, query)
-        truncate_documents(hits)
+def search_code(
+    query: str,
+    cfg: Config,
+    repo_root: Path,
+    top_k: int = 10,
+    expand_depth: int = 1,
+    branch: str = "",
+    retrieval: str = "preferred",
+    explain: bool = True,
+) -> dict:
+    selected_branch = branch or default_branch(repo_root)
+    service = RepositoryService(
+        repo_root.name,
+        repo_root,
+        selected_branch,
+        config=cfg,
+    )
+    response = service.search(
+        query,
+        limit=top_k,
+        related_limit=top_k if expand_depth else 0,
+        retrieval=retrieval,
+    )
+    if expand_depth > 1:
+        seen = {hit["id"] for hit in response["matches"]}
+        related = list(response["related"])
+        seen.update(hit["id"] for hit in related)
+        for match in response["matches"]:
+            for item in service.trace(
+                match["id"],
+                direction="down",
+                max_depth=expand_depth,
+            )[1:]:
+                if item["id"] in seen:
+                    continue
+                seen.add(item["id"])
+                item["relation"] = "call"
+                related.append(item)
+                if len(related) >= top_k:
+                    break
+        response["related"] = related[:top_k]
+    return response
 
-    return hits
+
+def get_by_ids(
+    component_ids: list[str] | tuple[str, ...],
+    repo_root: Path,
+    *,
+    branch: str = "",
+) -> list[dict]:
+    """Read structural records from the current generation."""
+    selected_branch = branch or default_branch(repo_root)
+    return RepositoryService(
+        repo_root.name,
+        repo_root,
+        selected_branch,
+    ).lookup(component_ids)
 
 
 def resolve_symbol(*args, **kwargs):
@@ -139,45 +194,17 @@ def trace_call(
     direction: str = "down",
     max_depth: int = 3,
 ) -> list[dict]:
-    max_depth = min(max_depth, 8)
-    seed = get_by_ids([symbol_id], cfg.vector_store, repo_root)
-    if not seed:
-        return []
-
-    result_nodes = [seed[0]]
-    visited = {symbol_id}
-
-    if direction == "down":
-        calls_raw = seed[0].get("metadata", {}).get("calls", "")
-        current_ids = set(_parse_json_list(calls_raw))
-    elif direction == "up":
-        called_by_raw = seed[0].get("metadata", {}).get("called_by", "")
-        current_ids = set(_parse_json_list(called_by_raw))
-    else:
-        raise ValueError(f"direction must be 'up' or 'down', got '{direction}'")
-
-    for _ in range(max_depth):
-        next_ids = set()
-        if not current_ids:
-            break
-
-        batch = get_by_ids(list(current_ids), cfg.vector_store, repo_root)
-        for node in batch:
-            nid = node["id"]
-            if nid in visited:
-                continue
-            visited.add(nid)
-            result_nodes.append(node)
-
-            meta = node.get("metadata", {})
-            if direction == "down":
-                next_ids.update(_parse_json_list(meta.get("calls", "")))
-            elif direction == "up":
-                next_ids.update(_parse_json_list(meta.get("called_by", "")))
-
-        current_ids = next_ids - visited
-
-    return result_nodes
+    selected_branch = default_branch(repo_root)
+    return RepositoryService(
+        repo_root.name,
+        repo_root,
+        selected_branch,
+        config=cfg,
+    ).trace(
+        symbol_id,
+        direction=direction,
+        max_depth=min(max_depth, 8),
+    )
 
 
 def get_source_context(
@@ -215,43 +242,10 @@ def get_source_context(
 
 
 def get_index_status(repo_root: Path) -> dict:
-    from indexer.git import all_tracked_files, current_branch, current_commit, is_git_repo
-    from indexer.manifest import load_manifest
-
-    manifest = load_manifest(repo_root)
-    git_repo = is_git_repo(repo_root)
-    current = current_commit(repo_root) if git_repo else None
-    branch = current_branch(repo_root) if git_repo else ""
-    candidate_paths = all_tracked_files(repo_root) if git_repo else list(manifest.files.keys())
-    stale_files = sorted(manifest.stale_files(repo_root, candidate_paths))
-    removed_files = sorted(manifest.removed_files(repo_root, candidate_paths))
-    missing_manifest = manifest.last_indexed_commit is None and not manifest.files
-    commit_changed = bool(current and manifest.last_indexed_commit and current != manifest.last_indexed_commit)
-
-    reasons = []
-    if missing_manifest:
-        reasons.append("missing manifest")
-    if commit_changed:
-        reasons.append("HEAD differs from indexed commit")
-    if stale_files:
-        reasons.append("indexed file hashes differ")
-    if removed_files:
-        reasons.append("indexed files removed")
-
-    return {
-        "is_stale": bool(reasons),
-        "reasons": reasons,
-        "indexed_commit": manifest.last_indexed_commit,
-        "current_commit": current,
-        "current_branch": branch,
-        "indexed_at": manifest.indexed_at,
-        "tracked_files": len(candidate_paths),
-        "indexed_files": len(manifest.files),
-        "stale_files": stale_files[:50],
-        "removed_files": removed_files[:50],
-        "stale_file_count": len(stale_files),
-        "removed_file_count": len(removed_files),
-    }
+    branch = default_branch(repo_root)
+    return RepositoryService(repo_root.name, repo_root, branch).inspect(
+        revision=WORKTREE_REVISION,
+    )
 
 
 def find_tests_for_symbol(
@@ -260,18 +254,25 @@ def find_tests_for_symbol(
     repo_root: Path,
     max_results: int = 10,
 ) -> list[dict]:
-    from indexer.manifest import load_manifest
-
     max_results = max(1, min(max_results, 50))
-    seed = get_by_ids([symbol_id], cfg.vector_store, repo_root)
+    seed = get_by_ids([symbol_id], repo_root)
     seed_meta = seed[0].get("metadata", {}) if seed else {}
     source_file = str(seed_meta.get("file") or symbol_id.split("::", 1)[0])
     symbol_name = symbol_id.rsplit("::", 1)[-1].split(".")[-1]
     source_stem = Path(source_file).stem
 
-    manifest = load_manifest(repo_root)
+    service = RepositoryService(
+        repo_root.name,
+        repo_root,
+        default_branch(repo_root),
+        config=cfg,
+    )
+    indexed_files = service.index.files(service.scope)
+    symbols_by_file: dict[str, list[str]] = {}
+    for record in service.index.symbols(service.scope):
+        symbols_by_file.setdefault(record.file, []).append(record.component_id)
     matches = []
-    for rel_path, entry in manifest.files.items():
+    for rel_path in indexed_files:
         path = Path(rel_path)
         parts = set(path.parts)
         is_test = (
@@ -301,7 +302,8 @@ def find_tests_for_symbol(
         if source_file and source_file in text:
             score += 3
             reasons.append("source path match")
-        if any(symbol_name and symbol_name in cid for cid in entry.component_ids):
+        component_ids = symbols_by_file.get(rel_path, [])
+        if any(symbol_name and symbol_name in cid for cid in component_ids):
             score += 2
             reasons.append("test symbol name match")
         if source_stem and source_stem in path.name:
@@ -313,7 +315,7 @@ def find_tests_for_symbol(
                 "file": rel_path,
                 "score": score,
                 "reasons": reasons,
-                "component_ids": entry.component_ids,
+                "component_ids": component_ids,
             })
 
     matches.sort(key=lambda item: (-item["score"], item["file"]))
@@ -327,11 +329,9 @@ def get_edit_context(
     padding: int = 8,
     max_related: int = 20,
 ) -> dict:
-    from indexer.manifest import load_manifest
-
     padding = max(0, min(padding, 50))
     max_related = max(1, min(max_related, 100))
-    seed = get_by_ids([symbol_id], cfg.vector_store, repo_root)
+    seed = get_by_ids([symbol_id], repo_root)
     if not seed:
         return {
             "symbol": None,
@@ -348,14 +348,21 @@ def get_edit_context(
 
     call_ids = _parse_json_list(meta.get("calls", ""))
     caller_ids = _parse_json_list(meta.get("called_by", ""))
-    callees = get_by_ids(call_ids[:max_related], cfg.vector_store, repo_root) if call_ids else []
-    callers = get_by_ids(caller_ids[:max_related], cfg.vector_store, repo_root) if caller_ids else []
+    callees = get_by_ids(call_ids[:max_related], repo_root) if call_ids else []
+    callers = get_by_ids(caller_ids[:max_related], repo_root) if caller_ids else []
 
-    manifest = load_manifest(repo_root)
-    sibling_ids = []
-    if file_path in manifest.files:
-        sibling_ids = [cid for cid in manifest.files[file_path].component_ids if cid != symbol_id]
-    siblings = get_by_ids(sibling_ids[:max_related], cfg.vector_store, repo_root) if sibling_ids else []
+    service = RepositoryService(
+        repo_root.name,
+        repo_root,
+        default_branch(repo_root),
+        config=cfg,
+    )
+    sibling_ids = [
+        record.component_id
+        for record in service.index.symbols(service.scope, paths=(file_path,))
+        if record.component_id != symbol_id
+    ]
+    siblings = get_by_ids(sibling_ids[:max_related], repo_root) if sibling_ids else []
 
     return {
         "symbol": symbol,
@@ -411,7 +418,7 @@ def _git_dirty_files(repo_root: Path) -> list[str]:
             capture_output=True,
             text=True,
             timeout=10,
-            env={"GIT_TERMINAL_PROMPT": "0"},
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
         )
     except (OSError, subprocess.TimeoutExpired):
         return []
@@ -430,6 +437,7 @@ def _expand_with_call_graph(
     repo_root: Path,
     depth: int = 1,
     max_expanded: int = 50,
+    branch: str = "",
 ) -> list[dict]:
     expanded = list(hits)
     visited = {h["id"] for h in hits}
@@ -447,7 +455,7 @@ def _expand_with_call_graph(
             related_ids -= visited
 
             if related_ids:
-                batch = get_by_ids(list(related_ids), cfg.vector_store, repo_root)
+                batch = get_by_ids(list(related_ids), repo_root, branch=branch)
                 for node in batch:
                     if len(expanded) >= max_expanded:
                         return expanded
@@ -460,27 +468,6 @@ def _expand_with_call_graph(
             break
 
     return expanded
-
-
-def _annotate_match_reasons(hits: list[dict], query: str) -> None:
-    terms = [t.lower() for t in query.replace("_", " ").replace("-", " ").split() if len(t) >= 2]
-    for hit in hits:
-        meta = hit.get("metadata", {})
-        haystacks = [
-            hit.get("id", ""),
-            hit.get("document", ""),
-            str(meta.get("file", "")),
-            str(meta.get("type", "")),
-        ]
-        hay = " ".join(haystacks).lower().replace("_", " ").replace("-", " ")
-        reasons = []
-        if "distance" in hit:
-            reasons.append(f"distance={hit.get('distance')}")
-        if any(term in hay for term in terms):
-            reasons.append("query token match")
-        if query.lower() in hit.get("id", "").lower():
-            reasons.append("symbol id contains query")
-        hit["match_reasons"] = list(dict.fromkeys(reasons))
 
 
 def _natural_language_alias_score(query: str, hit: dict) -> int:
@@ -599,7 +586,7 @@ def _git_diff(repo_root: Path) -> str:
             capture_output=True,
             text=True,
             timeout=20,
-            env={"GIT_TERMINAL_PROMPT": "0"},
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
         )
     except (OSError, subprocess.TimeoutExpired):
         return ""
@@ -646,15 +633,17 @@ def _symbols_for_changed_files(
     files: list[str],
     changed_ranges: dict[str, list[tuple[int, int]]],
 ) -> list[dict]:
-    from indexer.manifest import load_manifest
-
-    manifest = load_manifest(repo_root)
-    ids = []
-    for file_path in files:
-        entry = manifest.files.get(file_path)
-        if entry:
-            ids.extend(entry.component_ids)
-    nodes = get_by_ids(ids, cfg.vector_store, repo_root) if ids else []
+    service = RepositoryService(
+        repo_root.name,
+        repo_root,
+        default_branch(repo_root),
+        config=cfg,
+    )
+    ids = [
+        record.component_id
+        for record in service.index.symbols(service.scope, paths=tuple(files))
+    ]
+    nodes = service.lookup(ids) if ids else []
     results = []
     for node in nodes:
         meta = node.get("metadata", {})
@@ -760,10 +749,15 @@ def _repo_nodes_for_graph(info: dict) -> list[dict]:
     if not root or not cfg:
         return []
     try:
-        from indexer.manifest import load_manifest
-        manifest = load_manifest(Path(root))
-        ids = [cid for entry in manifest.files.values() for cid in entry.component_ids]
-        return get_by_ids(ids, cfg.vector_store, Path(root)) if ids else []
+        repo_root = Path(root)
+        service = RepositoryService(
+            repo_root.name,
+            repo_root,
+            default_branch(repo_root),
+            config=cfg,
+        )
+        ids = [record.component_id for record in service.index.symbols(service.scope)]
+        return service.lookup(ids) if ids else []
     except Exception:
         return []
 

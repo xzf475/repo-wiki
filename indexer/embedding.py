@@ -1,11 +1,6 @@
 from __future__ import annotations
-import hashlib
-import os
-import json
 import logging
 import threading
-from pathlib import Path
-from indexer.ast_parser import ASTNode
 from indexer.config import EmbeddingConfig
 from indexer.utils import load_env_file, resolve_api_key
 
@@ -34,67 +29,35 @@ def _resolve_api_key(cfg: EmbeddingConfig) -> str | None:
     return resolve_api_key(cfg.api_key_env, _EMBEDDING_KEY_ENVS)
 
 
-def build_embedding_text(node: ASTNode, description: str = "") -> str:
-    parts = [
-        f"[{node.type}] {node.id}",
-        f"Lines {node.line_start}-{node.line_end}",
-    ]
-    if description:
-        parts.append(description)
-    if node.docstring:
-        parts.append(f"Docstring: {node.docstring}")
-    if node.calls:
-        parts.append(f"Calls: {', '.join(node.calls[:10])}")
-    if node.called_by:
-        parts.append(f"Called by: {', '.join(node.called_by[:10])}")
-    if node.imports:
-        parts.append(f"Imports: {', '.join(node.imports[:6])}")
-    return "\n".join(parts)
-
-
-def compute_embedding_sig(node: ASTNode, description: str = "") -> str:
-    text = build_embedding_text(node, description)
-    return hashlib.sha256(text.encode()).hexdigest()[:16]
-
-
-def embed_nodes(
-    nodes: list[ASTNode],
-    descriptions: dict[str, str],
-    cfg: EmbeddingConfig,
-    max_workers: int = 8,
-) -> dict[str, list[float]]:
+def embed_texts(texts: list[str], cfg: EmbeddingConfig) -> list[list[float]]:
+    """Embed an ordered batch atomically; any failed sub-batch raises."""
+    if not texts:
+        return []
     api_key = _resolve_api_key(cfg)
     if not api_key:
         raise ValueError(
             f"Embedding API key not found. Set {cfg.api_key_env} env var or configure api_key_env in .indexer.toml"
         )
-
-    texts = [build_embedding_text(n, descriptions.get(n.id, "")) for n in nodes]
-    ids = [n.id for n in nodes]
-
-    result: dict[str, list[float]] = {}
     batch_size = 10 if "dashscope" in cfg.provider.lower() else 50
-    batches = []
-    for i in range(0, len(texts), batch_size):
-        batches.append((
-            texts[i:i + batch_size],
-            ids[i:i + batch_size],
-        ))
+    batches = [texts[start:start + batch_size] for start in range(0, len(texts), batch_size)]
+    if len(batches) == 1:
+        return _call_embedding_api(batches[0], cfg, api_key)
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(_call_embedding_api, batch_texts, cfg, api_key): batch_ids for batch_texts, batch_ids in batches}
-        for future in as_completed(futures):
-            batch_ids = futures[future]
-            try:
-                vectors = future.result()
-                for bid, vec in zip(batch_ids, vectors):
-                    result[bid] = vec
-            except Exception as e:
-                logger.warning("Embedding batch failed (%d ids): %s", len(batch_ids), e)
 
-    if len(result) < len(ids):
-        logger.error("Embedding incomplete: %d/%d nodes succeeded", len(result), len(ids))
+    ordered: list[list[list[float]] | None] = [None] * len(batches)
+    with ThreadPoolExecutor(max_workers=min(8, len(batches))) as pool:
+        futures = {
+            pool.submit(_call_embedding_api, batch, cfg, api_key): index
+            for index, batch in enumerate(batches)
+        }
+        for future in as_completed(futures):
+            ordered[futures[future]] = future.result()
+    result = [vector for batch in ordered if batch is not None for vector in batch]
+    if len(result) != len(texts):
+        raise ValueError(
+            f"Embedding API returned {len(result)} vectors for {len(texts)} inputs"
+        )
     return result
 
 
@@ -141,4 +104,3 @@ def _call_embedding_api(
             delay = 2.0 * (2 ** attempt) + _random.uniform(0, 1)
             logger.warning("Embedding API retryable error (attempt %d): %s, retrying in %.1fs", attempt + 1, e, delay)
             _time.sleep(delay)
-

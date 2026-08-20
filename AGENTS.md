@@ -9,5 +9,5 @@ This repo is indexed with repo-wiki. Before reading any source file or answering
 Do not read source files speculatively. The wiki gives you structure and relationships in a fraction of the tokens.
 
 - Wiki pages: `wiki/` — grouped by logical density, not directory structure
-- Manifest: `.indexer/manifest.json` — maps every file to its wiki page and component IDs
+- Index state: `.indexer/state/repository-index.sqlite3` — transactional generations
 - Component IDs: `relative/path.py::ClassName.method_name`

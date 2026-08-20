@@ -104,18 +104,8 @@ class RepoRegistry:
     def unregister(self, name: str):
         with self._lock:
             if name in self.repos:
-                info = self.repos[name]
                 del self.repos[name]
                 self._save()
-                if info:
-                    try:
-                        from indexer.vector_store import evict_client
-                        repo_path = Path(info.get("root", "."))
-                        cfg = info.get("config")
-                        if cfg:
-                            evict_client(str(repo_path / cfg.vector_store.persist_dir))
-                    except Exception as e:
-                        logger.debug("evict_client failed for %s: %s", name, e)
             logger.info("Unregistered repo '%s'", name)
         with _locks_lock:
             lock = _repo_locks.get(name)

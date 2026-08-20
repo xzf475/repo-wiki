@@ -4,6 +4,7 @@ import hashlib
 from pathlib import Path
 
 from indexer.config import Config
+from indexer.repository_service import RepositoryService, default_branch
 import indexer.retrieval as _retrieval
 from indexer.retrieval import (
     _git_diff,
@@ -71,7 +72,7 @@ def post_edit_verify(
         "candidate_tests": tests,
         "verify_commands": commands,
         "risk_points": risks,
-        "needs_reindex": bool(files) or bool(index_status.get("is_stale")),
+        "needs_sync": bool(files) or bool(index_status.get("is_stale")),
         "index_status": index_status,
         "checklist": checklist,
     }
@@ -146,13 +147,17 @@ def change_set(
 
 
 def coverage_map(cfg: Config, repo_root: Path, symbol_id: str = "", max_results: int = 100) -> dict:
-    from indexer.manifest import load_manifest
-
     max_results = max(1, min(max_results, 500))
-    manifest = load_manifest(repo_root)
+    service = RepositoryService(
+        repo_root.name,
+        repo_root,
+        default_branch(repo_root),
+        config=cfg,
+    )
     source_ids = [symbol_id] if symbol_id else [
-        cid for entry in manifest.files.values() for cid in entry.component_ids
-        if not _is_test_path(cid.split("::", 1)[0])
+        record.component_id
+        for record in service.index.symbols(service.scope)
+        if not _is_test_path(record.file)
     ]
     tests_by_symbol = {}
     for sid in source_ids:

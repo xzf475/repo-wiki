@@ -30,6 +30,11 @@ def _node_text(node, source: bytes) -> str:
     return source[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
 
 
+def _node_name(node, source: bytes) -> str | None:
+    name_node = node.child_by_field_name("name")
+    return _node_text(name_node, source) if name_node else None
+
+
 _env_lock = threading.Lock()
 _env_loaded = False
 

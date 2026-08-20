@@ -87,11 +87,10 @@ header .tag{font-size:11px;color:var(--text3);border:1px solid var(--border);pad
 .markdown-view code{background:var(--surface2);padding:2px 6px;border-radius:3px;font-size:12px;color:var(--amber)}
 .markdown-view a{color:var(--accent)}
 
-.manifest-table{width:100%;border-collapse:collapse;font-size:12px}
-.manifest-table th{background:var(--surface2);border:1px solid var(--border);padding:8px;color:var(--text2);text-align:left;position:sticky;top:0}
-.manifest-table td{border:1px solid var(--border);padding:8px;color:var(--text2)}
-.manifest-table td:first-child{color:var(--text);font-weight:500}
-.manifest-table td .cid{font-size:11px;color:var(--text3);display:block;margin-top:2px}
+.index-table{width:100%;border-collapse:collapse;font-size:12px}
+.index-table th{background:var(--surface2);border:1px solid var(--border);padding:8px;color:var(--text2);text-align:left;position:sticky;top:0}
+.index-table td{border:1px solid var(--border);padding:8px;color:var(--text2)}
+.index-table td:first-child{color:var(--text);font-weight:500}
 
 .search-section{margin-bottom:24px}
 .search-section .row{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap}
@@ -172,7 +171,7 @@ footer{border-top:1px solid var(--border);padding:16px 32px;text-align:center;fo
     </div>
     <div class="tabs" id="detail-tabs">
       <div class="tab active" data-tab="wiki" onclick="switchTab('wiki')">Wiki Pages</div>
-      <div class="tab" data-tab="manifest" onclick="switchTab('manifest')">Manifest</div>
+      <div class="tab" data-tab="index" onclick="switchTab('index')">Index Generations</div>
       <div class="tab" data-tab="search" onclick="switchTab('search')">Search</div>
       <div class="tab" data-tab="branches" onclick="switchTab('branches')">Branches</div>
     </div>
@@ -180,14 +179,15 @@ footer{border-top:1px solid var(--border);padding:16px 32px;text-align:center;fo
       <div class="wiki-list" id="wiki-list"></div>
       <div class="markdown-view" id="wiki-content" style="display:none"></div>
     </div>
-    <div id="tab-manifest" class="tab-content" style="display:none">
+    <div id="tab-index" class="tab-content" style="display:none">
       <div style="overflow-x:auto;max-height:500px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--radius)">
-        <table class="manifest-table" id="manifest-table"></table>
+        <table class="index-table" id="index-table"></table>
       </div>
     </div>
     <div id="tab-search" class="tab-content" style="display:none">
       <div class="search-section">
         <div class="row">
+          <select id="search-branch" style="max-width:180px"></select>
           <input type="text" id="search-query" placeholder="Search symbols (e.g. JWT validation error)" style="flex:1" onkeydown="if(event.key==='Enter')doSearch()">
           <button onclick="doSearch()" class="primary">Search</button>
         </div>
@@ -196,7 +196,7 @@ footer{border-top:1px solid var(--border);padding:16px 32px;text-align:center;fo
     </div>
     <div id="tab-branches" class="tab-content" style="display:none">
       <div style="overflow-x:auto;max-height:500px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--radius)">
-        <table class="manifest-table" id="branches-table"></table>
+        <table class="index-table" id="branches-table"></table>
       </div>
     </div>
   </div>
@@ -222,19 +222,6 @@ footer{border-top:1px solid var(--border);padding:16px 32px;text-align:center;fo
   </div>
 </div>
 
-<div id="rebuild-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.6);z-index:200;align-items:center;justify-content:center">
-  <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:24px;max-width:400px;position:relative">
-    <h3 style="font-family:var(--serif);font-size:20px;margin-bottom:8px;color:var(--red)">&#9888; Rebuild Repository</h3>
-    <p style="font-size:13px;color:var(--text2);margin-bottom:16px">This will delete all wiki pages, vector database, and index data for <strong id="rebuild-repo-name" style="color:var(--text)"></strong>, then rebuild from scratch.</p>
-    <div class="field"><label>Type the repo name to confirm</label><input type="text" id="rebuild-confirm" placeholder="" style="border-color:var(--red)"></div>
-    <div style="display:flex;gap:8px;margin-top:16px">
-      <button onclick="doRebuild()" style="border-color:var(--red);color:var(--red);background:#2a1a1a" id="rebuild-btn">&#9888; Rebuild</button>
-      <button onclick="hideRebuild()">Cancel</button>
-    </div>
-    <div id="rebuild-status" style="margin-top:12px;font-size:12px;color:var(--text3)"></div>
-  </div>
-</div>
-
 <div id="edit-meta-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.6);z-index:200;align-items:center;justify-content:center">
   <div class="register-form" style="position:relative">
     <h3 style="font-family:var(--serif);font-size:20px;margin-bottom:16px;color:var(--text)">Edit Repository Info</h3>
@@ -253,7 +240,7 @@ footer{border-top:1px solid var(--border);padding:16px 32px;text-align:center;fo
 <footer>repo-wiki &mdash; Your codebase, understood by any LLM.</footer>
 
 <script>
-const STEP_NAMES={queued:'Queued',git_clone:'Cloning repository',git_pull:'Updating repository',git_fetch:'Fetching repository',git_checkout:'Checking out branch',git_timeout:'Git operation timed out',locked:'Locked by another operation',init:'Initializing config',cleaning:'Cleaning old data',rebuild_init:'Re-initializing',detecting_files:'Detecting files',parsing:'Parsing files',cross_ref:'Cross-referencing calls',describing_symbols:'Describing symbols',describing_modules:'Describing modules',writing_wiki:'Writing wiki',deep_enrichment:'Deep enrichment',embedding:'Generating embeddings',upserting:'Storing vectors',complete:'Complete',indexing:'Indexing',already_indexed:'Already up to date',unknown:'Unknown error'};
+const STEP_NAMES={queued:'Queued',git_clone:'Cloning repository',git_fetch:'Fetching repository',git_timeout:'Git operation timed out',locked:'Locked by another operation',init:'Initializing index',sync:'Publishing generation',project:'Writing projections',enrich:'Enriching generation',complete:'Complete',unknown:'Unknown error'};
 function esc(s){if(!s)return'';const d=document.createElement('div');d.textContent=String(s);return d.innerHTML;}
 function safeId(s){return String(s).replace(/[^a-zA-Z0-9_-]/g,'_');}
 function escAttr(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
@@ -309,16 +296,16 @@ async function loadRepos(){
   empty.style.display='none';
   grid.innerHTML=data.repos.map(r=>{
     let h='<div class="repo-card">';
-    h+='<div class="status-dot '+(r.has_vector_db?'ready':'empty')+'"></div>';
+    const generationCount=Object.values(r.generations||{}).filter(g=>g!==null).length;
+    h+='<div class="status-dot '+(generationCount?'ready':'empty')+'"></div>';
     h+='<div class="name" onclick="openRepo(\x27'+escAttr(r.name)+'\x27)">'+esc(r.name)+'</div>';
     h+='<div class="path">'+esc(r.path)+'</div>';
     if(r.description) h+='<div style="font-size:12px;color:var(--text2);margin-top:2px">'+esc(r.description)+'</div>';
     if(r.tags&&r.tags.length) h+='<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:4px">'+r.tags.map(t=>'<span style="font-size:10px;padding:1px 6px;background:var(--surface2);border-radius:3px;color:var(--accent2)">#'+esc(t)+'</span>').join('')+'</div>';
-    h+='<div class="stats"><span class="stat">&#9654; <span class="val">'+(r.symbol_count||0)+'</span> symbols</span><span class="stat">'+(r.has_vector_db?'&#10003; Vector DB':'&#10005; No vectors')+'</span></div>';
+    h+='<div class="stats"><span class="stat">&#9654; <span class="val">'+(r.symbol_count||0)+'</span> symbols</span><span class="stat">'+(r.dense_ready?'&#10003; Dense ready':'Local retrieval')+'</span></div>';
     h+='<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:6px;align-items:center">';
     h+=(r.branches||[]).map(b=>'<span style="font-size:10px;padding:2px 8px;border:1px solid var(--accent);border-radius:3px;color:var(--accent)">'+esc(b)+'</span>').join('');
-    if(r.last_indexed_commit) h+='<code style="font-size:10px;color:var(--text3);margin-left:4px">@'+esc(r.last_indexed_commit)+'</code>';
-    if(r.last_synced_at) h+='<span style="font-size:10px;color:var(--text3);margin-left:auto">&#9200; '+fmtTime(r.last_synced_at)+'</span>';
+    if(generationCount) h+='<span style="font-size:10px;color:var(--text3);margin-left:auto">'+generationCount+' generation'+(generationCount===1?'':'s')+'</span>';
     h+='</div>';
     if(r.webhook_url){
       h+='<div style="margin-top:6px;display:flex;align-items:center;gap:4px">';
@@ -329,7 +316,6 @@ async function loadRepos(){
     }
     h+='<div style="display:flex;gap:6px;margin-top:10px">';
     h+='<button onclick="doSync(\x27'+escAttr(r.name)+'\x27)" style="font-size:12px;padding:5px 12px">&#8635; Sync</button>';
-    h+='<button onclick="showRebuild(\x27'+escAttr(r.name)+'\x27)" style="font-size:12px;padding:5px 12px">&#9881; Rebuild</button>';
     h+='<button onclick="doValidate(\x27'+escAttr(r.name)+'\x27)" style="font-size:12px;padding:5px 12px">&#9745; Check</button>';
     h+='<button onclick="doUnregister(\x27'+escAttr(r.name)+'\x27)" style="font-size:12px;padding:5px 12px;border-color:var(--red);color:var(--red)">&#10005; Remove</button>';
     h+='</div>';
@@ -350,7 +336,8 @@ async function openRepo(name){
   document.getElementById('repos-view').style.display='none';
   document.getElementById('repo-detail-view').style.display='block';
   document.getElementById('detail-name').textContent=data.name;
-  document.getElementById('detail-meta').textContent=data.path+' | '+(data.wiki_pages||[]).length+' wiki pages | '+Object.keys((data.manifest&&data.manifest.files)||{}).length+' tracked files';
+  const indexedFiles=(data.index||[]).reduce((total,item)=>total+(item.files||0),0);
+  document.getElementById('detail-meta').textContent=data.path+' | '+(data.wiki_pages||[]).length+' wiki pages | '+indexedFiles+' indexed files';
   const descEl=document.getElementById('detail-desc');
   const tagsEl=document.getElementById('detail-tags');
   if(data.description){
@@ -370,6 +357,10 @@ async function openRepo(name){
   if(data.branches&&data.branches.length){
     branchesEl.innerHTML=data.branches.map(b=>'<span style="font-size:10px;padding:2px 8px;border:1px solid var(--accent);border-radius:3px;color:var(--accent)">'+esc(b)+'</span>').join('');
   }
+  const searchBranch=document.getElementById('search-branch');
+  const searchableBranches=(data.branches_detail||[]).filter(item=>item.indexed).map(item=>item.name);
+  searchBranch.innerHTML=searchableBranches.map(branch=>'<option value="'+escAttr(branch)+'">'+esc(branch)+'</option>').join('');
+  searchBranch.style.display=searchableBranches.length?'block':'none';
   const ruleEl=document.getElementById('detail-branch-rule');
   if(data.branch_rule){
     ruleEl.innerHTML='Branch Rule: <code style="font-size:11px;color:var(--amber)">'+esc(data.branch_rule)+'</code>';
@@ -378,7 +369,7 @@ async function openRepo(name){
     ruleEl.style.display='none';
   }
   renderWiki(data.wiki_pages);
-  renderManifest(data.manifest);
+  renderIndex(data.index);
   renderBranches(data.branches_detail, data.branches_missing);
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
   document.querySelector('.tab[data-tab="wiki"]').classList.add('active');
@@ -446,28 +437,11 @@ async function syncBranch(branch){
   }catch(e){toast('Sync failed: '+e.message,'error');}
 }
 
-async function rebuildBranch(branch){
-  try{
-  const name=currentRepo;
-  if(!confirm('Rebuild '+name+' @ '+branch+'? This will clear and re-index all code for this branch.'))return;
-  const data=await api('/rebuild','POST',{name,branch,confirm:name});
-  if(data.error){toast('Rebuild error: '+data.error,'error');return;}
-  startTaskPolling(data.task_id, name+' @ '+branch, (task)=>{
-    if(task.status==='completed'){
-      toast('"'+name+'" @ '+branch+' rebuilt');
-      openRepo(name);
-    }else{
-      toast('Rebuild failed: '+(task.error||'unknown'),'error');
-    }
-  });
-  }catch(e){toast('Rebuild failed: '+e.message,'error');}
-}
-
 async function registerMissingBranch(branch){
   try{
   const name=currentRepo;
   if(!confirm('Register and index new branch "'+branch+'" for '+name+'? This will fetch and index the branch.'))return;
-  const data=await api('/rebuild','POST',{name,branch,confirm:name});
+  const data=await api('/sync','POST',{name,branch});
   if(data.error){toast('Error: '+data.error,'error');return;}
   startTaskPolling(data.task_id, name+' @ '+branch, (task)=>{
     if(task.status==='completed'){
@@ -488,7 +462,7 @@ function switchTab(tab){
 
 function showTab(tab){
   document.getElementById('tab-wiki').style.display=tab==='wiki'?'block':'none';
-  document.getElementById('tab-manifest').style.display=tab==='manifest'?'block':'none';
+  document.getElementById('tab-index').style.display=tab==='index'?'block':'none';
   document.getElementById('tab-search').style.display=tab==='search'?'block':'none';
   document.getElementById('tab-branches').style.display=tab==='branches'?'block':'none';
 }
@@ -511,7 +485,7 @@ function renderWiki(pages){
   if(!currentWikiPage)showWikiPage(pages[0].name);
 }
 
-function showWikiPage(name){
+async function showWikiPage(name){
   currentWikiPage=name;
   const data=window._repoData;
   if(!data)return;
@@ -520,17 +494,25 @@ function showWikiPage(name){
   document.querySelectorAll('.wiki-item').forEach(i=>i.classList.toggle('active',i.querySelector('.title')?.textContent===name));
   const content=document.getElementById('wiki-content');
   content.style.display='block';
-  content.textContent=page.content;
+  content.textContent='Loading...';
+  try{
+    if(page.content===undefined){
+      const payload=await api('/api/repo/'+encodeURIComponent(currentRepo)+'/wiki/'+encodeURIComponent(name));
+      page.content=payload.content||'';
+    }
+    if(currentWikiPage===name)content.textContent=page.content;
+  }catch(e){
+    if(currentWikiPage===name)content.textContent='Failed to load wiki page: '+e.message;
+  }
 }
 
-function renderManifest(manifest){
-  const table=document.getElementById('manifest-table');
-  if(!manifest||!manifest.files){
-    table.innerHTML='<tr><td colspan="3" style="text-align:center;color:var(--text3)">No manifest data</td></tr>';
+function renderIndex(index){
+  const table=document.getElementById('index-table');
+  if(!index||!index.length){
+    table.innerHTML='<tr><td colspan="7" style="text-align:center;color:var(--text3)">No published generations</td></tr>';
     return;
   }
-  const files=Object.entries(manifest.files);
-  table.innerHTML='<thead><tr><th>File</th><th>Wiki Page</th><th>Component IDs</th></tr></thead><tbody>'+files.map(([f,v])=>'<tr><td>'+esc(f)+'</td><td>'+esc(v.wiki_page)+'</td><td>'+(v.component_ids||[]).map(c=>'<span class="cid">'+esc(c)+'</span>').join('')+'</td></tr>').join('')+'</tbody>';
+  table.innerHTML='<thead><tr><th>Branch</th><th>Generation</th><th>Tree</th><th>Files</th><th>Symbols</th><th>Dense</th><th>Stale</th></tr></thead><tbody>'+index.map(item=>'<tr><td>'+esc(item.name)+'</td><td><code>'+esc(item.generation||'—')+'</code></td><td><code>'+(item.tree_id?esc(item.tree_id.slice(0,12)):'—')+'</code></td><td>'+esc(item.files||0)+'</td><td>'+esc(item.symbols||0)+'</td><td>'+esc(item.dense_state||'local')+'</td><td>'+(item.is_stale?'yes':'no')+'</td></tr>').join('')+'</tbody>';
 }
 
 function renderBranches(branches, missing){
@@ -546,7 +528,7 @@ function renderBranches(branches, missing){
     rows.push('<tr style="background:var(--surface2)"><td colspan="4" style="font-size:11px;color:var(--text3);padding:6px 8px;font-weight:500">Registered &amp; Indexed</td></tr>');
     branches.forEach(b=>{
       const n=esc(b.name);
-      rows.push('<tr><td><code>'+n+'</code></td><td style="font-family:monospace;font-size:11px;color:var(--text3)">'+(b.commit?esc(b.commit.slice(0,12)):'—')+'</td><td>'+dot(b.indexed)+label(b.indexed)+'</td><td><div style="display:flex;gap:4px"><button onclick="syncBranch(\x27'+escAttr(b.name)+'\x27)" class="btn-mini" title="Sync this branch">Sync</button><button onclick="rebuildBranch(\x27'+escAttr(b.name)+'\x27)" class="btn-mini" style="background:var(--amber-dim);color:var(--amber);border-color:var(--amber)" title="Full rebuild of this branch">Rebuild</button></div></td></tr>');
+      rows.push('<tr><td><code>'+n+'</code></td><td style="font-family:monospace;font-size:11px;color:var(--text3)">'+(b.tree_id?esc(b.tree_id.slice(0,12)):'—')+'</td><td>'+dot(b.indexed)+label(b.indexed)+'</td><td><button onclick="syncBranch(\x27'+escAttr(b.name)+'\x27)" class="btn-mini" title="Sync this branch">Sync</button></td></tr>');
     });
   }
   if(missing&&missing.length){
@@ -556,14 +538,15 @@ function renderBranches(branches, missing){
       rows.push('<tr><td><code>'+n+'</code></td><td style="font-family:monospace;font-size:11px;color:var(--text3)">'+(b.commit?esc(b.commit.slice(0,12)):'—')+'</td><td style="color:var(--text3)">—</td><td><button onclick="registerMissingBranch(\x27'+escAttr(b.name)+'\x27)" class="btn-mini" style="background:var(--accent-dim);color:var(--accent);border-color:var(--accent)">Add &amp; Index</button></td></tr>');
     });
   }
-  table.innerHTML='<thead><tr><th>Branch</th><th>Commit</th><th>Status</th><th>Actions</th></tr></thead><tbody>'+rows.join('')+'</tbody>';
+  table.innerHTML='<thead><tr><th>Branch</th><th>Tree</th><th>Status</th><th>Actions</th></tr></thead><tbody>'+rows.join('')+'</tbody>';
 }
 
 async function doSearch(){
   const q=document.getElementById('search-query').value;
   if(!q)return;
   try{
-  const data=await api('/search','POST',{query:q,repo:currentRepo,top_k:10});
+  const branch=document.getElementById('search-branch').value;
+  const data=await api('/search','POST',{query:q,repo:currentRepo,branch,top_k:10,retrieval:'preferred'});
   const div=document.getElementById('search-results');
   if(!data.results||data.results.length===0){
     div.innerHTML='<div class="empty-state"><p>No results found</p></div>';
@@ -588,71 +571,9 @@ function hideRegister(){
   document.getElementById('reg-status').textContent='';
 }
 
-let rebuildRepoName='';
-function showRebuild(repoName){
-  rebuildRepoName=repoName;
-  document.getElementById('rebuild-repo-name').textContent=repoName;
-  document.getElementById('rebuild-confirm').value='';
-  document.getElementById('rebuild-confirm').placeholder=repoName;
-  document.getElementById('rebuild-status').textContent='';
-  document.getElementById('rebuild-btn').disabled=false;
-  document.getElementById('rebuild-modal').style.display='flex';
-}
-function hideRebuild(){
-  document.getElementById('rebuild-modal').style.display='none';
-  rebuildRepoName='';
-}
-
-async function doRebuild(){
-  const confirmInput=document.getElementById('rebuild-confirm').value;
-  if(confirmInput!==rebuildRepoName){toast(`Confirmation failed: type "${rebuildRepoName}" exactly`,'error');return;}
-  document.getElementById('rebuild-btn').disabled=true;
-  const repoName=rebuildRepoName;
-  hideRebuild();
-  const statusEl=document.getElementById('sync-status-'+safeId(repoName));
-  if(statusEl) statusEl.innerHTML='<span class="spinner"></span> Submitting rebuild...';
-  try{
-    const data=await api('/rebuild-all','POST',{name:repoName,confirm:confirmInput,skip_deep:true});
-  if(data.error){toast(data.error,'error');statusEl.innerHTML='&#10005; '+data.error;return;}
-  const taskId=data.task_id;
-  let attempts=0;
-  const poll=async()=>{
-    try{
-      attempts++;
-      const task=await api('/api/task/'+taskId);
-      if(statusEl){
-        let text=STEP_NAMES[task.step]||task.step;
-        if(task.detail) text+=' — '+task.detail;
-        statusEl.innerHTML='<span class="spinner"></span> &#9881; '+text+' <span style="color:var(--amber)">'+task.progress+'%</span>';
-      }
-      if(task.status==='completed'){
-        toast('"'+repoName+'" rebuilt — '+(task.result?.symbol_count||'?')+' symbols');
-        if(statusEl) statusEl.innerHTML='&#10003; Rebuild complete';
-        loadRepos();
-        return;
-      }
-      if(task.status==='failed'){
-        toast('Rebuild failed: '+task.error,'error');
-        if(statusEl) statusEl.innerHTML='&#10005; Failed: '+task.error;
-        return;
-      }
-      if(attempts>=60){
-        toast('Rebuild polling timed out','error');
-        return;
-      }
-      setTimeout(poll,5000);
-    }catch(e){
-      if(statusEl) statusEl.innerHTML='&#10005; Polling failed';
-      toast('Rebuild polling failed: '+e.message,'error');
-    }
-  };
-  poll();
-  }catch(e){toast('Request failed: '+e.message,'error');if(statusEl)statusEl.innerHTML='&#10005; Failed';}
-}
-
 async function doSync(repoName){
   try{
-  const data=await api('/sync-all','POST',{name:repoName,skip_deep:true});
+  const data=await api('/sync-all','POST',{name:repoName,enrich:false});
   if(data.error){toast(data.error,'error');return;}
   const taskId=data.task_id;
   const statusEl=document.getElementById('sync-status-'+safeId(repoName));
@@ -694,7 +615,7 @@ async function doSync(repoName){
 
 async function doUnregister(repoName){
   try{
-  if(!confirm('Remove "'+repoName+'"? This will unregister the repo and delete its wiki data.'))return;
+  if(!confirm('Remove "'+repoName+'" from the registry? Repository files and generated projections will be preserved.'))return;
   const data=await api('/unregister','POST',{name:repoName});
   if(data.error){toast(data.error,'error');return;}
   toast('Removed "'+repoName+'"');
@@ -714,12 +635,11 @@ async function doValidate(repoName){
   }else{
     const issues=[];
     if(!data.config_file) issues.push('Missing .indexer.toml');
-    if(!data.manifest_file) issues.push('Missing manifest.json');
-    if(!data.last_indexed_commit) issues.push('Never fully indexed');
+    if(!data.index_database) issues.push('Missing repository index database');
+    if(data.database_integrity&&!data.database_integrity.ok) issues.push('Index database integrity check failed');
+    if(!(data.branches||[]).length||data.branches.some(branch=>branch.generation===null)) issues.push('Missing published generation');
     if(!data.wiki_index) issues.push('Missing wiki/INDEX.md');
     if(!data.skill_file) issues.push('Missing codebase.md skill');
-    if(!data.vector_db) issues.push('Missing vector DB');
-    if(data.missing_wiki_count>0) issues.push(data.missing_wiki_count+' missing wiki pages');
     if(data.stale_count>0) issues.push(data.stale_count+' stale files need re-index');
     const text=issues.join(', ');
     if(statusEl) statusEl.innerHTML='&#9745; Issues: '+text;
@@ -759,10 +679,10 @@ async function doEditMeta(){
   const statusEl=document.getElementById('edit-meta-status');
   const btn=document.getElementById('edit-meta-btn');
   btn.disabled=true;
-  statusEl.textContent='Updating & reindexing...';
+  statusEl.textContent='Updating & syncing...';
 
   try{
-    const data=await api('/api/repo/'+encodeURIComponent(name)+'/reindex','POST',{description,tags,branch_rule});
+    const data=await api('/api/repo/'+encodeURIComponent(name)+'/sync','POST',{description,tags,branch_rule,enrich:false});
     if(data.error){
       statusEl.textContent='Error: '+data.error;
       btn.disabled=false;
@@ -770,13 +690,13 @@ async function doEditMeta(){
     }
     hideEditMeta();
     const n=(data.branches||[]).length;
-    toast(`"${name}" info updated, reindexing ${n} branches (${data.task_id})`,'info');
-    startTaskPolling(data.task_id, name+' reindex', (task)=>{
+    toast(`"${name}" info updated, syncing ${n} branches (${data.task_id})`,'info');
+    startTaskPolling(data.task_id, name+' sync', (task)=>{
       if(task.status==='completed'){
-        toast(`"${name}" reindex complete`);
+        toast(`"${name}" sync complete`);
         openRepo(name);
       }else{
-        toast('Reindex failed: '+(task.error||'unknown'),'error');
+        toast('Sync failed: '+(task.error||'unknown'),'error');
       }
     });
   }catch(e){
@@ -798,7 +718,7 @@ async function doRegister(){
     token:document.getElementById('reg-token').value||undefined,
     username:document.getElementById('reg-username').value||undefined,
     password:document.getElementById('reg-password').value||undefined,
-    skip_deep:true,
+    enrich:false,
   };
   document.getElementById('reg-btn').disabled=true;
   try{

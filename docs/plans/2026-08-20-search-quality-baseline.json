@@ -1,0 +1,30 @@
+{
+  "date": "2026-08-20",
+  "dataset": {
+    "queries": 5,
+    "coverage": [
+      "component_id",
+      "path",
+      "chinese_behavior",
+      "long_source_behavior",
+      "entry_point"
+    ]
+  },
+  "thresholds": {
+    "recall_at_5": 1.0,
+    "mrr_at_10": 0.8,
+    "ndcg_at_10": 0.85
+  },
+  "hybrid": {
+    "recall_at_5": 1.0,
+    "mrr_at_10": 1.0,
+    "ndcg_at_10": 1.0
+  },
+  "vector_only_baseline": {
+    "kind": "same controlled dense provider without local recall or reranking",
+    "recall_at_5": 0.2,
+    "mrr_at_10": 0.2,
+    "ndcg_at_10": 0.2
+  },
+  "notes": "Deterministic interface baseline; not a production-corpus benchmark."
+}

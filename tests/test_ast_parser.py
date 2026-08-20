@@ -1,6 +1,5 @@
-import tempfile, json
 from pathlib import Path
-from indexer.ast_parser import parse_file, ASTNode, compute_hash_short, load_cached_nodes, save_cached_nodes
+from indexer.ast_parser import parse_file
 
 FIXTURE = Path(__file__).parent / "fixtures/sample_py/auth.py"
 RUST_FIXTURE = Path(__file__).parent / "fixtures/sample_rust/lib.rs"
@@ -66,17 +65,6 @@ def test_python_click_command_entry_point(tmp_path):
     node = next(n for n in parse_file(src, tmp_path) if n.id.endswith("::sync"))
 
     assert node.entry_point_kind == "cli"
-
-def test_cache_roundtrip():
-    with tempfile.TemporaryDirectory() as d:
-        root = Path(d)
-        nodes = parse_file(FIXTURE, repo_root=FIXTURE.parent.parent.parent)
-        file_hash = "abc123"
-        save_cached_nodes(root, file_hash, nodes)
-        loaded = load_cached_nodes(root, file_hash)
-        assert loaded is not None
-        assert len(loaded) == len(nodes)
-        assert loaded[0].id == nodes[0].id
 
 # ── Rust ──────────────────────────────────────────────────────────────────────
 

@@ -1,70 +1,110 @@
 # Agent Integration Guide
 
-repo-wiki is designed to be used by local and remote coding Agents before and after edits.
+All adapters read one published `RepositoryIndex` generation. Agents should carry repository, branch, generation, and tree ID through a task so later reads can detect drift.
 
-## Local CLI Flow
+## Recommended flow
 
-Use this when the Agent runs in the same checkout as the code.
+1. Read status with `repo-wiki status`, `get_index_status_tool`, or `POST /index-status`.
+2. If stale, run `repo-wiki run`, `POST /sync`, or `POST /sync-all`.
+3. Search with an explicit repository and branch.
+4. Treat `matches` as query answers and `related` as graph context.
+5. Resolve the exact component ID before editing.
+6. Fetch bounded source/edit context.
+7. Re-check generation before applying a long-running change.
+8. Run post-edit verification against the actual diff.
+
+## Retrieval policy
+
+Choose the weakest mode that satisfies the task:
+
+| Mode | Use when | Failure behavior |
+|---|---|---|
+| `local` | Deterministic navigation, CI, hooks | Exact + FTS5 + Graph only |
+| `preferred` | General coding-agent search | Uses dense when ready; reports degradation otherwise |
+| `required` | The task explicitly requires semantic recall | Fails instead of silently degrading |
+
+Do not infer dense readiness from the presence of files. Read `dense_state`, `retrieval`, and `degradations`.
+
+## Local CLI
 
 ```bash
-repo-wiki agent capabilities
+repo-wiki status
+repo-wiki run
 repo-wiki agent context --symbol-id src/auth.py::validate_token
 repo-wiki agent plan --goal "fix token validation" --symbol-id src/auth.py::validate_token
 repo-wiki agent verify
-repo-wiki agent diagnose
 ```
 
-`repo-wiki agent verify` reads the local `git diff` when no diff file is supplied, so it can be used before commit.
+The pre-commit hook publishes the staged tree with `repo-wiki run --staged`. This structural generation is complete and searchable without an embedding provider.
 
-## Remote REST Flow
+## MCP
 
-Use this when the Agent calls a repo-wiki server that cannot see the Agent's uncommitted workspace.
+Start a local server from the repository root:
 
 ```bash
-curl http://localhost:8765/agent-schema
-
-curl -X POST http://localhost:8765/resolve-symbol \
-  -H 'Content-Type: application/json' \
-  -d '{"repo":"backend","query":"login endpoint"}'
-
-curl -X POST http://localhost:8765/change-plan \
-  -H 'Content-Type: application/json' \
-  -d '{"repo":"backend","goal":"fix token validation","symbol_id":"src/auth.py::validate_token"}'
-
-git diff > /tmp/agent.diff
-curl -X POST http://localhost:8765/post-edit-verify \
-  -H 'Content-Type: application/json' \
-  --data-binary @<(jq -n --rawfile diff /tmp/agent.diff '{repo:"backend", diff:$diff}')
+repo-wiki serve
 ```
 
-Remote callers should pass either `diff` or `changed_files` for pre-commit validation. Without that payload, the server can only analyze committed/indexed repository state.
+Or route MCP through a multi-repository REST deployment:
 
-## MCP Flow
+```bash
+repo-wiki serve --api http://localhost:7654
+```
 
-For Codex, Claude, Cursor, or other MCP clients:
+Primary tools:
 
-1. Call `agent_capabilities_manifest_tool` to discover available tools.
-2. Locate code with `locate_from_error_tool`, `search_symbols_tool`, or `resolve_symbol_tool`.
-3. Read context with `get_edit_context_tool`.
-4. Plan with `impact_analysis_tool` and `change_plan_tool`.
-5. After editing, call `post_edit_verify_tool`.
-6. If the index looks stale or incomplete, call `diagnose_index_tool`.
+- `get_index_status_tool`: establish generation and freshness.
+- `search_symbols_tool`: retrieve ranked matches and related graph context.
+- `resolve_symbol_tool`: choose an exact component ID.
+- `get_source_context_tool` / `get_edit_context_tool`: fetch bounded source.
+- `trace_call_tool` / `impact_analysis_tool`: inspect dependencies.
+- `find_tests_for_symbol_tool` / `post_edit_verify_tool`: plan validation.
 
-## Machine-Readable Contracts
+Multi-repository MCP search must pass `branch` for any repository with more than one indexed branch.
 
-Two contracts are available:
+## REST example
 
-- `GET /agent-capabilities`: compact tool manifest with examples and next-tool hints.
-- `GET /agent-schema`: OpenAPI 3.1 document with request and response schemas.
+```bash
+curl -sS -X POST http://localhost:7654/search \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "query":"payment callback signature verification",
+    "repo":"backend",
+    "branch":"main",
+    "top_k":8,
+    "expand_depth":1,
+    "retrieval":"preferred"
+  }'
+```
 
-These endpoints let remote Agents discover how to call repo-wiki without scraping prose docs.
+Record these response fields in the agent trace:
 
-## Index Health
+- `search_metrics[].repo` and `branch`
+- `search_metrics[].generation` and `tree_id`
+- `search_metrics[].retrieval` and `degradations`
+- result `id`, file, line range, and score breakdown
 
-`diagnose_index` returns:
+## Health semantics
 
-- `summary`: manifest file count, missing source/wiki counts, stale/removed counts, artifact presence.
-- `checks.manifest`, `checks.wiki_index`, `checks.skill_file`, `checks.vector_db`.
-- `checks.source_files` and `checks.wiki_pages` with sampled missing paths.
-- `checks.consistency` with manifest-to-source/wiki ratios.
-- `checks.freshness` with commit and file freshness status.
+`GET /api/validate/{name}` checks:
+
+- `.indexer.toml`
+- `.indexer/state/repository-index.sqlite3`
+- SQLite page integrity and foreign keys
+- one published generation per registered branch
+- source-tree freshness
+- `wiki/INDEX.md`
+- `.indexer/skills/codebase.md`
+
+Dense enrichment is optional and therefore informational rather than a structural health requirement.
+
+## Drift handling
+
+Before editing, compare the search generation/tree with current status. If they differ, discard previously fetched locations and search again. A component ID can remain textually identical while its implementation or call edges have changed.
+
+## Security
+
+- Keep Git and embedding credentials in environment variables or request-secret fields; never place them in generated Wiki pages.
+- Use `REPO_WIKI_API_KEY` for REST Bearer authentication.
+- Use `WEBHOOK_SECRET` to validate webhook signatures.
+- Source endpoints reject paths that escape the registered repository root.

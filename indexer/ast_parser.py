@@ -1,6 +1,6 @@
 from __future__ import annotations
-import ast, json, hashlib
-from dataclasses import dataclass, field, asdict
+import ast
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from indexer.utils import _rel
@@ -13,6 +13,7 @@ class ASTNode:
     line_start: int
     line_end: int
     docstring: str | None
+    source: str = ""
     imports: list[str] = field(default_factory=list)
     calls: list[str] = field(default_factory=list)
     called_by: list[str] = field(default_factory=list)
@@ -69,33 +70,51 @@ def _entry_point_from_decorators(node: ast.FunctionDef | ast.AsyncFunctionDef) -
             return "cli", ""
     return "", ""
 
-def parse_file(path: Path, repo_root: Path) -> list[ASTNode]:
+
+def _attach_source(nodes: list[ASTNode], source: str) -> list[ASTNode]:
+    """Attach the exact source span to parser results from every language."""
+    lines = source.splitlines()
+    for node in nodes:
+        start = max(1, node.line_start) - 1
+        end = max(start + 1, node.line_end)
+        node.source = "\n".join(lines[start:end])
+    return nodes
+
+def parse_file(path: Path, repo_root: Path, *, strict: bool = False) -> list[ASTNode]:
     suffix = path.suffix.lower()
-    
+
+    try:
+        source = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        if strict:
+            raise
+        return []
+
     if suffix in {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}:
         from indexer.js_parser import parse_js_file
-        return parse_js_file(path, repo_root)
+        return _attach_source(parse_js_file(path, repo_root, strict=strict), source)
     
     if suffix == ".go":
         from indexer.go_parser import parse_go_file
-        return parse_go_file(path, repo_root)
+        return _attach_source(parse_go_file(path, repo_root, strict=strict), source)
     
     if suffix == ".rs":
         from indexer.rust_parser import parse_rust_file
-        return parse_rust_file(path, repo_root)
+        return _attach_source(parse_rust_file(path, repo_root, strict=strict), source)
 
     if suffix == ".java":
         from indexer.java_parser import parse_java_file
-        return parse_java_file(path, repo_root)
+        return _attach_source(parse_java_file(path, repo_root, strict=strict), source)
 
     if suffix == ".rb":
         from indexer.ruby_parser import parse_ruby_file
-        return parse_ruby_file(path, repo_root)
-    
+        return _attach_source(parse_ruby_file(path, repo_root, strict=strict), source)
+
     try:
-        source = path.read_text(encoding="utf-8", errors="replace")
         tree = ast.parse(source)
-    except (SyntaxError, OSError):
+    except SyntaxError:
+        if strict:
+            raise
         return []
 
     rel_path = _rel(path, repo_root)
@@ -146,29 +165,4 @@ def parse_file(path: Path, repo_root: Path) -> list[ASTNode]:
                     entry_point_path=entry_path,
                 ))
 
-    return nodes
-
-
-def compute_hash_short(path: Path) -> str:
-    try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
-    except OSError:
-        return ""
-
-
-def load_cached_nodes(repo_root: Path, file_hash: str) -> list[ASTNode] | None:
-    p = repo_root / ".indexer" / "cache" / f"{file_hash}.json"
-    if not p.exists():
-        return None
-    try:
-        data = json.loads(p.read_text())
-        return [ASTNode(**n) for n in data]
-    except (json.JSONDecodeError, TypeError, KeyError):
-        return None
-
-
-def save_cached_nodes(repo_root: Path, file_hash: str, nodes: list[ASTNode]) -> None:
-    from indexer.cache import _atomic_write_json
-    p = repo_root / ".indexer" / "cache" / f"{file_hash}.json"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write_json(p, [asdict(n) for n in nodes])
+    return _attach_source(nodes, source)

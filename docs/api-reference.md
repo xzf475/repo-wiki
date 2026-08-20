@@ -1,712 +1,208 @@
 # repo-wiki API Reference
 
-## Overview
-
-repo-wiki REST API provides remote semantic code search across multiple repositories. It supports three usage modes:
-
-1. **Pre-register local repos** — register already-indexed repos on server startup
-2. **Register remote repos** — clone, index, and register repos via API
-3. **MCP protocol** — for AI agents (Claude Code, Cursor, Windsurf)
-
-## Quick Start
+The REST adapter exposes the same published repository generations used by CLI and MCP. Start it with:
 
 ```bash
-# Start the API server
-repo-wiki serve-api --repos-dir /data/repos --port 8765
-
-# Or with pre-registered local repos
-repo-wiki serve-api --repo backend=/path/to/backend --repo frontend=/path/to/frontend --port 8765
-
-# Auto-detect repos in current directory
-repo-wiki serve-api --auto-detect --repos-dir /data/repos
+repo-wiki serve-api --host 0.0.0.0 --port 7654
 ```
 
-## Base URL
+All JSON write requests use `Content-Type: application/json`. If `REPO_WIKI_API_KEY` is set, send `Authorization: Bearer <key>`.
 
-```
-http://{host}:{port}
-```
+## Repository lifecycle
 
-Default: `http://0.0.0.0:8765`
+### `POST /register`
 
----
-
-## Endpoints
-
-### POST /register
-
-Clone a remote repository, index it, and register it for search.
-
-**Request Body:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `url` | string | Yes | Git repository URL (HTTPS) |
-| `name` | string | No | Custom repo name. Auto-detected from URL if omitted |
-| `username` | string | No | Username for private repos |
-| `password` | string | No | Password for private repos |
-| `token` | string | No | Personal access token (GitHub PAT, GitLab token, etc.) |
-| `branch` | string | No | Branch to checkout. Default: repo's default branch |
-| `skip_deep` | bool | No | Skip deep enrichment (narrative, flows, constraints). Default: `true` |
-| `force_reindex` | bool | No | Force re-index if repo already registered. Default: `false` |
-
-**Authentication Priority:** `token` > `username+password` > no auth
-
-Credential handling:
-- Credentials are injected into the URL for clone/pull operations
-- After clone, credentials are stored in git credential helper (not in the URL)
-- This enables automatic updates on subsequent pull/fetch operations
-
-**Examples:**
-
-```bash
-# Public repo (no auth)
-curl -X POST http://localhost:8765/register \
-  -H "Content-Type: application/json" \
-  -d '{"url": "https://github.com/org/public-repo.git"}'
-
-# GitHub with Personal Access Token
-curl -X POST http://localhost:8765/register \
-  -H "Content-Type: application/json" \
-  -d '{"url": "https://github.com/org/private-repo.git", "token": "ghp_xxxxxxxxxxxx"}'
-
-# GitLab with username + password
-curl -X POST http://localhost:8765/register \
-  -H "Content-Type: application/json" \
-  -d '{"url": "https://gitlab.com/team/api.git", "username": "myuser", "password": "mypass"}'
-
-# Specify branch and custom name
-curl -X POST http://localhost:8765/register \
-  -H "Content-Type: application/json" \
-  -d '{"url": "https://github.com/org/frontend.git", "name": "web-app", "branch": "develop"}'
-
-# Force re-index an existing repo
-curl -X POST http://localhost:8765/register \
-  -H "Content-Type: application/json" \
-  -d '{"url": "https://github.com/org/backend.git", "force_reindex": true, "skip_deep": false}'
-```
-
-**Response (200):**
+Clone, register, synchronize, and project a repository asynchronously.
 
 ```json
 {
-  "name": "backend",
-  "path": "/data/repos/backend",
   "url": "https://github.com/org/backend.git",
-  "has_vector_db": true,
-  "symbol_count": 142,
-  "indexed": true
-}
-```
-
-**Error Responses:**
-
-| Status | Condition |
-|--------|-----------|
-| 400 | `url` field is missing |
-| 409 | Repo already registered (use `force_reindex: true` to override) |
-| 500 | git clone failed, git pull timed out, or indexing failed |
-
-Error messages are sanitized — credentials (token, username, password) and the original URL are replaced with `<REDACTED_xxx>` markers.
-
----
-
-### POST /unregister
-
-Remove a repo from the registry (does not delete the cloned files).
-
-**Request Body:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `name` | string | Yes | Repo name to unregister |
-
-**Example:**
-
-```bash
-curl -X POST http://localhost:8765/unregister \
-  -H "Content-Type: application/json" \
-  -d '{"name": "backend"}'
-```
-
-**Response (200):**
-
-```json
-{
   "name": "backend",
-  "unregistered": true
+  "branch": "main",
+  "branch_rule": "release/*",
+  "description": "Order backend",
+  "tags": ["orders", "go"],
+  "token": "optional-secret",
+  "enrich": false
 }
 ```
 
----
+`url` is required. `enrich` must be a boolean and defaults to `false`. Existing registrations return `409`; update them through sync endpoints. Credentials are sanitized from errors and are never returned.
 
-### POST /search
-
-Semantic symbol search across registered repos.
-
-**Request Body:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `query` | string | Yes | Natural language search query |
-| `repo` | string | No | Limit search to a specific repo. Search all repos if omitted |
-| `top_k` | int | No | Number of results per repo. Default: `10` |
-| `expand_depth` | int | No | Call graph expansion depth (0=no expansion, 1=direct callers/callees). Default: `1` |
-
-**Examples:**
-
-```bash
-# Search across all repos
-curl -X POST http://localhost:8765/search \
-  -H "Content-Type: application/json" \
-  -d '{"query": "JWT token validation error"}'
-
-# Search in a specific repo
-curl -X POST http://localhost:8765/search \
-  -H "Content-Type: application/json" \
-  -d '{"query": "authentication middleware", "repo": "backend", "top_k": 5}'
-
-# Search without call graph expansion (faster)
-curl -X POST http://localhost:8765/search \
-  -H "Content-Type: application/json" \
-  -d '{"query": "database connection pool", "expand_depth": 0}'
-```
-
-**Response (200):**
+Response:
 
 ```json
 {
-  "results": [
-    {
-      "id": "auth/token.py::TokenValidator.validate",
-      "document": "[method] auth/token.py::TokenValidator.validate | Validates JWT tokens...",
-      "metadata": {
-        "type": "method",
-        "file": "auth/token.py",
-        "line_start": 45,
-        "line_end": 67,
-        "calls": "[\"decode\",\"fetch_keys\"]",
-        "called_by": "[\"require_auth\"]",
-        "imports": "[\"jwt\",\"requests\"]"
-      },
-      "distance": 0.231,
-      "repo": "backend"
-    }
-  ],
-  "total": 5
+  "task_id": "...",
+  "name": "backend",
+  "status": "pending",
+  "branches": ["main"]
 }
 ```
 
-The `distance` field is cosine distance (lower = more relevant).
+### `POST /sync`
 
----
+Synchronize one branch from an immutable Git ref. A branch not yet registered is appended to the repository registration.
 
-### POST /trace
-
-Trace the call graph from a symbol, following calls downstream or callers upstream.
-
-**Request Body:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `symbol_id` | string | Yes | Component ID (e.g. `auth/token.py::TokenValidator.validate`) |
-| `direction` | string | No | `"down"` (follow calls) or `"up"` (follow callers). Default: `"down"` |
-| `max_depth` | int | No | Maximum hops. Default: `3` |
-| `repo` | string | No | Limit trace to a specific repo |
-
-**Examples:**
-
-```bash
-# Trace downstream — what does this function call?
-curl -X POST http://localhost:8765/trace \
-  -H "Content-Type: application/json" \
-  -d '{"symbol_id": "auth/token.py::TokenValidator.validate", "direction": "down"}'
-
-# Trace upstream — who calls this function?
-curl -X POST http://localhost:8765/trace \
-  -H "Content-Type: application/json" \
-  -d '{"symbol_id": "auth/token.py::TokenValidator.validate", "direction": "up", "max_depth": 5}'
-
-# Trace in a specific repo
-curl -X POST http://localhost:8765/trace \
-  -H "Content-Type: application/json" \
-  -d '{"symbol_id": "auth.py::require_auth", "direction": "up", "repo": "backend"}'
+```json
+{"name":"backend","branch":"main","enrich":false}
 ```
 
-**Response (200):**
+### `POST /sync-all`
+
+Fetch refs once, then synchronize all registered branches without switching the checkout.
+
+```json
+{"name":"backend","enrich":false}
+```
+
+The configured first branch is projected to `wiki/` and `.indexer/skills/codebase.md`; every branch retains its own generation and search scope.
+
+### `POST /api/repo/{name}/sync`
+
+Atomically update repository metadata and synchronize all branches.
 
 ```json
 {
-  "results": [
-    {
-      "id": "auth/token.py::TokenValidator.validate",
-      "document": "[method] Validates JWT tokens using JWKS public keys",
-      "metadata": {
-        "type": "method",
-        "file": "auth/token.py",
-        "line_start": 45,
-        "line_end": 67
-      },
-      "repo": "backend"
-    },
-    {
-      "id": "auth/token.py::TokenValidator.fetch_keys",
-      "document": "[method] Fetches JWKS public keys from Auth0",
-      "metadata": {
-        "type": "method",
-        "file": "auth/token.py",
-        "line_start": 68,
-        "line_end": 82
-      },
-      "repo": "backend"
-    }
-  ],
-  "total": 2
+  "description": "Updated description",
+  "tags": ["orders", "payments"],
+  "branch_rule": "release/*",
+  "enrich": false
 }
 ```
 
----
+### `POST /unregister`
 
-### POST /source
-
-Read source code around specific lines with line numbers.
-
-**Request Body:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `file_path` | string | Yes | Repo-relative file path |
-| `line_start` | int | Yes | Start line number |
-| `line_end` | int | Yes | End line number |
-| `repo` | string | Yes | Repo name |
-| `padding` | int | No | Extra lines before/after the range. Default: `5` |
-
-**Example:**
-
-```bash
-curl -X POST http://localhost:8765/source \
-  -H "Content-Type: application/json" \
-  -d '{"file_path": "auth/token.py", "line_start": 45, "line_end": 67, "repo": "backend"}'
+```json
+{"name":"backend"}
 ```
 
-**Response (200):**
+Removes registry metadata only. Repository files, the SQLite index, and projections are preserved.
+
+### `GET /api/task/{task_id}`
+
+Returns asynchronous task status, progress, step, errors, and the final result.
+
+## Retrieval
+
+### `POST /search`
 
 ```json
 {
-  "file_path": "auth/token.py",
+  "query": "validate JWT token",
   "repo": "backend",
-  "line_start": 45,
-  "line_end": 67,
-  "source": "   40 | class TokenValidator:\n   41 |     \"\"\"Validates JWT tokens using JWKS.\"\"\"\n   42 | \n   45 |     def validate(self, token: str) -> UserClaims:\n   46 |         keys = self.fetch_keys()\n   47 |         decoded = jwt.decode(token, keys, algorithms=[\"RS256\"])\n   48 |         return UserClaims(**decoded)\n   49 |     \n   50 |     def fetch_keys(self) -> dict:\n   51 |         resp = requests.get(JWKS_URL)\n   52 |         return resp.json()[\"keys\"]\n   53 | ",
-  "total_lines": 120
+  "branch": "main",
+  "top_k": 10,
+  "expand_depth": 1,
+  "retrieval": "preferred"
 }
 ```
 
----
+Fields:
 
-### POST /edit-context
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `query` | string | yes | Symbol ID, path, name, or natural-language query |
+| `repo` | string | no | Limit to one registered repository |
+| `branch` | string | conditionally | Required when a selected repository has multiple branches |
+| `top_k` | integer | no | Direct match limit, 1–100 |
+| `expand_depth` | integer | no | Call-graph expansion depth, 0–5 |
+| `retrieval` | enum | no | `local`, `preferred`, or `required` |
 
-Return an edit-ready context bundle for a symbol. This is the preferred endpoint before an Agent modifies code.
+`local` uses Exact + FTS5 + Graph. `preferred` adds dense candidates when a complete enrichment revision exists and degrades to local otherwise. `required` fails if dense retrieval cannot be completed.
 
-**Request Body:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `symbol_id` | string | Yes | Component ID to edit |
-| `repo` | string | Required when multiple repos are registered | Repository name |
-| `padding` | int | No | Source padding lines. Default: `8`, max `50` |
-
-**Response (200):**
+Response shape:
 
 ```json
 {
+  "matches": [{"id":"auth.py::validate_token","repo":"backend","metadata":{"branch":"main"}}],
+  "related": [],
+  "total": 1,
+  "search_metrics": [{
+    "repo": "backend",
+    "branch": "main",
+    "generation": 4,
+    "tree_id": "...",
+    "retrieval": "local",
+    "degradations": ["dense_not_ready"]
+  }]
+}
+```
+
+`matches` are ranked query hits. `related` contains graph expansion and is never mixed into the direct ranking.
+
+### `POST /trace`
+
+```json
+{
+  "symbol_id": "auth.py::validate_token",
   "repo": "backend",
-  "symbol": {"id": "auth/token.py::TokenValidator.validate"},
-  "source": "  45 | def validate(...):",
-  "callers": [],
-  "callees": [],
-  "siblings": [],
-  "candidate_tests": [],
-  "index_status": {
-    "is_stale": false,
-    "indexed_commit": "abc123",
-    "current_commit": "abc123"
-  }
+  "branch": "main",
+  "direction": "up",
+  "max_depth": 3
 }
 ```
 
----
+`direction` is `up` for callers or `down` for callees. Multi-branch repositories require `branch`.
 
-### POST /resolve-symbol
-
-Resolve a query, symbol name, and optional hints into a concrete `component_id`.
-
-**Request Body:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `query` | string | Yes | Natural language query or symbol name |
-| `repo` | string | Required when multiple repos are registered | Repository name |
-| `file_hint` | string | No | File/path fragment to bias ranking |
-| `type_hint` | string | No | Symbol type, such as `function`, `method`, or `class` |
-| `top_k` | int | No | Candidate count. Default: `10`, max `50` |
-
-Response `status` is `resolved`, `ambiguous`, or `not_found`.
-
----
-
-### POST /tests-for-symbol
-
-Find likely test files for a symbol using indexed files, naming conventions, imports, and symbol-name matches.
-
-**Request Body:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `symbol_id` | string | Yes | Component ID |
-| `repo` | string | No | Limit search to a specific repo |
-| `max_results` | int | No | Maximum matches. Default: `10`, max `50` |
-
----
-
-### POST /pre-edit-check
-
-Run pre-edit checks for a symbol before an Agent modifies code.
-
-**Request Body:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `symbol_id` | string | Yes | Component ID |
-| `repo` | string | Required when multiple repos are registered | Repository name |
-
-The response includes index freshness, dirty files, candidate tests, recommended test commands, callers, and callees.
-
----
-
-### POST /impact-analysis
-
-Analyze the likely impact of changing a symbol.
-
-**Request Body:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `symbol_id` | string | Yes | Component ID |
-| `repo` | string | Required when multiple repos are registered | Repository name |
-| `max_depth` | int | No | Transitive call depth. Default: `2`, max `5` |
-
-The response includes direct/indirect callers and callees, likely entry points, candidate tests, affected files, risk points, and index freshness.
-
----
-
-### POST /change-plan
-
-Generate an Agent-ready edit plan for a goal and target symbol.
-
-**Request Body:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `goal` | string | Yes | What the Agent needs to change |
-| `symbol_id` | string | Yes | Target component ID |
-| `repo` | string | Required when multiple repos are registered | Repository name |
-
-The response includes files to read, edit targets, verification commands, candidate tests, risk points, and ordered steps.
-
----
-
-### POST /diagnose-index
-
-Diagnose whether an index is structurally usable.
-
-**Request Body:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `repo` | string | No | Limit diagnosis to a specific repo |
-
-The response checks manifest presence, wiki index, skill file, vector DB, missing source files, missing wiki pages, freshness, and consistency ratios. `summary` includes manifest file count, missing source/wiki counts, stale/removed file counts, and artifact presence.
-
----
-
-### POST /agent-protocol
-
-Return compact fields optimized for Codex/Claude-style Agents.
-
-**Request Body:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `goal` | string | Yes | What the Agent needs to change |
-| `symbol_id` | string | Yes | Target component ID |
-| `repo` | string | Required when multiple repos are registered | Repository name |
-| `protocol` | string | No | Output protocol label, such as `codex` or `claude` |
-
-The response includes `read_these_files`, `edit_targets`, `verify_commands`, `warnings`, and `index_freshness` in a compact schema.
-
----
-
-### POST /locate-from-error
-
-Locate likely code symbols from stack traces, error logs, HTTP paths, or exception text.
-
-**Request Body:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `error_text` | string | Yes | Stack trace, log line, HTTP error, or exception text |
-| `repo` | string | No | Limit lookup to a specific repo |
-| `top_k` | int | No | Candidate count. Default: `10`, max `50` |
-
-The response includes parsed stack frames, HTTP paths, extracted terms, ranked candidates, match reasons, and index freshness.
-
----
-
-### POST /entry-points
-
-List first-class entry points discovered in indexed metadata.
-
-**Request Body:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `repo` | string | No | Limit lookup to a specific repo |
-| `kind` | string | No | Optional kind filter: `api`, `cli`, `event`, `job`, or `webhook` |
-| `max_results` | int | No | Maximum results. Default: `50`, max `200` |
-
-The response includes entry point component IDs, kind, file, line range, document text, and index freshness.
-
----
-
-### POST /post-edit-verify
-
-Generate pre-commit verification guidance from edited files.
-
-Local MCP mode reads `git diff` automatically when `diff` is omitted. Remote API/MCP mode should pass the local diff payload, because the remote server cannot see uncommitted local edits.
-
-**Request Body:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `repo` | string | Required when multiple repos are registered | Repository name |
-| `diff` | string | No | Local `git diff` text. Required for remote callers that need local uncommitted changes analyzed |
-| `changed_files` | string[] | No | Optional changed file list when diff is unavailable |
-
-The response includes changed files, changed symbols, candidate tests, recommended verification commands, risk points, index freshness, whether reindexing is needed, and a checklist.
-
-Diff payloads are capped by `REPO_WIKI_MAX_DIFF_BYTES` (default 2 MiB). Oversized diffs return HTTP 413.
-
----
-
-### POST /change-set
-
-Build the must-change set for an Agent task.
-
-Remote callers should pass `diff` when the change is still local and uncommitted.
-
-**Request Body:** `repo`, `goal`, optional `symbol_id`, optional `diff`, optional `changed_files`, optional `max_results`, optional `include_details`.
-
-Returns target symbols, files that should be considered together, related symbols, candidate tests, verification commands, risks, and freshness.
-
-Large responses are capped by `max_results`. Set `include_details=false` for summary-first Agent handoffs.
-
----
-
-### POST /coverage-map
-
-Map source symbols to likely covering tests.
-
-**Request Body:** `repo`, optional `symbol_id`.
-
-When `symbol_id` is provided, returns whether that symbol appears covered and the likely tests. Without `symbol_id`, returns a repo-wide symbol coverage map.
-
----
-
-### POST /index-diff-report
-
-Compare two index snapshots.
-
-**Request Body:** `repo`, `before_nodes`, `after_nodes`.
-
-Returns added/removed/changed symbols, rename/move matches via stable IDs, entry point changes, and call graph edge changes.
-
----
-
-### POST /cross-repo-graph
-
-Build a cross-repo dependency graph across registered repos.
-
-**Request Body:** optional `repos` list.
-
-Returns edges such as frontend API client symbols pointing to backend route symbols through shared HTTP paths. GraphQL operation names are also linked when the same operation appears in client and server symbols.
-
----
-
-### POST /stable-symbol-id
-
-Generate a deterministic stable symbol ID.
-
-**Request Body:** `symbol_id`, optional `symbol_type`, optional `file_path`, optional `source`.
-
-The stable ID is also stored in vector metadata for newly indexed symbols. `index-diff-report` uses stable IDs to report rename/move events instead of treating them only as delete+add.
-
----
-
-### GET /agent-capabilities
-
-Return the Agent-facing tool manifest and recommended local/remote flow. Each tool entry includes modes, JSON input schema, output schema, example input, and recommended next tools. The response also embeds `json_schema` for validating the manifest itself.
-
----
-
-### GET /agent-schema
-
-Return an OpenAPI 3.1 document for Agent-facing endpoints.
-
-The schema includes request examples and response schemas for `/search`, `/resolve-symbol`, `/impact-analysis`, `/change-plan`, `/post-edit-verify`, `/change-set`, `/coverage-map`, `/index-diff-report`, `/cross-repo-graph`, and `/agent-capabilities`.
-
----
-
-### POST /index-status
-
-Report whether registered indexes are stale relative to the current workspace.
-
-**Request Body:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `repo` | string | No | Limit status to a specific repo |
-
-The response includes `is_stale`, `reasons`, indexed/current commits, stale files, removed files, and counts.
-
----
-
-### GET /repos
-
-List all registered repos and their status.
-
-**Example:**
-
-```bash
-curl http://localhost:8765/repos
-```
-
-**Response (200):**
+### `POST /source`
 
 ```json
-{
-  "repos": [
-    {
-      "name": "backend",
-      "path": "/data/repos/backend",
-      "has_vector_db": true,
-      "symbol_count": 142
-    },
-    {
-      "name": "frontend",
-      "path": "/data/repos/frontend",
-      "has_vector_db": true,
-      "symbol_count": 87
-    }
-  ]
-}
+{"repo":"backend","file":"auth.py","line_start":10,"line_end":40,"padding":5}
 ```
 
----
+Returns bounded source context. Paths are validated against the repository root.
 
-### GET /health
+## Status and projections
 
-Health check endpoint.
+| Path | Method | Result |
+|---|---|---|
+| `/repos` | GET | Registered repositories, branches, generations, trees, dense readiness |
+| `/api/repo/{name}` | GET | Repository metadata, branch generation details, Wiki page list |
+| `/api/repo/{name}/wiki/{page}` | GET | One generated Wiki page |
+| `/api/validate/{name}` | GET | Config/projection presence, branch freshness, SQLite integrity |
+| `/index-status` | POST | Generation, indexed/current tree, stale and removed files |
+| `/health` | GET | REST process health |
+| `/skill` | GET | Combined multi-repository Agent skill |
 
-**Example:**
+Validation health does not require dense enrichment. It requires a valid SQLite database, published branch generations, current structural state, and generated Wiki/skill projections.
 
-```bash
-curl http://localhost:8765/health
+## Agent endpoints
+
+These endpoints derive results from the same generation-aware retrieval facade:
+
+| Path | Purpose |
+|---|---|
+| `/edit-context` | Exact symbol context for editing |
+| `/resolve-symbol` | Resolve an ambiguous symbol query |
+| `/tests-for-symbol` | Locate candidate tests |
+| `/pre-edit-check` | Preconditions and impact before editing |
+| `/impact-analysis` | Upstream/downstream impact |
+| `/change-plan` | Generate a repository-aware change plan |
+| `/diagnose-index` | Diagnose generation, projection, and freshness state |
+| `/agent-protocol` | Bundle context for a coding-agent protocol |
+| `/locate-from-error` | Locate symbols from error text |
+| `/entry-points` | List discovered entry points |
+| `/post-edit-verify` | Suggest verification from a diff |
+| `/change-set` | Build a scoped change set |
+| `/coverage-map` | Map symbols to test coverage candidates |
+| `/index-diff-report` | Compare symbol snapshots |
+| `/cross-repo-graph` | Aggregate relations across repositories |
+| `/stable-symbol-id` | Normalize a component ID |
+| `/agent-capabilities` | Machine-readable tool catalog |
+| `/agent-schema` | JSON/OpenAPI-style contracts |
+
+## Component IDs
+
+Component IDs are stable within a repository tree:
+
+```text
+relative/path.py::ClassName.method_name
+relative/path.go::FunctionName
 ```
 
-**Response (200):**
+Always pair a component ID with repository and branch scope in multi-repository clients.
 
-```json
-{
-  "status": "ok",
-  "repos": 2
-}
-```
+## Errors
 
----
-
-## BUG Analysis Workflow
-
-The typical flow for automated bug analysis and fix:
-
-```
-1. POST /register   →  Bind the relevant repo(s)
-2. POST /search     →  Find symbols related to the bug description
-3. POST /trace      →  Trace the call chain (upstream = who triggers the bug, downstream = what it affects)
-4. POST /source     →  Read the exact code at the bug location
-5. Apply fix        →  Your automated fix pipeline reads the source and generates a patch
-```
-
-**Example: Bug "Auth0 JWT validation fails with expired tokens"**
-
-```bash
-# Step 1: Register repos (if not already done)
-curl -X POST http://localhost:8765/register \
-  -d '{"url": "https://github.com/org/backend.git", "token": "ghp_xxx"}'
-
-# Step 2: Search for relevant symbols
-curl -X POST http://localhost:8765/search \
-  -d '{"query": "JWT token validation expired error", "top_k": 5}'
-
-# Step 3: Trace upstream — who triggers this code?
-curl -X POST http://localhost:8765/trace \
-  -d '{"symbol_id": "auth/token.py::TokenValidator.validate", "direction": "up", "max_depth": 4}'
-
-# Step 4: Read the exact code
-curl -X POST http://localhost:8765/source \
-  -d '{"file_path": "auth/token.py", "line_start": 45, "line_end": 67, "repo": "backend"}'
-
-# Step 5: AI generates fix based on the code context
-```
-
----
-
-## Component ID Format
-
-Symbol identifiers follow this pattern:
-
-```
-relative/path.py::ClassName.method_name    ← method
-relative/path.py::ClassName                ← class
-relative/path.py::function_name            ← top-level function
-```
-
-For JS/TS files:
-
-```
-src/auth/tokenValidator.ts::TokenValidator.validate
-src/utils/helpers.ts::formatDate
-```
-
----
-
-## Configuration
-
-The API server reads per-repo `.indexer.toml` config files. Global defaults:
-
-```toml
-[embedding]
-provider = "dashscope/text-embedding-v4"
-api_key_env = "DASHSCOPE_API_KEY"
-base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-dimensions = 1024
-
-[vector_store]
-backend = "chromadb"
-persist_dir = ".indexer/vector_db"
-collection_name = "repo-wiki_code"
-```
-
-Environment variables required:
-- `DASHSCOPE_API_KEY` — for embedding generation (百炼平台)
-- `ANTHROPIC_API_KEY` or equivalent — for LLM descriptions (only during indexing)
+Errors are JSON objects with an `error` message. Index failures use stable categories internally, including `SOURCE_UNAVAILABLE`, `PARSE_FAILED`, `SYNC_CONFLICT`, `STORE_BUSY`, `STORE_CORRUPT`, `INDEX_NOT_FOUND`, `ENRICHMENT_FAILED`, and `HYBRID_REQUIRED_UNAVAILABLE`.
