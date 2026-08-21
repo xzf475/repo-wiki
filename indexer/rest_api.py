@@ -341,7 +341,11 @@ async def sync_all_branches(request: Request) -> JSONResponse:
     branches = info.get("branches", [])
     branch_rule = info.get("branch_rule", "")
     if branch_rule and info.get("url"):
-        discovered = _discover_remote_branches(info["url"], branch_rule)
+        discovered = _discover_remote_branches(
+            info["url"],
+            branch_rule,
+            cwd=Path(info["root"]),
+        )
         if discovered:
             branches = discovered
             registry.register(name, info["root"], url=info.get("url", ""), branches=branches, branch_rule=branch_rule)
@@ -380,21 +384,44 @@ async def update_repo_and_sync(request: Request) -> JSONResponse:
     enrich = body.get("enrich", False)
     if not isinstance(enrich, bool):
         return JSONResponse({"error": "enrich must be a boolean"}, status_code=400)
+    if branch_rule is not None and not isinstance(branch_rule, str):
+        return JSONResponse({"error": "branch_rule must be a string"}, status_code=400)
 
-    # 1. Update meta
+    # 1. Validate branch discovery before changing metadata or scheduling work.
+    url = info.get("url", "")
+    discovered_branches: list[str] | None = None
+    if branch_rule:
+        if not url:
+            return JSONResponse({"error": "branch_rule requires a remote repository URL"}, status_code=400)
+        discovered_branches = _discover_remote_branches(
+            url,
+            branch_rule,
+            cwd=Path(info["root"]),
+        )
+        if not discovered_branches:
+            return JSONResponse(
+                {"error": f"no remote branches match pattern '{branch_rule}'"},
+                status_code=400,
+            )
+
+    # 2. Update meta
     if description is not None or tags is not None or branch_rule is not None:
         registry.update_meta(repo_name, description=description, tags=tags, branch_rule=branch_rule)
 
-    # 2. Re-discover branches if branch_rule changed
-    url = info.get("url", "")
-    if branch_rule is not None and url:
-        discovered = _discover_remote_branches(url, branch_rule)
-        if discovered:
-            registry.register(repo_name, info["root"], url=url, branches=discovered, branch_rule=branch_rule, description=description, tags=tags)
-        else:
-            logger.warning("No branches matched branch_rule '%s' for repo %s", branch_rule, repo_name)
+    # 3. Register the discovered branches.
+    if discovered_branches is not None:
+        updated_meta = registry.get(repo_name) or info
+        registry.register(
+            repo_name,
+            info["root"],
+            url=url,
+            branches=discovered_branches,
+            branch_rule=branch_rule,
+            description=updated_meta.get("description", ""),
+            tags=updated_meta.get("tags", []),
+        )
 
-    # 3. Synchronize all branches
+    # 4. Synchronize all branches
     updated_info = registry.get(repo_name)
     branches_to_sync = updated_info.get("branches", []) if updated_info else []
     if not branches_to_sync:
@@ -592,7 +619,7 @@ def _run_register_task_inner(
         tasks.update(task_id, status="running", progress=35, step="detecting_files")
         # If branch_rule is set, discover and register all matching branches
         if branch_rule and url:
-            discovered = _discover_remote_branches(url, branch_rule)
+            discovered = _discover_remote_branches(url, branch_rule, cwd=clone_dir)
             if discovered:
                 configured_branches = discovered
             else:
@@ -1434,7 +1461,11 @@ async def repo_detail(request: Request) -> JSONResponse:
 
     if branch_rule and info.get("url"):
         try:
-            discovered = _discover_remote_branches(info["url"], branch_rule)
+            discovered = _discover_remote_branches(
+                info["url"],
+                branch_rule,
+                cwd=Path(info["root"]),
+            )
             registered_set = set(branches)
             for br in discovered:
                 if br not in registered_set:

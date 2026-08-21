@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import threading
 from pathlib import Path
 
 from starlette.testclient import TestClient
@@ -52,6 +53,25 @@ def _repository(tmp_path: Path) -> Path:
     )
     _commit(root, "initial")
     return root
+
+
+def _registered_rest_repo(monkeypatch, tmp_path: Path):
+    from indexer import rest_api
+    from indexer.repo_registry import RepoRegistry
+    from indexer.task_store import TaskStore
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    registry = RepoRegistry(tmp_path / "registry")
+    registry.register(
+        "demo",
+        root,
+        url="https://example.test/demo.git",
+        branches=["main"],
+    )
+    monkeypatch.setattr(rest_api, "registry", registry)
+    monkeypatch.setattr(rest_api, "tasks", TaskStore())
+    return rest_api, registry, root
 
 
 def test_retrieval_and_service_return_the_same_generation_and_order(tmp_path: Path):
@@ -155,6 +175,60 @@ def test_rest_trace_rejects_unknown_branch(monkeypatch, tmp_path: Path):
 
     assert response.status_code == 400
     assert response.json()["repos"] == ["demo"]
+
+
+def test_update_repo_and_sync_discovers_branch_with_repo_credentials(monkeypatch, tmp_path: Path):
+    rest_api, registry, root = _registered_rest_repo(monkeypatch, tmp_path)
+
+    def discover(_url, _pattern, cwd=None, **_kwargs):
+        return ["test"] if cwd == root else []
+
+    scheduled: list[str] = []
+    completed = threading.Event()
+
+    def run_all(_name, branches, _task_id, **_kwargs):
+        scheduled.extend(branches)
+        completed.set()
+
+    monkeypatch.setattr(rest_api, "_discover_remote_branches", discover)
+    monkeypatch.setattr(rest_api, "_run_all_branches", run_all)
+
+    response = TestClient(rest_api.create_app()).post(
+        "/api/repo/demo/sync",
+        json={"branch_rule": "test", "enrich": False},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["branches"] == ["test"]
+    assert completed.wait(1)
+    assert scheduled == ["test"]
+    assert registry.get("demo")["branches"] == ["test"]
+
+
+def test_update_repo_and_sync_rejects_unmatched_rule_without_syncing_old_branches(
+    monkeypatch,
+    tmp_path: Path,
+):
+    rest_api, registry, _root = _registered_rest_repo(monkeypatch, tmp_path)
+    monkeypatch.setattr(rest_api, "_discover_remote_branches", lambda *_args, **_kwargs: [])
+
+    scheduled = threading.Event()
+
+    def run_all(*_args, **_kwargs):
+        scheduled.set()
+
+    monkeypatch.setattr(rest_api, "_run_all_branches", run_all)
+
+    response = TestClient(rest_api.create_app()).post(
+        "/api/repo/demo/sync",
+        json={"branch_rule": "test", "enrich": False},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "no remote branches match pattern 'test'"
+    assert registry.get("demo")["branch_rule"] == ""
+    assert registry.get("demo")["branches"] == ["main"]
+    assert not scheduled.wait(0.1)
 
 
 def test_agent_context_and_diagnostics_read_repository_generation(tmp_path: Path):
