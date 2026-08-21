@@ -499,6 +499,27 @@ def test_typescript_import_type_array_in_generic_publishes(tmp_path: Path):
     assert status.symbols == 1
 
 
+def test_tsx_typeof_import_in_zero_arg_generic_publishes(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "repo-wiki@example.test")
+    _git(repo, "config", "user.name", "repo-wiki test")
+    (repo / "UserCoinGrantPage.test.tsx").write_text(
+        "vi.mock('@/services/adminApi', async (importOriginal) => ({\n"
+        "  ...(await importOriginal<typeof import('@/services/adminApi')>()),\n"
+        "}));\n"
+    )
+    _commit(repo, "valid tsx typeof import type")
+
+    index = _index(tmp_path)
+    report = index.sync(SyncRequest(repo="web", root=repo, branch="main", revision="main"))
+    status = index.inspect(IndexScope("web", "main"))
+
+    assert report.status == "published"
+    assert status.files == 1
+
+
 def test_modern_typescript_type_only_syntax_publishes(tmp_path: Path):
     repo = tmp_path / "repo"
     repo.mkdir()

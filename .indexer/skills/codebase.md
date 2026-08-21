@@ -20,13 +20,13 @@ The wiki captures structure, relationships, and constraints in a fraction of the
 
 ## Stats
 
-- **566 symbols** across **50 files** — indexed 2026-08-20 @ `180b5e62`
+- **568 symbols** across **50 files** — indexed 2026-08-21 @ `1bc8641d`
 - Wiki: `wiki/` — 3 page(s)
 - Index: `.indexer/state/repository-index.sqlite3` — current transactional generation
 
 ## System Overview
 
-repo-wiki:main generation 5 at tree 180b5e62c20c0b9c48543bc7a1fb3f4f5847876f
+repo-wiki:jame/fix-tsx-typeof-import generation 1 at tree 1bc8641d8c8bc6e5050765b7e5cba7192658cb10
 
 ## Wiki Pages
 

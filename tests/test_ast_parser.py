@@ -128,6 +128,17 @@ def test_typescript_runtime_dynamic_import_is_not_normalized(tmp_path):
     assert set(node.calls) == {"then"}
 
 
+def test_tsx_typeof_import_in_zero_arg_generic_call_is_valid(tmp_path):
+    src = tmp_path / "UserCoinGrantPage.test.tsx"
+    src.write_text(
+        "vi.mock('@/services/adminApi', async (importOriginal) => ({\n"
+        "  ...(await importOriginal<typeof import('@/services/adminApi')>()),\n"
+        "}));\n"
+    )
+
+    parse_file(src, tmp_path, strict=True)
+
+
 # ── Rust ──────────────────────────────────────────────────────────────────────
 
 def test_rust_parse_returns_nodes():
