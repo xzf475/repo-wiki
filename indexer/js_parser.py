@@ -73,10 +73,14 @@ _GENERIC_IMPORT_PREFIX = re.compile(
     rb"(?:[A-Za-z_$][A-Za-z0-9_$]*)"
     rb"(?:\s*\.\s*[A-Za-z_$][A-Za-z0-9_$]*)*<\s*$"
 )
+_GENERIC_TYPEOF_IMPORT_PREFIX = re.compile(
+    rb"(?:[A-Za-z_$][A-Za-z0-9_$]*)"
+    rb"(?:\s*\.\s*[A-Za-z_$][A-Za-z0-9_$]*)*<\s*typeof\s+$"
+)
 _GENERIC_CALL_SUFFIX = re.compile(rb">\s*\(")
 _KEYOF_PREFIX = re.compile(rb"\bkeyof\s*$")
 _TYPESCRIPT_NORMALIZATION_TRIGGER = re.compile(
-    rb"(?:<\s*import\s*\(|\bkeyof\s+import\s*\(|\bexport\s+type\s+\*)"
+    rb"(?:<\s*(?:typeof\s+)?import\s*\(|\bkeyof\s+import\s*\(|\bexport\s+type\s+\*)"
 )
 
 
@@ -101,7 +105,7 @@ def _import_type_expression(node):
         if parent.child_by_field_name("object") != expression:
             break
         expression = parent
-    return expression if expression != node else None
+    return expression
 
 
 def _is_type_only_import(expression, source: bytes) -> bool:
@@ -110,8 +114,10 @@ def _is_type_only_import(expression, source: bytes) -> bool:
         prefix = source[ancestor.start_byte:expression.start_byte]
         if _KEYOF_PREFIX.search(prefix):
             return True
+        suffix = source[expression.end_byte:ancestor.end_byte]
+        if _GENERIC_TYPEOF_IMPORT_PREFIX.search(prefix) and _GENERIC_CALL_SUFFIX.match(suffix):
+            return True
         if ancestor.type == "binary_expression":
-            suffix = source[expression.end_byte:ancestor.end_byte]
             if _GENERIC_IMPORT_PREFIX.search(prefix) and _GENERIC_CALL_SUFFIX.search(suffix):
                 return True
         ancestor = ancestor.parent
