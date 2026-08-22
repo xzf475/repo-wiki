@@ -4,8 +4,10 @@ import subprocess
 import tempfile
 import os
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from uuid import uuid4
 
 
 SUPPORTED_SUFFIXES = frozenset({
@@ -28,6 +30,7 @@ GENERATED_PATHS = (
     ".indexer/state",
     "wiki",
 )
+SNAPSHOT_LEASE_SECONDS = 60 * 60
 
 
 class GitSnapshotError(RuntimeError):
@@ -53,6 +56,7 @@ class GitSnapshot:
     def __init__(self, root: Path):
         self.root = root.resolve()
         self._snapshot_environment: dict[str, str] | None = None
+        self._snapshot_leases: list[Path] = []
 
     def __enter__(self) -> "GitSnapshot":
         return self
@@ -62,6 +66,21 @@ class GitSnapshot:
 
     def close(self) -> None:
         self._snapshot_environment = None
+        self.release_snapshot_leases(tuple(self._snapshot_leases))
+        self._snapshot_leases.clear()
+
+    def detach_snapshot_leases(self) -> tuple[Path, ...]:
+        leases = tuple(self._snapshot_leases)
+        self._snapshot_leases.clear()
+        return leases
+
+    @staticmethod
+    def release_snapshot_leases(leases: tuple[Path, ...]) -> None:
+        for lease in leases:
+            try:
+                lease.unlink(missing_ok=True)
+            except OSError:
+                continue
 
     def resolve_tree(self, revision: str) -> str:
         if not revision.strip():
@@ -157,8 +176,15 @@ class GitSnapshot:
     def prune_snapshots(self, retained_tree_ids: tuple[str, ...]) -> int:
         """Remove loose synthetic objects unreachable from retained generations."""
         snapshot_objects = self.root / ".indexer" / "state" / "git-objects"
-        if not snapshot_objects.exists() or not retained_tree_ids:
+        if not snapshot_objects.exists():
             return 0
+        leased_tree_ids = self._active_snapshot_leases()
+        if leased_tree_ids is None:
+            return 0
+        retained_tree_ids = tuple(dict.fromkeys((
+            *retained_tree_ids,
+            *leased_tree_ids,
+        )))
         before = sum(path.is_file() for path in snapshot_objects.rglob("*"))
         environment = self._object_environment()
         self._run_bytes(
@@ -167,6 +193,27 @@ class GitSnapshot:
         )
         after = sum(path.is_file() for path in snapshot_objects.rglob("*"))
         return max(0, before - after)
+
+    def _active_snapshot_leases(self) -> tuple[str, ...] | None:
+        lease_root = self.root / ".indexer" / "state" / "git-object-leases"
+        if not lease_root.exists():
+            return ()
+        now = time.time()
+        tree_ids: list[str] = []
+        for lease in lease_root.iterdir():
+            if not lease.is_file():
+                continue
+            try:
+                if now - lease.stat().st_mtime > SNAPSHOT_LEASE_SECONDS:
+                    lease.unlink(missing_ok=True)
+                    continue
+                tree_id = lease.read_text().strip()
+            except OSError:
+                continue
+            if not tree_id:
+                return None
+            tree_ids.append(tree_id)
+        return tuple(dict.fromkeys(tree_ids))
 
     def _list_tree(self, tree_id: str, pathspecs: list[str] | None = None) -> list[TreeEntry]:
         args = ["ls-tree", "-r", "-z", "--full-tree", tree_id]
@@ -203,6 +250,7 @@ class GitSnapshot:
 
     def _capture_worktree_tree(self) -> str:
         self.close()
+        lease = self._begin_snapshot_lease()
         object_environment = self._object_environment()
         self._snapshot_environment = object_environment
         with tempfile.TemporaryDirectory(prefix="repo-wiki-index-") as directory:
@@ -219,10 +267,12 @@ class GitSnapshot:
             ).decode("ascii", errors="replace").strip()
         if not tree_id:
             raise GitSnapshotError("unable to capture worktree tree")
+        lease.write_text(tree_id)
         return tree_id
 
     def _capture_staged_tree(self) -> str:
         self.close()
+        lease = self._begin_snapshot_lease()
         raw_index_path = Path(
             self._run_text(["rev-parse", "--git-path", "index"]).strip()
         )
@@ -249,7 +299,16 @@ class GitSnapshot:
             ).decode("ascii", errors="replace").strip()
         if not tree_id:
             raise GitSnapshotError("unable to capture staged tree")
+        lease.write_text(tree_id)
         return tree_id
+
+    def _begin_snapshot_lease(self) -> Path:
+        lease_root = self.root / ".indexer" / "state" / "git-object-leases"
+        lease_root.mkdir(parents=True, exist_ok=True)
+        lease = lease_root / uuid4().hex
+        lease.touch(exist_ok=False)
+        self._snapshot_leases.append(lease)
+        return lease
 
     def _object_environment(self) -> dict[str, str]:
         snapshot_objects = self.root / ".indexer" / "state" / "git-objects"

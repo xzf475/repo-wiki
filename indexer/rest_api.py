@@ -290,19 +290,21 @@ def _run_all_branches(
             )
             service = RepositoryService(name, root, branch, config=load_config(root))
             result = service.sync(enrich=enrich)
-            status = service.index.inspect(service.scope)
+            status = service.index.inspect(service.scope, resolve_relations=False)
             branch_results[branch] = {
                 **result,
                 "files": status.files,
                 "symbols": status.symbols,
             }
-        tasks.update(task_id, status="running", progress=95, step="project")
-        projection = RepositoryService(
+        projection_service = RepositoryService(
             name,
             root,
             branches[0],
             config=load_config(root),
-        ).project()
+        )
+        reconciliation = projection_service.reconcile_branches(branches)
+        tasks.update(task_id, status="running", progress=95, step="project")
+        projection = projection_service.project()
         tasks.update(task_id, status="completed", progress=100, step="complete", result={
             "name": name,
             "path": str(root),
@@ -310,6 +312,13 @@ def _run_all_branches(
             "skipped_branches": [],
             "max_concurrency": 1,
             "branches": branch_results,
+            "removed_branches": list(reconciliation["removed_branches"]),
+            "storage_reclamation": {
+                "snapshots": reconciliation["deleted_snapshots"],
+                "artifacts": reconciliation["deleted_artifacts"],
+                "embeddings": reconciliation["deleted_embeddings"],
+                "pages": reconciliation["reclaimed_pages"],
+            },
             "projection_branch": branches[0],
             "projection": projection,
             "symbol_count": sum(item["symbols"] for item in branch_results.values()),
@@ -346,9 +355,13 @@ async def sync_all_branches(request: Request) -> JSONResponse:
             branch_rule,
             cwd=Path(info["root"]),
         )
-        if discovered:
-            branches = discovered
-            registry.register(name, info["root"], url=info.get("url", ""), branches=branches, branch_rule=branch_rule)
+        if not discovered:
+            return JSONResponse(
+                {"error": f"no remote branches match pattern '{branch_rule}'"},
+                status_code=400,
+            )
+        branches = discovered
+        registry.register(name, info["root"], url=info.get("url", ""), branches=branches, branch_rule=branch_rule)
 
     if not branches:
         return JSONResponse({"error": f"no branches to sync for '{name}'"}, status_code=400)

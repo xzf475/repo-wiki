@@ -76,6 +76,37 @@ def run_repository_index_benchmark(
                     """
                 ).fetchone()[0])
 
+            _git(repo, "checkout", "-b", "feature")
+            (repo / "module_00000.py").write_text(
+                "def feature_handler():\n"
+                "    \"\"\"Handle a feature-only customer record.\"\"\"\n"
+                "    return 2000000\n",
+                encoding="utf-8",
+            )
+            _commit(repo, "feature update")
+            feature = repository_index.sync(SyncRequest(
+                "benchmark", repo, "feature", "feature"
+            ))
+            with sqlite3.connect(database) as connection:
+                feature_snapshot_id = int(connection.execute(
+                    """
+                    SELECT g.snapshot_id
+                    FROM branch_heads AS h
+                    JOIN generations AS g ON g.id = h.generation_id
+                    WHERE h.repo_id = 'benchmark' AND h.branch = 'feature'
+                    """
+                ).fetchone()[0])
+                feature_overlay_rows = int(connection.execute(
+                    "SELECT COUNT(*) FROM snapshot_changes WHERE snapshot_id = ?",
+                    (feature_snapshot_id,),
+                ).fetchone()[0])
+                artifact_documents = int(connection.execute(
+                    "SELECT COUNT(*) FROM artifact_documents"
+                ).fetchone()[0])
+                fts_documents = int(connection.execute(
+                    "SELECT COUNT(*) FROM artifact_documents_fts"
+                ).fetchone()[0])
+
             rows.append({
                 "files": size,
                 "full": _sync_metrics(full),
@@ -87,6 +118,12 @@ def run_repository_index_benchmark(
                 "parse_artifacts": parse_artifacts,
                 "generations": generations,
                 "latest_generation_changes": latest_changes,
+                "feature_overlay": {
+                    **_sync_metrics(feature),
+                    "snapshot_changes": feature_overlay_rows,
+                    "artifact_documents": artifact_documents,
+                    "fts_documents": fts_documents,
+                },
             })
     return rows
 

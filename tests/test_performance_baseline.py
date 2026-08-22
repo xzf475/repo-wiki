@@ -17,6 +17,11 @@ def test_repository_index_generation_cost_scales_with_delta():
         assert row["unchanged"]["tree_entries_scanned"] == 0
         assert row["latest_generation_changes"] == 1
         assert row["generations"] == 2
-        assert row["parse_artifacts"] == row["files"]
+        assert row["parse_artifacts"] == row["files"] + 1
+        assert row["feature_overlay"]["parsed_blobs"] == 1
+        assert row["feature_overlay"]["reused_blobs"] == row["files"] - 1
+        assert row["feature_overlay"]["snapshot_changes"] == 1
+        assert row["feature_overlay"]["artifact_documents"] == row["files"] + 2
+        assert row["feature_overlay"]["fts_documents"] == row["files"] + 2
         assert row["query_p95_ms"] < 500
         assert row["database_bytes"] > 0

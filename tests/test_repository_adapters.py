@@ -231,6 +231,31 @@ def test_update_repo_and_sync_rejects_unmatched_rule_without_syncing_old_branche
     assert not scheduled.wait(0.1)
 
 
+def test_sync_all_rejects_unmatched_rule_instead_of_reusing_old_branches(
+    monkeypatch,
+    tmp_path: Path,
+):
+    rest_api, registry, _root = _registered_rest_repo(monkeypatch, tmp_path)
+    registry.update_meta("demo", branch_rule="test")
+    monkeypatch.setattr(rest_api, "_discover_remote_branches", lambda *_args, **_kwargs: [])
+    scheduled = threading.Event()
+
+    def run_all(*_args, **_kwargs):
+        scheduled.set()
+
+    monkeypatch.setattr(rest_api, "_run_all_branches", run_all)
+
+    response = TestClient(rest_api.create_app()).post(
+        "/sync-all",
+        json={"name": "demo", "enrich": False},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "no remote branches match pattern 'test'"
+    assert registry.get("demo")["branches"] == ["main"]
+    assert not scheduled.wait(0.1)
+
+
 def test_agent_context_and_diagnostics_read_repository_generation(tmp_path: Path):
     from indexer.retrieval import (
         diagnose_index,
@@ -274,6 +299,40 @@ def test_branch_status_isolated_in_same_database(tmp_path: Path):
     feature_status = feature.index.inspect(IndexScope("demo", "feature"))
     assert main_status.generation == feature_status.generation == 1
     assert main_status.tree_id == feature_status.tree_id
+
+
+def test_sync_all_reconciles_index_scopes_removed_by_branch_rule(
+    monkeypatch,
+    tmp_path: Path,
+):
+    from indexer import rest_api
+    from indexer.task_store import TaskStore
+
+    root = _repository(tmp_path)
+    _git(root, "branch", "feature")
+    config = Config()
+    RepositoryService("demo", root, "main", config=config).sync()
+    RepositoryService("demo", root, "feature", config=config).sync()
+    store = TaskStore()
+    monkeypatch.setattr(rest_api, "tasks", store)
+    monkeypatch.setattr(rest_api, "git_fetch_refs", lambda _root: None)
+    task_id = store.create("demo", "")
+
+    rest_api._run_all_branches(
+        "demo",
+        ["main"],
+        task_id,
+        root=root,
+        enrich=False,
+        _skip_lock=True,
+    )
+
+    task = store.get(task_id)
+    assert task["status"] == "completed"
+    assert task["result"]["removed_branches"] == ["feature"]
+    assert RepositoryService(
+        "demo", root, "feature", config=config
+    ).index.inspect(IndexScope("demo", "feature")).exists is False
 
 
 def test_remote_tracking_ref_wins_over_stale_local_branch(tmp_path: Path):

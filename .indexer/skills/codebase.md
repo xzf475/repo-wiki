@@ -20,19 +20,19 @@ The wiki captures structure, relationships, and constraints in a fraction of the
 
 ## Stats
 
-- **573 symbols** across **50 files** — indexed 2026-08-21 @ `85bc1511`
+- **642 symbols** across **50 files** — indexed 2026-08-22 @ `3b9d2373`
 - Wiki: `wiki/` — 3 page(s)
 - Index: `.indexer/state/repository-index.sqlite3` — current transactional generation
 
 ## System Overview
 
-repo-wiki:main generation 7 at tree 85bc15113a61f28bc3befc2f9d0d091c844c54a3
+repo-wiki:jame/artifact-branch-index generation 3 at tree 3b9d23732ec22a3698c22cab765f4d12e5c33725
 
 ## Wiki Pages
 
 | Page | Covers | Key Entry Points |
 |------|--------|-----------------|
-| [indexer](../wiki/indexer.md) | indexer/__init__.py, indexer/agent_context.py, indexer/agent_contracts.py, indexer/agent_diagnostics.py, indexer/agent_diff.py, indexer/agent_graph.py, indexer/agent_protocol.py, indexer/ast_parser.py, indexer/cli.py, indexer/config.py, indexer/embedding.py, indexer/git.py, indexer/git_ops.py, indexer/git_snapshot.py, indexer/go_parser.py, indexer/grouper.py, indexer/hooks.py, indexer/java_parser.py, indexer/js_parser.py, indexer/mcp_server.py, indexer/repo_registry.py, indexer/repository_benchmarks.py, indexer/repository_embedding.py, indexer/repository_index.py, indexer/repository_projection.py, indexer/repository_service.py, indexer/repository_store.py, indexer/rest_api.py, indexer/retrieval.py, indexer/ruby_parser.py, indexer/rust_parser.py, indexer/search_eval.py, indexer/task_store.py, indexer/utils.py, indexer/wiki.py | agent_schema, main, init, status, agent |
+| [indexer](../wiki/indexer.md) | indexer/__init__.py, indexer/agent_context.py, indexer/agent_contracts.py, indexer/agent_diagnostics.py, indexer/agent_diff.py, indexer/agent_graph.py, indexer/agent_protocol.py, indexer/ast_parser.py, indexer/cli.py, indexer/config.py, indexer/embedding.py, indexer/git.py, indexer/git_ops.py, indexer/git_snapshot.py, indexer/go_parser.py, indexer/grouper.py, indexer/hooks.py, indexer/java_parser.py, indexer/js_parser.py, indexer/mcp_server.py, indexer/repo_registry.py, indexer/repository_benchmarks.py, indexer/repository_embedding.py, indexer/repository_index.py, indexer/repository_projection.py, indexer/repository_service.py, indexer/repository_store.py, indexer/rest_api.py, indexer/retrieval.py, indexer/ruby_parser.py, indexer/rust_parser.py, indexer/search_eval.py, indexer/task_store.py, indexer/utils.py, indexer/wiki.py | resolve_symbol, list_entry_points, locate_from_error, agent_schema, stable_symbol_id |
 | [tests](../wiki/tests.md) | tests/__init__.py, tests/test_agent_cli.py, tests/test_api_contracts.py, tests/test_ast_parser.py, tests/test_config.py, tests/test_grouper.py, tests/test_performance_baseline.py, tests/test_repository_adapters.py, tests/test_repository_index.py, tests/test_runtime_safety.py, tests/test_wiki.py | test_agent_capabilities_cli_outputs_contract, test_agent_schema_cli_outputs_openapi_contract, test_agent_context_cli_requires_symbol_id, test_agent_capabilities_all_tools_have_schemas, test_core_tool_contract_top_level_keys |
 | [tests_fixtures](../wiki/tests_fixtures.md) | tests/fixtures/sample_java/App.java, tests/fixtures/sample_py/auth.py, tests/fixtures/sample_ruby/app.rb, tests/fixtures/sample_rust/lib.rs | App, App.addUser, App.getUserCount, UserProfile, UserProfile.getDisplayName |
 

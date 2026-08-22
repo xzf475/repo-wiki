@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 4
+MAX_COMPACT_PAGES = 4096
 
 
 class RepositoryStoreError(RuntimeError):
+    pass
+
+
+class RepositoryStoreVersionError(RepositoryStoreError):
     pass
 
 
@@ -45,21 +51,124 @@ class RepositoryStore:
         finally:
             connection.close()
 
+    def compact(self) -> int:
+        """Return the number of freelist pages reclaimed from this index."""
+        connection = self.connect()
+        try:
+            before = int(connection.execute("PRAGMA freelist_count").fetchone()[0])
+            after = before
+            for _ in range(min(before, MAX_COMPACT_PAGES)):
+                connection.execute("PRAGMA incremental_vacuum(1)")
+                current = int(connection.execute(
+                    "PRAGMA freelist_count"
+                ).fetchone()[0])
+                if current >= after:
+                    break
+                after = current
+            return max(0, before - after)
+        finally:
+            connection.close()
+
     def _initialize(self) -> None:
         connection = self.connect()
         try:
-            connection.execute("PRAGMA journal_mode = WAL")
             version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-            if version not in {0, SCHEMA_VERSION}:
-                raise RepositoryStoreError(
-                    f"unsupported repository index schema {version}; expected {SCHEMA_VERSION}"
+            if version > SCHEMA_VERSION:
+                raise RepositoryStoreVersionError(
+                    f"repository index schema v{version} is newer than supported "
+                    f"v{SCHEMA_VERSION}"
                 )
-            connection.executescript(_SCHEMA)
-            connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            # SQLite may reject a concurrent journal-mode negotiation without
+            # invoking the configured busy handler. Retry only that transient
+            # lock boundary; the remaining schema statements are idempotent.
+            deadline = time.monotonic() + 30
+            while True:
+                try:
+                    connection.execute("PRAGMA journal_mode = WAL")
+                    break
+                except sqlite3.OperationalError as error:
+                    if "locked" not in str(error).lower() or time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.05)
+            connection.execute("PRAGMA foreign_keys = OFF")
+            connection.execute("BEGIN EXCLUSIVE")
+            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if version > SCHEMA_VERSION:
+                raise RepositoryStoreVersionError(
+                    f"repository index schema v{version} is newer than supported "
+                    f"v{SCHEMA_VERSION}"
+                )
+            rebuilt = 0 < version < SCHEMA_VERSION
+            if rebuilt:
+                # Repository indexes are derived entirely from Git. Rebuilding is
+                # safer and simpler than migrating materialized search state.
+                _execute_statements(connection, _DROP_SCHEMA)
+            if version < SCHEMA_VERSION:
+                _execute_statements(connection, _SCHEMA)
+                connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            connection.commit()
+            connection.execute("PRAGMA foreign_keys = ON")
+
+            connection.execute("PRAGMA auto_vacuum = INCREMENTAL")
+            needs_vacuum = (
+                rebuilt
+                or int(connection.execute("PRAGMA auto_vacuum").fetchone()[0]) != 2
+            )
+            if needs_vacuum:
+                # Changing an existing database from NONE to INCREMENTAL is
+                # persisted only by a full VACUUM. This is a one-time schema
+                # initialization cost; later reclamation stays incremental.
+                connection.execute("VACUUM")
+        except RepositoryStoreVersionError:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
         except sqlite3.Error as error:
+            if connection.in_transaction:
+                connection.rollback()
             raise RepositoryStoreError(str(error)) from error
         finally:
             connection.close()
+
+
+def _execute_statements(connection: sqlite3.Connection, script: str) -> None:
+    statement = ""
+    for line in script.splitlines(keepends=True):
+        statement += line
+        if sqlite3.complete_statement(statement):
+            connection.execute(statement)
+            statement = ""
+    if statement.strip():
+        raise RepositoryStoreError("incomplete repository schema statement")
+
+
+_DROP_SCHEMA = """
+DROP TABLE IF EXISTS documents_fts;
+DROP TABLE IF EXISTS artifact_documents_fts;
+DROP TABLE IF EXISTS embedding_buckets;
+DROP TABLE IF EXISTS document_embeddings;
+DROP TABLE IF EXISTS embeddings;
+DROP TABLE IF EXISTS enrichment_heads;
+DROP TABLE IF EXISTS enrichment_jobs;
+DROP TABLE IF EXISTS enrichment_revisions;
+DROP TABLE IF EXISTS relations;
+DROP TABLE IF EXISTS snapshot_relations;
+DROP TABLE IF EXISTS relation_cache_states;
+DROP TABLE IF EXISTS symbol_calls;
+DROP TABLE IF EXISTS documents;
+DROP TABLE IF EXISTS symbols;
+DROP TABLE IF EXISTS files;
+DROP TABLE IF EXISTS snapshot_changes;
+DROP TABLE IF EXISTS artifact_documents;
+DROP TABLE IF EXISTS artifact_calls;
+DROP TABLE IF EXISTS artifact_symbols;
+DROP TABLE IF EXISTS generation_changes;
+DROP TABLE IF EXISTS branch_heads;
+DROP TABLE IF EXISTS generations;
+DROP TABLE IF EXISTS snapshots;
+DROP TABLE IF EXISTS parse_artifacts;
+DROP TABLE IF EXISTS repositories;
+"""
 
 
 _SCHEMA = """
@@ -68,42 +177,6 @@ CREATE TABLE IF NOT EXISTS repositories (
     source_root TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS generations (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    repo_id TEXT NOT NULL,
-    branch TEXT NOT NULL,
-    generation INTEGER NOT NULL,
-    tree_id TEXT NOT NULL,
-    parent_id INTEGER,
-    created_at TEXT NOT NULL,
-    changed_count INTEGER NOT NULL,
-    removed_count INTEGER NOT NULL,
-    parsed_count INTEGER NOT NULL,
-    reused_count INTEGER NOT NULL,
-    UNIQUE(repo_id, branch, generation),
-    UNIQUE(repo_id, branch, tree_id),
-    FOREIGN KEY(repo_id) REFERENCES repositories(repo_id),
-    FOREIGN KEY(parent_id) REFERENCES generations(id)
-);
-
-CREATE TABLE IF NOT EXISTS branch_heads (
-    repo_id TEXT NOT NULL,
-    branch TEXT NOT NULL,
-    generation_id INTEGER NOT NULL,
-    PRIMARY KEY(repo_id, branch),
-    FOREIGN KEY(repo_id) REFERENCES repositories(repo_id),
-    FOREIGN KEY(generation_id) REFERENCES generations(id)
-);
-
-CREATE TABLE IF NOT EXISTS generation_changes (
-    generation_id INTEGER NOT NULL,
-    path TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK(kind IN ('upsert', 'delete')),
-    blob_id TEXT,
-    PRIMARY KEY(generation_id, path),
-    FOREIGN KEY(generation_id) REFERENCES generations(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS parse_artifacts (
@@ -116,28 +189,8 @@ CREATE TABLE IF NOT EXISTS parse_artifacts (
     UNIQUE(blob_id, parser_version, context_hash)
 );
 
-CREATE TABLE IF NOT EXISTS files (
-    repo_id TEXT NOT NULL,
-    branch TEXT NOT NULL,
-    path TEXT NOT NULL,
-    blob_id TEXT NOT NULL,
+CREATE TABLE IF NOT EXISTS artifact_symbols (
     artifact_id TEXT NOT NULL,
-    PRIMARY KEY(repo_id, branch, path),
-    FOREIGN KEY(repo_id) REFERENCES repositories(repo_id),
-    FOREIGN KEY(artifact_id) REFERENCES parse_artifacts(artifact_id)
-);
-
-CREATE INDEX IF NOT EXISTS files_blob_idx
-ON files(blob_id, artifact_id);
-
-CREATE TABLE IF NOT EXISTS symbols (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    repo_id TEXT NOT NULL,
-    branch TEXT NOT NULL,
-    component_id TEXT NOT NULL,
-    component_key TEXT NOT NULL,
-    path TEXT NOT NULL,
-    path_key TEXT NOT NULL,
     local_id TEXT NOT NULL,
     symbol TEXT NOT NULL,
     symbol_key TEXT NOT NULL,
@@ -151,86 +204,162 @@ CREATE TABLE IF NOT EXISTS symbols (
     imports_json TEXT NOT NULL,
     entry_point_kind TEXT NOT NULL,
     entry_point_path TEXT NOT NULL,
-    UNIQUE(repo_id, branch, component_id),
-    FOREIGN KEY(repo_id) REFERENCES repositories(repo_id)
+    PRIMARY KEY(artifact_id, local_id),
+    FOREIGN KEY(artifact_id) REFERENCES parse_artifacts(artifact_id)
+        ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS symbols_path_idx
-ON symbols(repo_id, branch, path);
+CREATE INDEX IF NOT EXISTS artifact_symbols_name_idx
+ON artifact_symbols(short_key, symbol_key);
 
-CREATE INDEX IF NOT EXISTS symbols_name_idx
-ON symbols(repo_id, branch, short_key, symbol_key);
-
-CREATE INDEX IF NOT EXISTS symbols_component_idx
-ON symbols(repo_id, branch, component_key);
-
-CREATE INDEX IF NOT EXISTS symbols_path_key_idx
-ON symbols(repo_id, branch, path_key);
-
-CREATE TABLE IF NOT EXISTS symbol_calls (
-    repo_id TEXT NOT NULL,
-    branch TEXT NOT NULL,
-    caller_id TEXT NOT NULL,
+CREATE TABLE IF NOT EXISTS artifact_calls (
+    artifact_id TEXT NOT NULL,
+    local_id TEXT NOT NULL,
     call_name TEXT NOT NULL,
-    PRIMARY KEY(repo_id, branch, caller_id, call_name)
+    call_key TEXT NOT NULL,
+    PRIMARY KEY(artifact_id, local_id, call_name),
+    FOREIGN KEY(artifact_id, local_id)
+        REFERENCES artifact_symbols(artifact_id, local_id)
+        ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS symbol_calls_name_idx
-ON symbol_calls(repo_id, branch, call_name);
+CREATE INDEX IF NOT EXISTS artifact_calls_name_idx
+ON artifact_calls(call_key);
 
-CREATE TABLE IF NOT EXISTS relations (
-    repo_id TEXT NOT NULL,
-    branch TEXT NOT NULL,
-    caller_id TEXT NOT NULL,
-    callee_id TEXT NOT NULL,
-    kind TEXT NOT NULL,
-    PRIMARY KEY(repo_id, branch, caller_id, callee_id, kind)
-);
-
-CREATE INDEX IF NOT EXISTS relations_callee_idx
-ON relations(repo_id, branch, callee_id, kind);
-
-CREATE TABLE IF NOT EXISTS documents (
+CREATE TABLE IF NOT EXISTS artifact_documents (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    repo_id TEXT NOT NULL,
-    branch TEXT NOT NULL,
-    component_id TEXT NOT NULL,
-    path TEXT NOT NULL,
+    artifact_id TEXT NOT NULL,
+    local_id TEXT NOT NULL,
     symbol TEXT NOT NULL,
     kind TEXT NOT NULL,
     text TEXT NOT NULL,
     content_signature TEXT NOT NULL,
-    UNIQUE(repo_id, branch, component_id)
+    UNIQUE(artifact_id, local_id),
+    FOREIGN KEY(artifact_id, local_id)
+        REFERENCES artifact_symbols(artifact_id, local_id)
+        ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS documents_scope_idx
-ON documents(repo_id, branch, component_id);
+CREATE INDEX IF NOT EXISTS artifact_documents_signature_idx
+ON artifact_documents(content_signature);
 
-CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
-    path,
+CREATE VIRTUAL TABLE IF NOT EXISTS artifact_documents_fts USING fts5(
     symbol,
     text,
-    content='documents',
+    content='artifact_documents',
     content_rowid='id',
     tokenize='unicode61 remove_diacritics 2'
 );
 
-CREATE TRIGGER IF NOT EXISTS documents_ai AFTER INSERT ON documents BEGIN
-    INSERT INTO documents_fts(rowid, path, symbol, text)
-    VALUES (new.id, new.path, new.symbol, new.text);
+CREATE TRIGGER IF NOT EXISTS artifact_documents_ai
+AFTER INSERT ON artifact_documents BEGIN
+    INSERT INTO artifact_documents_fts(rowid, symbol, text)
+    VALUES (new.id, new.symbol, new.text);
 END;
 
-CREATE TRIGGER IF NOT EXISTS documents_ad AFTER DELETE ON documents BEGIN
-    INSERT INTO documents_fts(documents_fts, rowid, path, symbol, text)
-    VALUES ('delete', old.id, old.path, old.symbol, old.text);
+CREATE TRIGGER IF NOT EXISTS artifact_documents_ad
+AFTER DELETE ON artifact_documents BEGIN
+    INSERT INTO artifact_documents_fts(
+        artifact_documents_fts, rowid, symbol, text
+    ) VALUES ('delete', old.id, old.symbol, old.text);
 END;
 
-CREATE TRIGGER IF NOT EXISTS documents_au AFTER UPDATE ON documents BEGIN
-    INSERT INTO documents_fts(documents_fts, rowid, path, symbol, text)
-    VALUES ('delete', old.id, old.path, old.symbol, old.text);
-    INSERT INTO documents_fts(rowid, path, symbol, text)
-    VALUES (new.id, new.path, new.symbol, new.text);
+CREATE TRIGGER IF NOT EXISTS artifact_documents_au
+AFTER UPDATE ON artifact_documents BEGIN
+    INSERT INTO artifact_documents_fts(
+        artifact_documents_fts, rowid, symbol, text
+    ) VALUES ('delete', old.id, old.symbol, old.text);
+    INSERT INTO artifact_documents_fts(rowid, symbol, text)
+    VALUES (new.id, new.symbol, new.text);
 END;
+
+CREATE TABLE IF NOT EXISTS snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo_id TEXT NOT NULL,
+    tree_id TEXT NOT NULL,
+    base_snapshot_id INTEGER,
+    depth INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(repo_id, tree_id),
+    FOREIGN KEY(repo_id) REFERENCES repositories(repo_id) ON DELETE CASCADE,
+    FOREIGN KEY(base_snapshot_id) REFERENCES snapshots(id)
+);
+
+CREATE INDEX IF NOT EXISTS snapshots_base_idx
+ON snapshots(base_snapshot_id);
+
+CREATE TABLE IF NOT EXISTS snapshot_changes (
+    snapshot_id INTEGER NOT NULL,
+    path TEXT NOT NULL,
+    path_key TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('upsert', 'delete')),
+    blob_id TEXT,
+    artifact_id TEXT,
+    PRIMARY KEY(snapshot_id, path),
+    FOREIGN KEY(snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE,
+    FOREIGN KEY(artifact_id) REFERENCES parse_artifacts(artifact_id)
+);
+
+CREATE INDEX IF NOT EXISTS snapshot_changes_artifact_idx
+ON snapshot_changes(snapshot_id, artifact_id);
+
+CREATE INDEX IF NOT EXISTS snapshot_changes_artifact_lookup_idx
+ON snapshot_changes(artifact_id) WHERE artifact_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS generations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo_id TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    tree_id TEXT NOT NULL,
+    snapshot_id INTEGER NOT NULL,
+    parent_id INTEGER,
+    created_at TEXT NOT NULL,
+    changed_count INTEGER NOT NULL,
+    removed_count INTEGER NOT NULL,
+    parsed_count INTEGER NOT NULL,
+    reused_count INTEGER NOT NULL,
+    UNIQUE(repo_id, branch, generation),
+    FOREIGN KEY(repo_id) REFERENCES repositories(repo_id) ON DELETE CASCADE,
+    FOREIGN KEY(snapshot_id) REFERENCES snapshots(id),
+    FOREIGN KEY(parent_id) REFERENCES generations(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS branch_heads (
+    repo_id TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    generation_id INTEGER NOT NULL,
+    PRIMARY KEY(repo_id, branch),
+    FOREIGN KEY(repo_id) REFERENCES repositories(repo_id) ON DELETE CASCADE,
+    FOREIGN KEY(generation_id) REFERENCES generations(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS generation_changes (
+    generation_id INTEGER NOT NULL,
+    path TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('upsert', 'delete')),
+    blob_id TEXT,
+    PRIMARY KEY(generation_id, path),
+    FOREIGN KEY(generation_id) REFERENCES generations(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS relation_cache_states (
+    snapshot_id INTEGER PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS snapshot_relations (
+    snapshot_id INTEGER NOT NULL,
+    caller_id TEXT NOT NULL,
+    callee_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    PRIMARY KEY(snapshot_id, caller_id, callee_id, kind),
+    FOREIGN KEY(snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS snapshot_relations_callee_idx
+ON snapshot_relations(snapshot_id, callee_id, kind);
 
 CREATE TABLE IF NOT EXISTS embeddings (
     content_signature TEXT NOT NULL,
@@ -241,32 +370,19 @@ CREATE TABLE IF NOT EXISTS embeddings (
     PRIMARY KEY(content_signature, model)
 );
 
-CREATE TABLE IF NOT EXISTS document_embeddings (
-    repo_id TEXT NOT NULL,
-    branch TEXT NOT NULL,
-    component_id TEXT NOT NULL,
-    content_signature TEXT NOT NULL,
-    model TEXT NOT NULL,
-    PRIMARY KEY(repo_id, branch, component_id),
-    FOREIGN KEY(content_signature, model)
-        REFERENCES embeddings(content_signature, model)
-);
-
-CREATE INDEX IF NOT EXISTS document_embeddings_signature_idx
-ON document_embeddings(content_signature, model);
-
 CREATE TABLE IF NOT EXISTS embedding_buckets (
-    repo_id TEXT NOT NULL,
-    branch TEXT NOT NULL,
-    component_id TEXT NOT NULL,
+    content_signature TEXT NOT NULL,
     model TEXT NOT NULL,
     table_no INTEGER NOT NULL,
     bucket INTEGER NOT NULL,
-    PRIMARY KEY(repo_id, branch, component_id, model, table_no)
+    PRIMARY KEY(content_signature, model, table_no),
+    FOREIGN KEY(content_signature, model)
+        REFERENCES embeddings(content_signature, model)
+        ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS embedding_buckets_lookup_idx
-ON embedding_buckets(repo_id, branch, model, table_no, bucket);
+ON embedding_buckets(model, table_no, bucket);
 
 CREATE TABLE IF NOT EXISTS enrichment_revisions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -280,7 +396,7 @@ CREATE TABLE IF NOT EXISTS enrichment_revisions (
     created_at TEXT NOT NULL,
     UNIQUE(repo_id, branch, revision),
     UNIQUE(generation_id, model),
-    FOREIGN KEY(generation_id) REFERENCES generations(id)
+    FOREIGN KEY(generation_id) REFERENCES generations(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS enrichment_heads (
@@ -289,6 +405,7 @@ CREATE TABLE IF NOT EXISTS enrichment_heads (
     revision_id INTEGER NOT NULL,
     PRIMARY KEY(repo_id, branch),
     FOREIGN KEY(revision_id) REFERENCES enrichment_revisions(id)
+        ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS enrichment_jobs (
@@ -296,13 +413,16 @@ CREATE TABLE IF NOT EXISTS enrichment_jobs (
     repo_id TEXT NOT NULL,
     branch TEXT NOT NULL,
     generation_id INTEGER NOT NULL,
-    status TEXT NOT NULL CHECK(status IN ('pending', 'running', 'completed', 'failed', 'superseded')),
+    status TEXT NOT NULL CHECK(status IN (
+        'pending', 'running', 'completed', 'failed', 'superseded'
+    )),
     attempts INTEGER NOT NULL DEFAULT 0,
     error TEXT NOT NULL DEFAULT '',
+    owner_token TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     UNIQUE(generation_id),
-    FOREIGN KEY(generation_id) REFERENCES generations(id)
+    FOREIGN KEY(generation_id) REFERENCES generations(id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS enrichment_jobs_status_idx
@@ -310,4 +430,9 @@ ON enrichment_jobs(status, updated_at);
 """
 
 
-__all__ = ["RepositoryStore", "RepositoryStoreError", "SCHEMA_VERSION"]
+__all__ = [
+    "RepositoryStore",
+    "RepositoryStoreError",
+    "RepositoryStoreVersionError",
+    "SCHEMA_VERSION",
+]

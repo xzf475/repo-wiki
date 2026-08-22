@@ -9,13 +9,18 @@ import tempfile
 import time
 from array import array
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
-from typing import Iterable, Protocol, Sequence
+from typing import Callable, Iterable, Protocol, Sequence, TypeVar
+from uuid import uuid4
 
 from indexer.ast_parser import ASTNode, parse_file
 from indexer.git_snapshot import GitSnapshot, GitSnapshotError, TreeDelta, TreeEntry
-from indexer.repository_store import RepositoryStore, RepositoryStoreError
+from indexer.repository_store import (
+    RepositoryStore,
+    RepositoryStoreError,
+    RepositoryStoreVersionError,
+)
 
 
 PARSER_VERSION = "semantic-ast-v1"
@@ -24,7 +29,40 @@ MAX_LIMIT = 100
 LSH_TABLES = 8
 LSH_BITS = 10
 DENSE_CANDIDATE_MULTIPLIER = 8
+MAX_SNAPSHOT_DEPTH = 32
+ENRICHMENT_LEASE_SECONDS = 15 * 60
 RETRIEVAL_MODES = frozenset({"local", "preferred", "required"})
+_T = TypeVar("_T")
+
+_RESOLVED_FILES_CTE = """
+WITH RECURSIVE snapshot_chain(snapshot_id, depth) AS (
+    SELECT ?, 0
+    UNION ALL
+    SELECT s.base_snapshot_id, c.depth + 1
+    FROM snapshots AS s
+    JOIN snapshot_chain AS c ON s.id = c.snapshot_id
+    WHERE s.base_snapshot_id IS NOT NULL
+),
+ranked_files AS (
+    SELECT
+        sc.path,
+        sc.path_key,
+        sc.blob_id,
+        sc.artifact_id,
+        sc.kind,
+        ROW_NUMBER() OVER (
+            PARTITION BY sc.path
+            ORDER BY c.depth
+        ) AS position
+    FROM snapshot_chain AS c
+    JOIN snapshot_changes AS sc ON sc.snapshot_id = c.snapshot_id
+),
+resolved_files AS (
+    SELECT path, path_key, blob_id, artifact_id
+    FROM ranked_files
+    WHERE position = 1 AND kind = 'upsert'
+)
+"""
 
 
 class EmbeddingProvider(Protocol):
@@ -176,8 +214,21 @@ class MaintenanceReport:
     deleted_artifacts: int
     deleted_embeddings: int
     deleted_buckets: int
+    deleted_snapshots: int
     deleted_snapshot_objects: int
+    reclaimed_pages: int
     integrity: IntegrityReport
+
+
+@dataclass(frozen=True)
+class BranchReconcileReport:
+    repo: str
+    active_branches: tuple[str, ...]
+    removed_branches: tuple[str, ...]
+    deleted_snapshots: int
+    deleted_artifacts: int
+    deleted_embeddings: int
+    reclaimed_pages: int
 
 
 @dataclass(frozen=True)
@@ -185,6 +236,14 @@ class _Head:
     generation_id: int
     generation: int
     tree_id: str
+    snapshot_id: int
+
+
+@dataclass(frozen=True)
+class _SnapshotRef:
+    snapshot_id: int
+    tree_id: str
+    depth: int
 
 
 @dataclass(frozen=True)
@@ -214,6 +273,7 @@ class _MaintenanceCounts:
     deleted_artifacts: int
     deleted_embeddings: int
     deleted_buckets: int
+    deleted_snapshots: int
 
 
 class RepositoryIndex:
@@ -233,6 +293,12 @@ class RepositoryIndex:
         self._embedding_provider = embedding_provider
         try:
             self._store = RepositoryStore(database)
+        except RepositoryStoreVersionError as error:
+            raise RepositoryIndexError(
+                "STORE_INCOMPATIBLE",
+                str(error),
+                phase="initialize",
+            ) from error
         except RepositoryStoreError as error:
             raise RepositoryIndexError(
                 "STORE_CORRUPT",
@@ -288,12 +354,36 @@ class RepositoryIndex:
                 )
 
             try:
-                delta = (
+                logical_delta = (
                     snapshot.delta(head.tree_id, tree_id)
                     if head
                     else snapshot.initial_delta(tree_id)
                 )
-                prepared = self._prepare_artifacts(snapshot, delta.changed)
+                existing_snapshot = self._read_snapshot(scope.repo, tree_id)
+                if existing_snapshot is not None:
+                    snapshot_base = None
+                    snapshot_delta = TreeDelta((), (), 0)
+                else:
+                    snapshot_base, snapshot_delta = self._select_snapshot_base(
+                        snapshot,
+                        scope.repo,
+                        tree_id,
+                        head,
+                        logical_delta,
+                    )
+                    if (
+                        snapshot_base is not None
+                        and not snapshot_delta.changed
+                        and not snapshot_delta.removed
+                    ):
+                        existing_snapshot = snapshot_base
+                        snapshot_base = None
+                prepared = self._prepare_artifacts(snapshot, snapshot_delta.changed)
+                parsed_blobs = prepared.parsed_blobs
+                reused_blobs = max(
+                    prepared.reused_blobs,
+                    len(logical_delta.changed) - parsed_blobs,
+                )
             except GitSnapshotError as error:
                 raise RepositoryIndexError(
                     "SOURCE_UNAVAILABLE",
@@ -311,6 +401,7 @@ class RepositoryIndex:
                     phase="parse",
                     target=_target(scope),
                 ) from error
+            snapshot_leases = snapshot.detach_snapshot_leases()
 
         try:
             generation = self._publish_generation(
@@ -318,8 +409,13 @@ class RepositoryIndex:
                 source_root=request.root.resolve(),
                 tree_id=tree_id,
                 expected_head=head,
-                delta=delta,
+                delta=logical_delta,
+                snapshot_delta=snapshot_delta,
+                snapshot_base=snapshot_base,
+                existing_snapshot=existing_snapshot,
                 prepared=prepared,
+                parsed_blobs=parsed_blobs,
+                reused_blobs=reused_blobs,
             )
         except RepositoryIndexError:
             raise
@@ -345,6 +441,8 @@ class RepositoryIndex:
                 phase="commit",
                 target=_target(scope),
             ) from error
+        finally:
+            GitSnapshot.release_snapshot_leases(snapshot_leases)
 
         return SyncReport(
             status="published",
@@ -352,11 +450,11 @@ class RepositoryIndex:
             branch=scope.branch,
             generation=generation,
             tree_id=tree_id,
-            changed_files=tuple(entry.path for entry in delta.changed),
-            removed_files=delta.removed,
-            parsed_blobs=prepared.parsed_blobs,
-            reused_blobs=prepared.reused_blobs,
-            tree_entries_scanned=delta.entries_scanned,
+            changed_files=tuple(entry.path for entry in logical_delta.changed),
+            removed_files=logical_delta.removed,
+            parsed_blobs=parsed_blobs,
+            reused_blobs=reused_blobs,
+            tree_entries_scanned=logical_delta.entries_scanned,
             elapsed_ms=_elapsed_ms(started),
         )
 
@@ -374,6 +472,7 @@ class RepositoryIndex:
                 retryable=True,
             )
         model = _provider_model(provider)
+        owner_token = uuid4().hex
 
         with self._store.transaction(write=True) as connection:
             head = self._head(connection, scope)
@@ -386,7 +485,7 @@ class RepositoryIndex:
                 )
             existing_revision = self._dense_state(connection, scope, head.generation_id)
             if existing_revision and existing_revision.model == model:
-                documents = _count(connection, "documents", scope)
+                documents = self._document_count(connection, head.snapshot_id)
                 return EnrichmentReport(
                     scope=scope,
                     generation=head.generation,
@@ -399,15 +498,62 @@ class RepositoryIndex:
                     elapsed_ms=_elapsed_ms(started),
                 )
             timestamp = _timestamp()
-            connection.execute(
-                """
+            claimable_statuses = ("pending", "failed")
+            if existing_revision is not None:
+                claimable_statuses += ("completed",)
+            placeholders = ",".join("?" for _ in claimable_statuses)
+            claim = connection.execute(
+                f"""
                 UPDATE enrichment_jobs
                 SET status = 'running', attempts = attempts + 1,
-                    error = '', updated_at = ?
+                    error = '', owner_token = ?, updated_at = ?
                 WHERE generation_id = ?
+                  AND status IN ({placeholders})
                 """,
-                (timestamp, head.generation_id),
+                (
+                    owner_token,
+                    timestamp,
+                    head.generation_id,
+                    *claimable_statuses,
+                ),
             )
+            if not claim.rowcount:
+                concurrent_revision = self._dense_state(
+                    connection,
+                    scope,
+                    head.generation_id,
+                )
+                if concurrent_revision and concurrent_revision.model == model:
+                    documents = self._document_count(connection, head.snapshot_id)
+                    return EnrichmentReport(
+                        scope=scope,
+                        generation=head.generation,
+                        revision=concurrent_revision.revision,
+                        model=model,
+                        dimension=concurrent_revision.dimension,
+                        documents=documents,
+                        embedded_signatures=0,
+                        reused_signatures=0,
+                        elapsed_ms=_elapsed_ms(started),
+                    )
+                job = connection.execute(
+                    "SELECT status FROM enrichment_jobs WHERE generation_id = ?",
+                    (head.generation_id,),
+                ).fetchone()
+                if job and job["status"] == "running":
+                    raise RepositoryIndexError(
+                        "ENRICHMENT_BUSY",
+                        f"enrichment already running for {_target(scope)}",
+                        phase="enrich",
+                        target=_target(scope),
+                        retryable=True,
+                    )
+                raise RepositoryIndexError(
+                    "ENRICHMENT_STATE_INVALID",
+                    f"current enrichment job is not claimable for {_target(scope)}",
+                    phase="enrich",
+                    target=_target(scope),
+                )
 
         try:
             with self._store.transaction() as connection:
@@ -421,20 +567,22 @@ class RepositoryIndex:
                         retryable=True,
                     )
                 rows = list(connection.execute(
-                    """
+                    _RESOLVED_FILES_CTE + """
                     SELECT
-                        d.component_id, d.text, d.content_signature,
-                        de.content_signature AS mapped_signature,
-                        de.model AS mapped_model
-                    FROM documents AS d
-                    LEFT JOIN document_embeddings AS de
-                      ON de.repo_id = d.repo_id
-                     AND de.branch = d.branch
-                     AND de.component_id = d.component_id
-                    WHERE d.repo_id = ? AND d.branch = ?
-                    ORDER BY d.component_id
+                        rf.path || '::' || d.local_id AS component_id,
+                        d.text,
+                        d.content_signature,
+                        e.content_signature AS mapped_signature,
+                        e.model AS mapped_model
+                    FROM resolved_files AS rf
+                    JOIN artifact_documents AS d
+                      ON d.artifact_id = rf.artifact_id
+                    LEFT JOIN embeddings AS e
+                      ON e.content_signature = d.content_signature
+                     AND e.model = ?
+                    ORDER BY component_id
                     """,
-                    (scope.repo, scope.branch),
+                    (head.snapshot_id, model),
                 ))
 
             missing_documents = [
@@ -484,6 +632,26 @@ class RepositoryIndex:
                         target=_target(scope),
                         retryable=True,
                     )
+                job_owner = connection.execute(
+                    """
+                    SELECT status, owner_token
+                    FROM enrichment_jobs
+                    WHERE generation_id = ?
+                    """,
+                    (head.generation_id,),
+                ).fetchone()
+                if (
+                    not job_owner
+                    or job_owner["status"] != "running"
+                    or job_owner["owner_token"] != owner_token
+                ):
+                    raise RepositoryIndexError(
+                        "ENRICHMENT_STALE",
+                        "enrichment ownership changed during provider execution",
+                        phase="enrich",
+                        target=_target(scope),
+                        retryable=True,
+                    )
                 timestamp = _timestamp()
                 for signature, vector in new_vectors.items():
                     connection.execute(
@@ -495,43 +663,46 @@ class RepositoryIndex:
                         (signature, model, len(vector), _pack_vector(vector), timestamp),
                     )
 
-                for row in missing_documents:
-                    component_id = row["component_id"]
-                    signature = row["content_signature"]
-                    vector = vectors[signature]
-                    connection.execute(
-                        """
-                        DELETE FROM embedding_buckets
-                        WHERE repo_id = ? AND branch = ? AND component_id = ?
+                authoritative_vectors: dict[str, tuple[float, ...]] = {}
+                signatures = tuple(texts_by_signature)
+                for chunk in _chunks(signatures):
+                    placeholders = ",".join("?" for _ in chunk)
+                    stored_rows = connection.execute(
+                        f"""
+                        SELECT content_signature, dimension, vector
+                        FROM embeddings
+                        WHERE model = ?
+                          AND content_signature IN ({placeholders})
                         """,
-                        (scope.repo, scope.branch, component_id),
+                        (model, *chunk),
                     )
-                    connection.execute(
-                        """
-                        DELETE FROM document_embeddings
-                        WHERE repo_id = ? AND branch = ? AND component_id = ?
-                        """,
-                        (scope.repo, scope.branch, component_id),
-                    )
-                    connection.execute(
-                        """
-                        INSERT INTO document_embeddings(
-                            repo_id, branch, component_id, content_signature, model
-                        ) VALUES (?, ?, ?, ?, ?)
-                        """,
-                        (scope.repo, scope.branch, component_id, signature, model),
-                    )
+                    for stored_row in stored_rows:
+                        authoritative_vectors[stored_row["content_signature"]] = (
+                            _unpack_vector(
+                                stored_row["vector"],
+                                int(stored_row["dimension"]),
+                            )
+                        )
+                if len(authoritative_vectors) != len(signatures):
+                    raise RuntimeError("enrichment vectors disappeared before publication")
+                authoritative_dimensions = {
+                    len(vector) for vector in authoritative_vectors.values()
+                }
+                if len(authoritative_dimensions) > 1:
+                    raise RuntimeError("stored embeddings have inconsistent dimensions")
+
+                for signature, vector in authoritative_vectors.items():
                     connection.executemany(
                         """
                         INSERT INTO embedding_buckets(
-                            repo_id, branch, component_id, model, table_no, bucket
-                        ) VALUES (?, ?, ?, ?, ?, ?)
+                            content_signature, model, table_no, bucket
+                        ) VALUES (?, ?, ?, ?)
+                        ON CONFLICT(content_signature, model, table_no)
+                        DO UPDATE SET bucket = excluded.bucket
                         """,
                         [
                             (
-                                scope.repo,
-                                scope.branch,
-                                component_id,
+                                signature,
                                 model,
                                 table_no,
                                 bucket,
@@ -541,19 +712,17 @@ class RepositoryIndex:
                     )
 
                 missing_count = int(connection.execute(
-                    """
+                    _RESOLVED_FILES_CTE + """
                     SELECT COUNT(*)
-                    FROM documents AS d
-                    LEFT JOIN document_embeddings AS de
-                      ON de.repo_id = d.repo_id
-                     AND de.branch = d.branch
-                     AND de.component_id = d.component_id
-                     AND de.content_signature = d.content_signature
-                     AND de.model = ?
-                    WHERE d.repo_id = ? AND d.branch = ?
-                      AND de.component_id IS NULL
+                    FROM resolved_files AS rf
+                    JOIN artifact_documents AS d
+                      ON d.artifact_id = rf.artifact_id
+                    LEFT JOIN embeddings AS e
+                      ON e.content_signature = d.content_signature
+                     AND e.model = ?
+                    WHERE e.content_signature IS NULL
                     """,
-                    (model, scope.repo, scope.branch),
+                    (head.snapshot_id, model),
                 ).fetchone()[0])
                 if missing_count:
                     raise RuntimeError(
@@ -561,21 +730,16 @@ class RepositoryIndex:
                     )
 
                 dimension_rows = connection.execute(
-                    """
+                    _RESOLVED_FILES_CTE + """
                     SELECT DISTINCT e.dimension
-                    FROM documents AS d
-                    JOIN document_embeddings AS de
-                      ON de.repo_id = d.repo_id
-                     AND de.branch = d.branch
-                     AND de.component_id = d.component_id
-                     AND de.content_signature = d.content_signature
-                     AND de.model = ?
+                    FROM resolved_files AS rf
+                    JOIN artifact_documents AS d
+                      ON d.artifact_id = rf.artifact_id
                     JOIN embeddings AS e
-                      ON e.content_signature = de.content_signature
-                     AND e.model = de.model
-                    WHERE d.repo_id = ? AND d.branch = ?
+                      ON e.content_signature = d.content_signature
+                     AND e.model = ?
                     """,
-                    (model, scope.repo, scope.branch),
+                    (head.snapshot_id, model),
                 )
                 stored_dimensions = {int(row[0]) for row in dimension_rows}
                 if len(stored_dimensions) > 1:
@@ -616,14 +780,23 @@ class RepositoryIndex:
                     """,
                     (scope.repo, scope.branch, revision_id),
                 )
-                connection.execute(
+                completed = connection.execute(
                     """
                     UPDATE enrichment_jobs
-                    SET status = 'completed', error = '', updated_at = ?
-                    WHERE generation_id = ?
+                    SET status = 'completed', error = '', owner_token = '', updated_at = ?
+                    WHERE generation_id = ? AND status = 'running'
+                      AND owner_token = ?
                     """,
-                    (timestamp, head.generation_id),
+                    (timestamp, head.generation_id, owner_token),
                 )
+                if not completed.rowcount:
+                    raise RepositoryIndexError(
+                        "ENRICHMENT_STALE",
+                        "enrichment ownership changed before publication",
+                        phase="enrich",
+                        target=_target(scope),
+                        retryable=True,
+                    )
 
             return EnrichmentReport(
                 scope=scope,
@@ -633,14 +806,18 @@ class RepositoryIndex:
                 dimension=dimension,
                 documents=len(rows),
                 embedded_signatures=len(new_vectors),
-                reused_signatures=len(cached_vectors),
+                reused_signatures=max(
+                    0,
+                    len({str(row["content_signature"]) for row in rows})
+                    - len(new_vectors),
+                ),
                 elapsed_ms=_elapsed_ms(started),
             )
         except RepositoryIndexError as error:
-            self._mark_enrichment_failed(head.generation_id, str(error))
+            self._mark_enrichment_failed(head.generation_id, owner_token, str(error))
             raise
         except Exception as error:
-            self._mark_enrichment_failed(head.generation_id, str(error))
+            self._mark_enrichment_failed(head.generation_id, owner_token, str(error))
             raise RepositoryIndexError(
                 "ENRICHMENT_FAILED",
                 str(error),
@@ -723,58 +900,97 @@ class RepositoryIndex:
                             degradations,
                         )
 
-        dense_used = False
-        with self._store.transaction() as connection:
-            head = self._head(connection, request.scope)
-            if not head:
-                raise RepositoryIndexError(
-                    "INDEX_NOT_FOUND",
-                    f"index not found for {_target(request.scope)}",
-                    phase="query",
-                    target=_target(request.scope),
-                )
-            exact_rows = self._exact_candidates(connection, request.scope, query, request.limit * 4)
-            lexical_rows = self._lexical_candidates(connection, request.scope, query, request.limit * 4)
-            dense_rows: list[dict] = []
-            if query_vector is not None and expected_dense is not None:
-                actual_dense = self._dense_state(connection, request.scope, head.generation_id)
-                if actual_dense is None or actual_dense.revision_id != expected_dense.revision_id:
-                    self._dense_unavailable(
-                        retrieval_mode,
-                        request.scope,
-                        "dense_snapshot_changed",
-                        degradations,
+        for _attempt in range(3):
+            dense_used = False
+            with self._store.transaction() as connection:
+                head = self._head(connection, request.scope)
+                if not head:
+                    raise RepositoryIndexError(
+                        "INDEX_NOT_FOUND",
+                        f"index not found for {_target(request.scope)}",
+                        phase="query",
+                        target=_target(request.scope),
                     )
-                else:
-                    dense_rows = self._dense_candidates(
+                exact_rows = self._exact_candidates(
+                    connection, head.snapshot_id, query, request.limit * 4
+                )
+                lexical_rows = self._lexical_candidates(
+                    connection, head.snapshot_id, query, request.limit * 4
+                )
+                dense_rows: list[dict] = []
+                if query_vector is not None and expected_dense is not None:
+                    actual_dense = self._dense_state(
                         connection,
                         request.scope,
-                        actual_dense,
-                        query_vector,
-                        request.limit * DENSE_CANDIDATE_MULTIPLIER,
+                        head.generation_id,
                     )
-                    dense_used = True
-            if exact_rows:
-                exact_ids = {row["component_id"] for row in exact_rows}
-                lexical_rows = [
-                    row for row in lexical_rows
-                    if row["component_id"] in exact_ids
+                    if (
+                        actual_dense is None
+                        or actual_dense.revision_id != expected_dense.revision_id
+                    ):
+                        self._dense_unavailable(
+                            retrieval_mode,
+                            request.scope,
+                            "dense_snapshot_changed",
+                            degradations,
+                        )
+                    else:
+                        dense_rows = self._dense_candidates(
+                            connection,
+                            head.snapshot_id,
+                            actual_dense,
+                            query_vector,
+                            request.limit * DENSE_CANDIDATE_MULTIPLIER,
+                            scope=request.scope,
+                        )
+                        dense_used = True
+                strong_exact_rows = [
+                    row for row in exact_rows
+                    if float(row.get("exact_score", 0.0)) >= 80.0
                 ]
-                dense_rows = [
-                    row for row in dense_rows
-                    if row["component_id"] in exact_ids
-                ]
-            matches = self._fuse_candidates(
-                exact_rows,
-                lexical_rows,
-                dense_rows,
-                request.limit,
-            )
-            related = self._related_candidates(
-                connection,
-                request.scope,
-                matches,
-                related_limit,
+                if strong_exact_rows:
+                    exact_rows = strong_exact_rows
+                    exact_ids = {
+                        row["component_id"] for row in strong_exact_rows
+                    }
+                    lexical_rows = [
+                        row for row in lexical_rows
+                        if row["component_id"] in exact_ids
+                    ]
+                    dense_rows = [
+                        row for row in dense_rows
+                        if row["component_id"] in exact_ids
+                    ]
+                matches = self._fuse_candidates(
+                    exact_rows,
+                    lexical_rows,
+                    dense_rows,
+                    request.limit,
+                )
+            if not matches or not related_limit:
+                related = ()
+                break
+            expected_head = head
+            if not self._ensure_relation_cache(expected_head.snapshot_id):
+                continue
+            with self._store.transaction() as connection:
+                actual_head = self._head(connection, request.scope)
+                if _head_identity(actual_head) != _head_identity(expected_head):
+                    continue
+                related = self._related_candidates(
+                    connection,
+                    expected_head.snapshot_id,
+                    matches,
+                    related_limit,
+                )
+                break
+        else:
+            raise RepositoryIndexError(
+                "STORE_BUSY",
+                "branch head changed repeatedly while resolving search results",
+                phase="query",
+                target=_target(request.scope),
+                retryable=True,
             )
 
         return SearchResult(
@@ -788,15 +1004,45 @@ class RepositoryIndex:
             elapsed_ms=_elapsed_ms(started),
         )
 
-    def inspect(self, scope: IndexScope) -> IndexStatus:
+    def inspect(
+        self,
+        scope: IndexScope,
+        *,
+        resolve_relations: bool = True,
+    ) -> IndexStatus:
         self._validate_scope(scope)
         with self._store.transaction() as connection:
             head = self._head(connection, scope)
             if not head:
                 return IndexStatus(scope, False, None, "", 0, 0, 0)
-            files = _count(connection, "files", scope)
-            symbols = _count(connection, "symbols", scope)
-            relations = _count(connection, "relations", scope)
+            files = int(connection.execute(
+                _RESOLVED_FILES_CTE + "SELECT COUNT(*) FROM resolved_files",
+                (head.snapshot_id,),
+            ).fetchone()[0])
+            symbols = int(connection.execute(
+                _RESOLVED_FILES_CTE + """
+                SELECT COUNT(*)
+                FROM resolved_files AS rf
+                JOIN artifact_symbols AS s ON s.artifact_id = rf.artifact_id
+                """,
+                (head.snapshot_id,),
+            ).fetchone()[0])
+            cache_ready = connection.execute(
+                "SELECT 1 FROM relation_cache_states WHERE snapshot_id = ?",
+                (head.snapshot_id,),
+            ).fetchone()
+            relations = (
+                int(connection.execute(
+                    "SELECT COUNT(*) FROM snapshot_relations WHERE snapshot_id = ?",
+                    (head.snapshot_id,),
+                ).fetchone()[0])
+                if cache_ready
+                else (
+                    len(self._relation_rows(connection, head.snapshot_id))
+                    if resolve_relations
+                    else 0
+                )
+            )
             dense = self._dense_state(connection, scope, head.generation_id)
             job = connection.execute(
                 """
@@ -859,14 +1105,14 @@ class RepositoryIndex:
                 for row in connection.execute(
                     """
                     SELECT r.source_root, g.tree_id
-                    FROM generations AS g
-                    JOIN repositories AS r ON r.repo_id = g.repo_id
+                    FROM repositories AS r
+                    LEFT JOIN generations AS g ON g.repo_id = r.repo_id
                     ORDER BY r.source_root, g.tree_id
                     """
                 ):
-                    snapshot_roots.setdefault(row["source_root"], []).append(
-                        row["tree_id"]
-                    )
+                    retained = snapshot_roots.setdefault(row["source_root"], [])
+                    if row["tree_id"] is not None:
+                        retained.append(row["tree_id"])
         except sqlite3.Error as error:
             raise RepositoryIndexError(
                 "STORE_CORRUPT",
@@ -889,6 +1135,7 @@ class RepositoryIndex:
                 retryable=True,
             ) from error
 
+        reclaimed_pages = self._store.compact()
         integrity = self.integrity()
         if not integrity.ok:
             raise RepositoryIndexError(
@@ -905,8 +1152,145 @@ class RepositoryIndex:
             deleted_artifacts=counts.deleted_artifacts,
             deleted_embeddings=counts.deleted_embeddings,
             deleted_buckets=counts.deleted_buckets,
+            deleted_snapshots=counts.deleted_snapshots,
             deleted_snapshot_objects=deleted_snapshot_objects,
+            reclaimed_pages=reclaimed_pages,
             integrity=integrity,
+        )
+
+    def reconcile_branches(
+        self,
+        repo: str,
+        active_branches: Sequence[str],
+    ) -> BranchReconcileReport:
+        """Remove index scopes that are no longer active for a repository."""
+        repo_id = repo.strip()
+        if not repo_id:
+            raise ValueError("repo must not be empty")
+        active = tuple(dict.fromkeys(
+            branch.strip() for branch in active_branches if branch.strip()
+        ))
+        with self._store.transaction(write=True) as connection:
+            existing = tuple(
+                str(row["branch"])
+                for row in connection.execute(
+                    """
+                    SELECT branch FROM branch_heads
+                    WHERE repo_id = ? ORDER BY branch
+                    """,
+                    (repo_id,),
+                )
+            )
+            active_set = set(active)
+            removed = tuple(branch for branch in existing if branch not in active_set)
+            for branches in _chunks(removed):
+                placeholders = ",".join("?" for _ in branches)
+                params = (repo_id, *branches)
+                connection.execute(
+                    f"DELETE FROM branch_heads WHERE repo_id = ? "
+                    f"AND branch IN ({placeholders})",
+                    params,
+                )
+                connection.execute(
+                    f"DELETE FROM generations WHERE repo_id = ? "
+                    f"AND branch IN ({placeholders})",
+                    params,
+                )
+            if removed:
+                active_snapshot_ids = tuple(
+                    int(row["snapshot_id"])
+                    for row in connection.execute(
+                        """
+                        SELECT DISTINCT g.snapshot_id
+                        FROM branch_heads AS h
+                        JOIN generations AS g ON g.id = h.generation_id
+                        WHERE h.repo_id = ?
+                        """,
+                        (repo_id,),
+                    )
+                )
+                if len(active_snapshot_ids) == 1:
+                    self._flatten_snapshot(connection, active_snapshot_ids[0])
+            counts = self._maintain_state(
+                connection,
+                retain_generations=2,
+                recover_running=False,
+                collect_orphans=True,
+            )
+        reclaimed_pages = self._store.compact() if removed else 0
+        return BranchReconcileReport(
+            repo=repo_id,
+            active_branches=active,
+            removed_branches=removed,
+            deleted_snapshots=counts.deleted_snapshots,
+            deleted_artifacts=counts.deleted_artifacts,
+            deleted_embeddings=counts.deleted_embeddings,
+            reclaimed_pages=reclaimed_pages,
+        )
+
+    @staticmethod
+    def _flatten_snapshot(
+        connection: sqlite3.Connection,
+        snapshot_id: int,
+    ) -> None:
+        row = connection.execute(
+            "SELECT base_snapshot_id FROM snapshots WHERE id = ?",
+            (snapshot_id,),
+        ).fetchone()
+        if not row or row["base_snapshot_id"] is None:
+            return
+        resolved = list(connection.execute(
+            _RESOLVED_FILES_CTE
+            + "SELECT path, path_key, blob_id, artifact_id FROM resolved_files",
+            (snapshot_id,),
+        ))
+        connection.execute(
+            "DELETE FROM snapshot_changes WHERE snapshot_id = ?",
+            (snapshot_id,),
+        )
+        connection.executemany(
+            """
+            INSERT INTO snapshot_changes(
+                snapshot_id, path, path_key, kind, blob_id, artifact_id
+            ) VALUES (?, ?, ?, 'upsert', ?, ?)
+            """,
+            [
+                (
+                    snapshot_id,
+                    item["path"],
+                    item["path_key"],
+                    item["blob_id"],
+                    item["artifact_id"],
+                )
+                for item in resolved
+            ],
+        )
+        connection.execute(
+            """
+            UPDATE snapshots
+            SET base_snapshot_id = NULL, depth = 0
+            WHERE id = ?
+            """,
+            (snapshot_id,),
+        )
+        connection.execute(
+            """
+            WITH RECURSIVE descendants(id, resolved_depth) AS (
+                SELECT id, 0 FROM snapshots WHERE id = ?
+                UNION ALL
+                SELECT child.id, parent.resolved_depth + 1
+                FROM snapshots AS child
+                JOIN descendants AS parent
+                  ON child.base_snapshot_id = parent.id
+            )
+            UPDATE snapshots
+            SET depth = (
+                SELECT resolved_depth FROM descendants
+                WHERE descendants.id = snapshots.id
+            )
+            WHERE id IN (SELECT id FROM descendants)
+            """,
+            (snapshot_id,),
         )
 
     @staticmethod
@@ -925,8 +1309,15 @@ class RepositoryIndex:
             for row in connection.execute("SELECT generation_id FROM branch_heads")
         }
         if recover_running:
+            lease_cutoff = (
+                datetime.now(UTC) - timedelta(seconds=ENRICHMENT_LEASE_SECONDS)
+            ).isoformat()
             for row in connection.execute(
-                "SELECT generation_id FROM enrichment_jobs WHERE status = 'running'"
+                """
+                SELECT generation_id FROM enrichment_jobs
+                WHERE status = 'running' AND updated_at < ?
+                """,
+                (lease_cutoff,),
             ):
                 generation_id = int(row["generation_id"])
                 if generation_id in current_generation_ids:
@@ -935,6 +1326,7 @@ class RepositoryIndex:
                         UPDATE enrichment_jobs
                         SET status = 'pending',
                             error = 'recovered interrupted enrichment',
+                            owner_token = '',
                             updated_at = ?
                         WHERE generation_id = ?
                         """,
@@ -947,6 +1339,7 @@ class RepositoryIndex:
                         UPDATE enrichment_jobs
                         SET status = 'superseded',
                             error = 'superseded after interrupted enrichment',
+                            owner_token = '',
                             updated_at = ?
                         WHERE generation_id = ?
                         """,
@@ -972,40 +1365,24 @@ class RepositoryIndex:
             ):
                 stale_generation_ids.append(generation_id)
 
+        stale_snapshot_ids: list[int] = []
         deleted_generations = 0
         deleted_revisions = 0
         for generation_ids in _chunks(tuple(stale_generation_ids)):
             placeholders = ",".join("?" for _ in generation_ids)
-            revision_ids = tuple(
-                int(row[0])
+            stale_snapshot_ids.extend(
+                int(row["snapshot_id"])
                 for row in connection.execute(
-                    f"""
-                    SELECT id FROM enrichment_revisions
-                    WHERE generation_id IN ({placeholders})
-                    """,
+                    f"SELECT snapshot_id FROM generations "
+                    f"WHERE id IN ({placeholders})",
                     generation_ids,
                 )
             )
-            if revision_ids:
-                revision_placeholders = ",".join("?" for _ in revision_ids)
-                connection.execute(
-                    f"""
-                    DELETE FROM enrichment_heads
-                    WHERE revision_id IN ({revision_placeholders})
-                    """,
-                    revision_ids,
-                )
-            deleted_revisions += connection.execute(
-                f"""
-                DELETE FROM enrichment_revisions
-                WHERE generation_id IN ({placeholders})
-                """,
+            deleted_revisions += int(connection.execute(
+                f"SELECT COUNT(*) FROM enrichment_revisions "
+                f"WHERE generation_id IN ({placeholders})",
                 generation_ids,
-            ).rowcount
-            connection.execute(
-                f"DELETE FROM enrichment_jobs WHERE generation_id IN ({placeholders})",
-                generation_ids,
-            )
+            ).fetchone()[0])
             connection.execute(
                 f"UPDATE generations SET parent_id = NULL "
                 f"WHERE parent_id IN ({placeholders})",
@@ -1019,16 +1396,47 @@ class RepositoryIndex:
         deleted_buckets = 0
         deleted_embeddings = 0
         deleted_artifacts = 0
+        deleted_snapshots = 0
         if collect_orphans:
-            deleted_buckets = connection.execute(
+            reachable_snapshot_ids = {
+                int(row[0])
+                for row in connection.execute(
+                    """
+                    WITH RECURSIVE reachable(id) AS (
+                        SELECT DISTINCT snapshot_id FROM generations
+                        UNION
+                        SELECT s.base_snapshot_id
+                        FROM snapshots AS s
+                        JOIN reachable AS r ON r.id = s.id
+                        WHERE s.base_snapshot_id IS NOT NULL
+                    )
+                    SELECT id FROM reachable
+                    """
+                )
+            }
+            stale_snapshots = [
+                int(row["id"])
+                for row in connection.execute(
+                    "SELECT id FROM snapshots ORDER BY depth DESC, id DESC"
+                )
+                if int(row["id"]) not in reachable_snapshot_ids
+            ]
+            for snapshot_ids in _chunks(tuple(stale_snapshots)):
+                placeholders = ",".join("?" for _ in snapshot_ids)
+                deleted_snapshots += connection.execute(
+                    f"DELETE FROM snapshots WHERE id IN ({placeholders})",
+                    snapshot_ids,
+                ).rowcount
+
+            buckets_before = int(connection.execute(
+                "SELECT COUNT(*) FROM embedding_buckets"
+            ).fetchone()[0])
+            deleted_artifacts = connection.execute(
                 """
-                DELETE FROM embedding_buckets
+                DELETE FROM parse_artifacts
                 WHERE NOT EXISTS (
-                    SELECT 1 FROM document_embeddings AS de
-                    WHERE de.repo_id = embedding_buckets.repo_id
-                      AND de.branch = embedding_buckets.branch
-                      AND de.component_id = embedding_buckets.component_id
-                      AND de.model = embedding_buckets.model
+                    SELECT 1 FROM snapshot_changes AS sc
+                    WHERE sc.artifact_id = parse_artifacts.artifact_id
                 )
                 """
             ).rowcount
@@ -1036,21 +1444,145 @@ class RepositoryIndex:
                 """
                 DELETE FROM embeddings
                 WHERE NOT EXISTS (
-                    SELECT 1 FROM document_embeddings AS de
-                    WHERE de.content_signature = embeddings.content_signature
-                      AND de.model = embeddings.model
+                    SELECT 1 FROM artifact_documents AS d
+                    WHERE d.content_signature = embeddings.content_signature
                 )
                 """
             ).rowcount
-            deleted_artifacts = connection.execute(
-                """
-                DELETE FROM parse_artifacts
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM files
-                    WHERE files.artifact_id = parse_artifacts.artifact_id
+            buckets_after = int(connection.execute(
+                "SELECT COUNT(*) FROM embedding_buckets"
+            ).fetchone()[0])
+            deleted_buckets = max(0, buckets_before - buckets_after)
+        elif stale_snapshot_ids:
+            reachable_snapshot_ids = {
+                int(row[0])
+                for row in connection.execute(
+                    """
+                    WITH RECURSIVE reachable(id) AS (
+                        SELECT DISTINCT snapshot_id FROM generations
+                        UNION
+                        SELECT s.base_snapshot_id
+                        FROM snapshots AS s
+                        JOIN reachable AS r ON r.id = s.id
+                        WHERE s.base_snapshot_id IS NOT NULL
+                    )
+                    SELECT id FROM reachable
+                    """
                 )
-                """
-            ).rowcount
+            }
+            candidate_snapshot_ids: set[int] = set()
+            for snapshot_ids in _chunks(tuple(dict.fromkeys(stale_snapshot_ids))):
+                placeholders = ",".join("?" for _ in snapshot_ids)
+                candidate_snapshot_ids.update(
+                    int(row[0])
+                    for row in connection.execute(
+                        f"""
+                        WITH RECURSIVE candidates(id) AS (
+                            SELECT id FROM snapshots
+                            WHERE id IN ({placeholders})
+                            UNION
+                            SELECT s.base_snapshot_id
+                            FROM snapshots AS s
+                            JOIN candidates AS c ON c.id = s.id
+                            WHERE s.base_snapshot_id IS NOT NULL
+                        )
+                        SELECT id FROM candidates
+                        """,
+                        snapshot_ids,
+                    )
+                )
+            candidate_depths: dict[int, int] = {}
+            for snapshot_ids in _chunks(tuple(candidate_snapshot_ids)):
+                placeholders = ",".join("?" for _ in snapshot_ids)
+                candidate_depths.update({
+                    int(row["id"]): int(row["depth"])
+                    for row in connection.execute(
+                        f"SELECT id, depth FROM snapshots "
+                        f"WHERE id IN ({placeholders})",
+                        snapshot_ids,
+                    )
+                })
+            stale_snapshots = tuple(sorted(
+                (
+                    snapshot_id
+                    for snapshot_id in candidate_snapshot_ids
+                    if snapshot_id not in reachable_snapshot_ids
+                ),
+                key=lambda snapshot_id: (
+                    candidate_depths.get(snapshot_id, -1),
+                    snapshot_id,
+                ),
+                reverse=True,
+            ))
+            artifact_candidates: set[str] = set()
+            for snapshot_ids in _chunks(stale_snapshots):
+                placeholders = ",".join("?" for _ in snapshot_ids)
+                artifact_candidates.update(
+                    str(row[0])
+                    for row in connection.execute(
+                        f"""
+                        SELECT DISTINCT artifact_id FROM snapshot_changes
+                        WHERE snapshot_id IN ({placeholders})
+                          AND artifact_id IS NOT NULL
+                        """,
+                        snapshot_ids,
+                    )
+                )
+                deleted_snapshots += connection.execute(
+                    f"DELETE FROM snapshots WHERE id IN ({placeholders})",
+                    snapshot_ids,
+                ).rowcount
+
+            signature_candidates: set[str] = set()
+            for artifact_ids in _chunks(tuple(artifact_candidates)):
+                placeholders = ",".join("?" for _ in artifact_ids)
+                signature_candidates.update(
+                    str(row[0])
+                    for row in connection.execute(
+                        f"""
+                        SELECT DISTINCT content_signature
+                        FROM artifact_documents
+                        WHERE artifact_id IN ({placeholders})
+                        """,
+                        artifact_ids,
+                    )
+                )
+                deleted_artifacts += connection.execute(
+                    f"""
+                    DELETE FROM parse_artifacts
+                    WHERE artifact_id IN ({placeholders})
+                      AND NOT EXISTS (
+                          SELECT 1 FROM snapshot_changes AS sc
+                          WHERE sc.artifact_id = parse_artifacts.artifact_id
+                      )
+                    """,
+                    artifact_ids,
+                ).rowcount
+
+            for signatures in _chunks(tuple(signature_candidates)):
+                placeholders = ",".join("?" for _ in signatures)
+                deleted_buckets += int(connection.execute(
+                    f"""
+                    SELECT COUNT(*) FROM embedding_buckets AS b
+                    WHERE b.content_signature IN ({placeholders})
+                      AND NOT EXISTS (
+                          SELECT 1 FROM artifact_documents AS d
+                          WHERE d.content_signature = b.content_signature
+                      )
+                    """,
+                    signatures,
+                ).fetchone()[0])
+                deleted_embeddings += connection.execute(
+                    f"""
+                    DELETE FROM embeddings
+                    WHERE content_signature IN ({placeholders})
+                      AND NOT EXISTS (
+                          SELECT 1 FROM artifact_documents AS d
+                          WHERE d.content_signature = embeddings.content_signature
+                      )
+                    """,
+                    signatures,
+                ).rowcount
         return _MaintenanceCounts(
             recovered_jobs=recovered_jobs,
             superseded_jobs=superseded_jobs,
@@ -1059,6 +1591,7 @@ class RepositoryIndex:
             deleted_artifacts=deleted_artifacts,
             deleted_embeddings=deleted_embeddings,
             deleted_buckets=deleted_buckets,
+            deleted_snapshots=deleted_snapshots,
         )
 
     def symbols(
@@ -1072,51 +1605,88 @@ class RepositoryIndex:
         self._validate_scope(scope)
         ids = tuple(dict.fromkeys(component_ids))
         selected_paths = tuple(dict.fromkeys(paths))
-        with self._store.transaction() as connection:
-            if not self._head(connection, scope):
-                return ()
-            clauses = ["s.repo_id = ?", "s.branch = ?"]
-            params: list[object] = [scope.repo, scope.branch]
+
+        def read_symbols(
+            connection: sqlite3.Connection,
+            head: _Head,
+        ) -> tuple[SymbolRecord, ...]:
+            clauses = ["1 = 1"]
+            params: list[object] = [head.snapshot_id]
             selectors: list[str] = []
             if ids:
-                selectors.append(f"s.component_id IN ({','.join('?' for _ in ids)})")
+                selectors.append(
+                    f"(rf.path || '::' || s.local_id) "
+                    f"IN ({','.join('?' for _ in ids)})"
+                )
                 params.extend(ids)
             if selected_paths:
-                selectors.append(f"s.path IN ({','.join('?' for _ in selected_paths)})")
+                selectors.append(
+                    f"rf.path IN ({','.join('?' for _ in selected_paths)})"
+                )
                 params.extend(selected_paths)
             if selectors:
                 clauses.append(f"({' OR '.join(selectors)})")
             rows = list(connection.execute(
-                f"""
+                _RESOLVED_FILES_CTE + f"""
                 SELECT
-                    s.component_id, s.path, s.symbol, s.kind,
+                    rf.path || '::' || s.local_id AS component_id,
+                    rf.path AS path,
+                    s.symbol,
+                    s.kind,
                     s.line_start, s.line_end, s.docstring, s.source,
                     s.imports_json, s.entry_point_kind, s.entry_point_path
-                FROM symbols AS s
+                FROM resolved_files AS rf
+                JOIN artifact_symbols AS s ON s.artifact_id = rf.artifact_id
                 WHERE {' AND '.join(clauses)}
-                ORDER BY s.path, s.line_start, s.component_id
+                ORDER BY rf.path, s.line_start, component_id
                 """,
                 params,
             ))
-            return self._symbol_records(connection, scope, rows)
+            return self._symbol_records(connection, head.snapshot_id, rows)
+
+        return self._read_relation_snapshot(scope, read_symbols) or ()
 
     def files(self, scope: IndexScope) -> tuple[str, ...]:
         """Return source paths visible from the current branch head."""
         self._validate_scope(scope)
         with self._store.transaction() as connection:
-            if not self._head(connection, scope):
+            head = self._head(connection, scope)
+            if not head:
                 return ()
             return tuple(
                 str(row["path"])
                 for row in connection.execute(
-                    """
-                    SELECT path FROM files
-                    WHERE repo_id = ? AND branch = ?
-                    ORDER BY path
-                    """,
-                    (scope.repo, scope.branch),
+                    _RESOLVED_FILES_CTE
+                    + "SELECT path FROM resolved_files ORDER BY path",
+                    (head.snapshot_id,),
                 )
             )
+
+    def _read_relation_snapshot(
+        self,
+        scope: IndexScope,
+        reader: Callable[[sqlite3.Connection, _Head], _T],
+    ) -> _T | None:
+        for _attempt in range(3):
+            expected_head = self._read_head(scope)
+            if not expected_head:
+                return None
+            if not self._ensure_relation_cache(expected_head.snapshot_id):
+                continue
+            with self._store.transaction() as connection:
+                head = self._head(connection, scope)
+                if _head_identity(head) != _head_identity(expected_head):
+                    continue
+                if not head:
+                    return None
+                return reader(connection, head)
+        raise RepositoryIndexError(
+            "STORE_BUSY",
+            "branch head changed repeatedly while preparing relation cache",
+            phase="query",
+            target=_target(scope),
+            retryable=True,
+        )
 
     def trace(
         self,
@@ -1131,15 +1701,19 @@ class RepositoryIndex:
         if direction not in {"up", "down"}:
             self._raise_invalid("direction must be 'up' or 'down'", scope)
         depth_limit = max(0, min(max_depth, 8))
-        with self._store.transaction() as connection:
-            if not self._head(connection, scope):
-                return ()
+
+        def read_trace(
+            connection: sqlite3.Connection,
+            head: _Head,
+        ) -> tuple[SymbolRecord, ...]:
             exists = connection.execute(
-                """
-                SELECT 1 FROM symbols
-                WHERE repo_id = ? AND branch = ? AND component_id = ?
+                _RESOLVED_FILES_CTE + """
+                SELECT 1
+                FROM resolved_files AS rf
+                JOIN artifact_symbols AS s ON s.artifact_id = rf.artifact_id
+                WHERE rf.path || '::' || s.local_id = ?
                 """,
-                (scope.repo, scope.branch, component_id),
+                (head.snapshot_id, component_id),
             ).fetchone()
             if not exists:
                 return ()
@@ -1154,17 +1728,17 @@ class RepositoryIndex:
                 if direction == "down":
                     query = (
                         "SELECT caller_id AS source_id, callee_id AS target_id "
-                        "FROM relations WHERE repo_id = ? AND branch = ? "
+                        "FROM snapshot_relations WHERE snapshot_id = ? "
                         f"AND caller_id IN ({placeholders}) ORDER BY caller_id, callee_id"
                     )
                 else:
                     query = (
                         "SELECT callee_id AS source_id, caller_id AS target_id "
-                        "FROM relations WHERE repo_id = ? AND branch = ? "
+                        "FROM snapshot_relations WHERE snapshot_id = ? "
                         f"AND callee_id IN ({placeholders}) ORDER BY callee_id, caller_id"
                     )
                 next_frontier: list[str] = []
-                for row in connection.execute(query, (scope.repo, scope.branch, *frontier)):
+                for row in connection.execute(query, (head.snapshot_id, *frontier)):
                     target = str(row["target_id"])
                     if target in visited:
                         continue
@@ -1177,25 +1751,30 @@ class RepositoryIndex:
             rows_by_id = {
                 row["component_id"]: row
                 for row in connection.execute(
-                    f"""
+                    _RESOLVED_FILES_CTE + f"""
                     SELECT
-                        s.component_id, s.path, s.symbol, s.kind,
+                        rf.path || '::' || s.local_id AS component_id,
+                        rf.path AS path,
+                        s.symbol,
+                        s.kind,
                         s.line_start, s.line_end, s.docstring, s.source,
                         s.imports_json, s.entry_point_kind, s.entry_point_path
-                    FROM symbols AS s
-                    WHERE s.repo_id = ? AND s.branch = ?
-                      AND s.component_id IN ({placeholders})
+                    FROM resolved_files AS rf
+                    JOIN artifact_symbols AS s ON s.artifact_id = rf.artifact_id
+                    WHERE rf.path || '::' || s.local_id IN ({placeholders})
                     """,
-                    (scope.repo, scope.branch, *ordered),
+                    (head.snapshot_id, *ordered),
                 )
             }
             rows = [rows_by_id[item] for item in ordered if item in rows_by_id]
-            return self._symbol_records(connection, scope, rows)
+            return self._symbol_records(connection, head.snapshot_id, rows)
+
+        return self._read_relation_snapshot(scope, read_trace) or ()
 
     def _symbol_records(
         self,
         connection: sqlite3.Connection,
-        scope: IndexScope,
+        snapshot_id: int,
         rows: Sequence[sqlite3.Row],
     ) -> tuple[SymbolRecord, ...]:
         ids = tuple(str(row["component_id"]) for row in rows)
@@ -1205,12 +1784,12 @@ class RepositoryIndex:
             placeholders = ",".join("?" for _ in chunk)
             for relation in connection.execute(
                 f"""
-                SELECT caller_id, callee_id FROM relations
-                WHERE repo_id = ? AND branch = ?
+                SELECT caller_id, callee_id FROM snapshot_relations
+                WHERE snapshot_id = ?
                   AND (caller_id IN ({placeholders}) OR callee_id IN ({placeholders}))
                 ORDER BY caller_id, callee_id
                 """,
-                (scope.repo, scope.branch, *chunk, *chunk),
+                (snapshot_id, *chunk, *chunk),
             ):
                 caller = str(relation["caller_id"])
                 callee = str(relation["callee_id"])
@@ -1295,6 +1874,86 @@ class RepositoryIndex:
             reused_blobs=max(0, len(entries) - len(missing)),
         )
 
+    def _select_snapshot_base(
+        self,
+        snapshot: GitSnapshot,
+        repo: str,
+        tree_id: str,
+        head: _Head | None,
+        logical_delta: TreeDelta,
+    ) -> tuple[_SnapshotRef | None, TreeDelta]:
+        candidates: list[_SnapshotRef] = []
+        if head:
+            current = self._read_snapshot_by_id(head.snapshot_id)
+            if current:
+                candidates.append(current)
+        for candidate in self._snapshot_candidates(repo):
+            if candidate.snapshot_id not in {
+                item.snapshot_id for item in candidates
+            }:
+                candidates.append(candidate)
+
+        best: tuple[int, _SnapshotRef, TreeDelta] | None = None
+        for candidate in candidates:
+            if candidate.depth >= MAX_SNAPSHOT_DEPTH - 1:
+                continue
+            delta = snapshot.delta(candidate.tree_id, tree_id)
+            cost = len(delta.changed) + len(delta.removed)
+            if best is None or (cost, candidate.depth) < (best[0], best[1].depth):
+                best = (cost, candidate, delta)
+                if cost <= 1:
+                    break
+
+        if best and best[0] <= 1:
+            return best[1], best[2]
+        if head is None:
+            full_delta = logical_delta
+        else:
+            full_delta = snapshot.initial_delta(tree_id)
+        full_cost = len(full_delta.changed)
+        if best and best[0] < full_cost:
+            return best[1], best[2]
+        return None, full_delta
+
+    def _read_snapshot(self, repo: str, tree_id: str) -> _SnapshotRef | None:
+        with self._store.transaction() as connection:
+            row = connection.execute(
+                """
+                SELECT id, tree_id, depth FROM snapshots
+                WHERE repo_id = ? AND tree_id = ?
+                """,
+                (repo, tree_id),
+            ).fetchone()
+        return _snapshot_ref(row)
+
+    def _read_snapshot_by_id(self, snapshot_id: int) -> _SnapshotRef | None:
+        with self._store.transaction() as connection:
+            row = connection.execute(
+                "SELECT id, tree_id, depth FROM snapshots WHERE id = ?",
+                (snapshot_id,),
+            ).fetchone()
+        return _snapshot_ref(row)
+
+    def _snapshot_candidates(self, repo: str) -> tuple[_SnapshotRef, ...]:
+        with self._store.transaction() as connection:
+            rows = connection.execute(
+                """
+                SELECT DISTINCT s.id, s.tree_id, s.depth
+                FROM branch_heads AS h
+                JOIN generations AS g ON g.id = h.generation_id
+                JOIN snapshots AS s ON s.id = g.snapshot_id
+                WHERE h.repo_id = ?
+                ORDER BY s.depth, s.id DESC
+                LIMIT 16
+                """,
+                (repo,),
+            )
+            return tuple(
+                candidate
+                for row in rows
+                if (candidate := _snapshot_ref(row)) is not None
+            )
+
     def _load_artifacts(self, artifact_ids: tuple[str, ...]) -> dict[str, str]:
         if not artifact_ids:
             return {}
@@ -1336,16 +1995,36 @@ class RepositoryIndex:
                     )
         return result
 
-    def _mark_enrichment_failed(self, generation_id: int, message: str) -> None:
+    @staticmethod
+    def _document_count(
+        connection: sqlite3.Connection,
+        snapshot_id: int,
+    ) -> int:
+        return int(connection.execute(
+            _RESOLVED_FILES_CTE + """
+            SELECT COUNT(*)
+            FROM resolved_files AS rf
+            JOIN artifact_documents AS d ON d.artifact_id = rf.artifact_id
+            """,
+            (snapshot_id,),
+        ).fetchone()[0])
+
+    def _mark_enrichment_failed(
+        self,
+        generation_id: int,
+        owner_token: str,
+        message: str,
+    ) -> None:
         try:
             with self._store.transaction(write=True) as connection:
                 connection.execute(
                     """
                     UPDATE enrichment_jobs
-                    SET status = 'failed', error = ?, updated_at = ?
+                    SET status = 'failed', error = ?, owner_token = '', updated_at = ?
                     WHERE generation_id = ? AND status = 'running'
+                      AND owner_token = ?
                     """,
-                    (message[:500], _timestamp(), generation_id),
+                    (message[:500], _timestamp(), generation_id, owner_token),
                 )
         except sqlite3.Error:
             return
@@ -1407,10 +2086,12 @@ class RepositoryIndex:
     def _dense_candidates(
         self,
         connection: sqlite3.Connection,
-        scope: IndexScope,
+        snapshot_id: int,
         state: _DenseState,
         query_vector: tuple[float, ...],
         limit: int,
+        *,
+        scope: IndexScope,
     ) -> list[dict]:
         if state.dimension == 0:
             return []
@@ -1425,45 +2106,50 @@ class RepositoryIndex:
         values = ",".join("(?, ?)" for _ in buckets)
         bucket_params = tuple(value for pair in buckets for value in pair)
         rows = connection.execute(
-            f"""
-            WITH query_buckets(table_no, bucket) AS (VALUES {values})
-            SELECT b.component_id, COUNT(*) AS bucket_matches
+            _RESOLVED_FILES_CTE + f""",
+            query_buckets(table_no, bucket) AS (VALUES {values})
+            SELECT b.content_signature, COUNT(DISTINCT b.table_no) AS bucket_matches
             FROM embedding_buckets AS b
             JOIN query_buckets AS q
               ON q.table_no = b.table_no AND q.bucket = b.bucket
-            WHERE b.repo_id = ? AND b.branch = ? AND b.model = ?
-            GROUP BY b.component_id
-            ORDER BY bucket_matches DESC, b.component_id
+            JOIN artifact_documents AS d
+              ON d.content_signature = b.content_signature
+            JOIN resolved_files AS rf ON rf.artifact_id = d.artifact_id
+            WHERE b.model = ?
+            GROUP BY b.content_signature
+            ORDER BY bucket_matches DESC, b.content_signature
             LIMIT ?
             """,
-            (*bucket_params, scope.repo, scope.branch, state.model, limit),
+            (snapshot_id, *bucket_params, state.model, limit),
         )
-        candidate_ids = tuple(row["component_id"] for row in rows)
-        if not candidate_ids:
+        candidate_signatures = tuple(row["content_signature"] for row in rows)
+        if not candidate_signatures:
             return []
 
         candidates = []
-        for chunk in _chunks(candidate_ids):
+        for chunk in _chunks(candidate_signatures):
             placeholders = ",".join("?" for _ in chunk)
             vector_rows = connection.execute(
-                f"""
+                _RESOLVED_FILES_CTE + f"""
                 SELECT
-                    s.component_id, s.path, s.symbol, s.kind,
+                    rf.path || '::' || s.local_id AS component_id,
+                    rf.path AS path,
+                    s.symbol,
+                    s.kind,
                     s.line_start, s.line_end, s.source,
                     e.dimension, e.vector
-                FROM symbols AS s
-                JOIN document_embeddings AS de
-                  ON de.repo_id = s.repo_id
-                 AND de.branch = s.branch
-                 AND de.component_id = s.component_id
-                 AND de.model = ?
+                FROM resolved_files AS rf
+                JOIN artifact_documents AS d
+                  ON d.artifact_id = rf.artifact_id
+                JOIN artifact_symbols AS s
+                  ON s.artifact_id = d.artifact_id
+                 AND s.local_id = d.local_id
                 JOIN embeddings AS e
-                  ON e.content_signature = de.content_signature
-                 AND e.model = de.model
-                WHERE s.repo_id = ? AND s.branch = ?
-                  AND s.component_id IN ({placeholders})
+                  ON e.content_signature = d.content_signature
+                 AND e.model = ?
+                WHERE d.content_signature IN ({placeholders})
                 """,
-                (state.model, scope.repo, scope.branch, *chunk),
+                (snapshot_id, state.model, *chunk),
             )
             for row in vector_rows:
                 vector = _unpack_vector(row["vector"], int(row["dimension"]))
@@ -1489,7 +2175,12 @@ class RepositoryIndex:
         tree_id: str,
         expected_head: _Head | None,
         delta: TreeDelta,
+        snapshot_delta: TreeDelta,
+        snapshot_base: _SnapshotRef | None,
+        existing_snapshot: _SnapshotRef | None,
         prepared: _PreparedArtifacts,
+        parsed_blobs: int,
+        reused_blobs: int,
     ) -> int:
         timestamp = _timestamp()
         with self._store.transaction(write=True) as connection:
@@ -1523,52 +2214,134 @@ class RepositoryIndex:
                     """,
                     (artifact_id, *values, timestamp),
                 )
+                self._insert_artifact_records(
+                    connection,
+                    artifact_id,
+                    prepared.payloads[artifact_id],
+                )
 
-            touched_paths = tuple(entry.path for entry in delta.changed) + delta.removed
-            (
-                old_components,
-                old_names,
-                old_artifacts,
-                old_embeddings,
-            ) = self._delete_paths(connection, scope, touched_paths)
-            new_components, new_names = self._insert_entries(
-                connection,
-                scope,
-                delta.changed,
-                prepared,
+            for label, snapshot_ref in (
+                ("reused snapshot", existing_snapshot),
+                ("overlay base", snapshot_base),
+            ):
+                if snapshot_ref is None:
+                    continue
+                snapshot_row = connection.execute(
+                    """
+                    SELECT repo_id, tree_id FROM snapshots WHERE id = ?
+                    """,
+                    (snapshot_ref.snapshot_id,),
+                ).fetchone()
+                if (
+                    not snapshot_row
+                    or snapshot_row["repo_id"] != scope.repo
+                    or snapshot_row["tree_id"] != snapshot_ref.tree_id
+                ):
+                    raise RepositoryIndexError(
+                        "SYNC_CONFLICT",
+                        f"{label} was reclaimed while synchronizing {_target(scope)}",
+                        phase="commit",
+                        target=_target(scope),
+                        retryable=True,
+                    )
+
+            required_artifacts = set(prepared.entry_artifacts.values())
+            visible_artifacts: set[str] = set()
+            for artifact_ids in _chunks(tuple(required_artifacts)):
+                placeholders = ",".join("?" for _ in artifact_ids)
+                visible_artifacts.update(
+                    str(row[0])
+                    for row in connection.execute(
+                        f"SELECT artifact_id FROM parse_artifacts "
+                        f"WHERE artifact_id IN ({placeholders})",
+                        artifact_ids,
+                    )
+                )
+            if visible_artifacts != required_artifacts:
+                raise RepositoryIndexError(
+                    "SYNC_CONFLICT",
+                    f"cached artifacts were reclaimed while synchronizing {_target(scope)}",
+                    phase="commit",
+                    target=_target(scope),
+                    retryable=True,
+                )
+
+            snapshot_id = (
+                existing_snapshot.snapshot_id if existing_snapshot is not None else None
             )
-            self._delete_orphan_candidates(
-                connection,
-                artifact_ids=old_artifacts,
-                embedding_keys=old_embeddings,
-            )
-            self._rebuild_relations(
-                connection,
-                scope,
-                affected_names=old_names | new_names,
-                changed_components=new_components,
-                removed_components=old_components,
-            )
+            if snapshot_id is None:
+                snapshot_insert = connection.execute(
+                    """
+                    INSERT OR IGNORE INTO snapshots(
+                        repo_id, tree_id, base_snapshot_id, depth, created_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        scope.repo,
+                        tree_id,
+                        snapshot_base.snapshot_id if snapshot_base else None,
+                        snapshot_base.depth + 1 if snapshot_base else 0,
+                        timestamp,
+                    ),
+                )
+                snapshot_row = connection.execute(
+                    "SELECT id FROM snapshots WHERE repo_id = ? AND tree_id = ?",
+                    (scope.repo, tree_id),
+                ).fetchone()
+                if not snapshot_row:
+                    raise RuntimeError("snapshot insert did not publish a visible row")
+                snapshot_id = int(snapshot_row["id"])
+                if snapshot_insert.rowcount:
+                    connection.executemany(
+                        """
+                        INSERT INTO snapshot_changes(
+                            snapshot_id, path, path_key, kind, blob_id, artifact_id
+                        ) VALUES (?, ?, ?, 'upsert', ?, ?)
+                        """,
+                        [
+                            (
+                                snapshot_id,
+                                entry.path,
+                                _key(entry.path),
+                                entry.blob_id,
+                                prepared.entry_artifacts[entry.path],
+                            )
+                            for entry in snapshot_delta.changed
+                        ],
+                    )
+                    connection.executemany(
+                        """
+                        INSERT INTO snapshot_changes(
+                            snapshot_id, path, path_key, kind, blob_id, artifact_id
+                        ) VALUES (?, ?, ?, 'delete', NULL, NULL)
+                        """,
+                        [
+                            (snapshot_id, path, _key(path))
+                            for path in snapshot_delta.removed
+                        ],
+                    )
 
             generation = 1 if actual_head is None else actual_head.generation + 1
             cursor = connection.execute(
                 """
                 INSERT INTO generations(
-                    repo_id, branch, generation, tree_id, parent_id, created_at,
+                    repo_id, branch, generation, tree_id, snapshot_id,
+                    parent_id, created_at,
                     changed_count, removed_count, parsed_count, reused_count
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scope.repo,
                     scope.branch,
                     generation,
                     tree_id,
+                    snapshot_id,
                     actual_head.generation_id if actual_head else None,
                     timestamp,
                     len(delta.changed),
                     len(delta.removed),
-                    prepared.parsed_blobs,
-                    prepared.reused_blobs,
+                    parsed_blobs,
+                    reused_blobs,
                 ),
             )
             generation_id = int(cursor.lastrowid)
@@ -1602,7 +2375,7 @@ class RepositoryIndex:
             connection.execute(
                 """
                 UPDATE enrichment_jobs
-                SET status = 'superseded', updated_at = ?
+                SET status = 'superseded', owner_token = '', updated_at = ?
                 WHERE repo_id = ? AND branch = ?
                   AND status IN ('pending', 'running', 'failed')
                 """,
@@ -1625,345 +2398,270 @@ class RepositoryIndex:
             )
             return generation
 
-    def _delete_paths(
-        self,
-        connection: sqlite3.Connection,
-        scope: IndexScope,
-        paths: tuple[str, ...],
-    ) -> tuple[set[str], set[str], set[str], set[tuple[str, str]]]:
-        old_components: set[str] = set()
-        old_names: set[str] = set()
-        old_artifacts: set[str] = set()
-        old_embeddings: set[tuple[str, str]] = set()
-        for chunk in _chunks(paths):
-            placeholders = ",".join("?" for _ in chunk)
-            params = (scope.repo, scope.branch, *chunk)
-            rows = connection.execute(
-                f"""
-                SELECT component_id, short_name
-                FROM symbols
-                WHERE repo_id = ? AND branch = ? AND path IN ({placeholders})
-                """,
-                params,
-            )
-            for row in rows:
-                old_components.add(row["component_id"])
-                old_names.add(row["short_name"])
-            old_artifacts.update(
-                row["artifact_id"]
-                for row in connection.execute(
-                    f"""
-                    SELECT artifact_id FROM files
-                    WHERE repo_id = ? AND branch = ?
-                      AND path IN ({placeholders})
-                    """,
-                    params,
-                )
-            )
-            old_embeddings.update(
-                (row["content_signature"], row["model"])
-                for row in connection.execute(
-                    f"""
-                    SELECT de.content_signature, de.model
-                    FROM document_embeddings AS de
-                    JOIN documents AS d
-                      ON d.repo_id = de.repo_id
-                     AND d.branch = de.branch
-                     AND d.component_id = de.component_id
-                    WHERE d.repo_id = ? AND d.branch = ?
-                      AND d.path IN ({placeholders})
-                    """,
-                    params,
-                )
-            )
-
-        for component_chunk in _chunks(tuple(old_components)):
-            placeholders = ",".join("?" for _ in component_chunk)
-            scope_params = (scope.repo, scope.branch, *component_chunk)
-            connection.execute(
-                f"DELETE FROM relations WHERE repo_id = ? AND branch = ? "
-                f"AND caller_id IN ({placeholders})",
-                scope_params,
-            )
-            connection.execute(
-                f"DELETE FROM relations WHERE repo_id = ? AND branch = ? "
-                f"AND callee_id IN ({placeholders})",
-                scope_params,
-            )
-            connection.execute(
-                f"DELETE FROM symbol_calls WHERE repo_id = ? AND branch = ? "
-                f"AND caller_id IN ({placeholders})",
-                scope_params,
-            )
-            connection.execute(
-                f"DELETE FROM embedding_buckets WHERE repo_id = ? AND branch = ? "
-                f"AND component_id IN ({placeholders})",
-                scope_params,
-            )
-            connection.execute(
-                f"DELETE FROM document_embeddings WHERE repo_id = ? AND branch = ? "
-                f"AND component_id IN ({placeholders})",
-                scope_params,
-            )
-
-        for chunk in _chunks(paths):
-            placeholders = ",".join("?" for _ in chunk)
-            params = (scope.repo, scope.branch, *chunk)
-            for table in ("documents", "symbols", "files"):
-                connection.execute(
-                    f"DELETE FROM {table} WHERE repo_id = ? AND branch = ? "
-                    f"AND path IN ({placeholders})",
-                    params,
-                )
-        return old_components, old_names, old_artifacts, old_embeddings
-
     @staticmethod
-    def _delete_orphan_candidates(
+    def _insert_artifact_records(
         connection: sqlite3.Connection,
-        *,
-        artifact_ids: set[str],
-        embedding_keys: set[tuple[str, str]],
+        artifact_id: str,
+        payload: str,
     ) -> None:
-        for artifact_chunk in _chunks(tuple(artifact_ids)):
-            placeholders = ",".join("?" for _ in artifact_chunk)
-            connection.execute(
-                f"""
-                DELETE FROM parse_artifacts
-                WHERE artifact_id IN ({placeholders})
-                  AND NOT EXISTS (
-                    SELECT 1 FROM files
-                    WHERE files.artifact_id = parse_artifacts.artifact_id
-                  )
-                """,
-                artifact_chunk,
-            )
-        for content_signature, model in embedding_keys:
+        for record in json.loads(payload):
+            local_id = str(record["local_id"])
+            symbol = local_id
+            short_name = local_id.rsplit(".", 1)[-1]
+            imports = [str(value) for value in record.get("imports", [])]
+            calls = sorted({str(value) for value in record.get("calls", []) if value})
+            docstring = str(record.get("docstring") or "")
+            source = str(record.get("source") or "")
+            kind = str(record.get("type") or "symbol")
             connection.execute(
                 """
-                DELETE FROM embeddings
-                WHERE content_signature = ? AND model = ?
-                  AND NOT EXISTS (
-                    SELECT 1 FROM document_embeddings AS de
-                    WHERE de.content_signature = embeddings.content_signature
-                      AND de.model = embeddings.model
-                  )
+                INSERT OR IGNORE INTO artifact_symbols(
+                    artifact_id, local_id, symbol, symbol_key,
+                    short_name, short_key, kind, line_start, line_end,
+                    docstring, source, imports_json,
+                    entry_point_kind, entry_point_path
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (content_signature, model),
-            )
-
-    def _insert_entries(
-        self,
-        connection: sqlite3.Connection,
-        scope: IndexScope,
-        entries: tuple[TreeEntry, ...],
-        prepared: _PreparedArtifacts,
-    ) -> tuple[set[str], set[str]]:
-        components: set[str] = set()
-        names: set[str] = set()
-        for entry in entries:
-            artifact_id = prepared.entry_artifacts[entry.path]
-            connection.execute(
-                """
-                INSERT INTO files(repo_id, branch, path, blob_id, artifact_id)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (scope.repo, scope.branch, entry.path, entry.blob_id, artifact_id),
-            )
-            records = json.loads(prepared.payloads[artifact_id])
-            for record in records:
-                local_id = str(record["local_id"])
-                component_id = f"{entry.path}::{local_id}"
-                symbol = local_id
-                short_name = local_id.rsplit(".", 1)[-1]
-                components.add(component_id)
-                names.add(short_name)
-                imports = [str(value) for value in record.get("imports", [])]
-                calls = sorted({str(value) for value in record.get("calls", []) if value})
-                docstring = str(record.get("docstring") or "")
-                source = str(record.get("source") or "")
-                kind = str(record.get("type") or "symbol")
-                path_key = _key(entry.path)
-                connection.execute(
-                    """
-                    INSERT INTO symbols(
-                        repo_id, branch, component_id, component_key,
-                        path, path_key, local_id, symbol, symbol_key,
-                        short_name, short_key, kind, line_start, line_end,
-                        docstring, source, imports_json,
-                        entry_point_kind, entry_point_path
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        scope.repo,
-                        scope.branch,
-                        component_id,
-                        _key(component_id),
-                        entry.path,
-                        path_key,
-                        local_id,
-                        symbol,
-                        _key(symbol),
-                        short_name,
-                        _key(short_name),
-                        kind,
-                        int(record.get("line_start", 0)),
-                        int(record.get("line_end", 0)),
-                        docstring,
-                        source,
-                        json.dumps(imports, ensure_ascii=False, separators=(",", ":")),
-                        str(record.get("entry_point_kind") or ""),
-                        str(record.get("entry_point_path") or ""),
-                    ),
-                )
-                connection.executemany(
-                    """
-                    INSERT INTO symbol_calls(repo_id, branch, caller_id, call_name)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    [(scope.repo, scope.branch, component_id, call) for call in calls],
-                )
-                text = "\n".join(part for part in (
-                    component_id,
-                    entry.path,
+                (
+                    artifact_id,
+                    local_id,
                     symbol,
+                    _key(symbol),
+                    short_name,
+                    _key(short_name),
+                    kind,
+                    int(record.get("line_start", 0)),
+                    int(record.get("line_end", 0)),
                     docstring,
                     source,
-                    " ".join(calls),
-                    " ".join(imports),
-                ) if part)
-                connection.execute(
+                    json.dumps(imports, ensure_ascii=False, separators=(",", ":")),
+                    str(record.get("entry_point_kind") or ""),
+                    str(record.get("entry_point_path") or ""),
+                ),
+            )
+            connection.executemany(
+                """
+                INSERT OR IGNORE INTO artifact_calls(
+                    artifact_id, local_id, call_name, call_key
+                ) VALUES (?, ?, ?, ?)
+                """,
+                [
+                    (artifact_id, local_id, call, _key(call))
+                    for call in calls
+                ],
+            )
+            text = "\n".join(part for part in (
+                local_id,
+                symbol,
+                docstring,
+                source,
+                " ".join(calls),
+                " ".join(imports),
+            ) if part)
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO artifact_documents(
+                    artifact_id, local_id, symbol, kind, text, content_signature
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    artifact_id,
+                    local_id,
+                    symbol,
+                    kind,
+                    text,
+                    hashlib.sha256(text.encode()).hexdigest(),
+                ),
+            )
+
+    def _ensure_relation_cache(self, snapshot_id: int) -> bool:
+        try:
+            with self._store.transaction() as connection:
+                ready = connection.execute(
+                    "SELECT 1 FROM relation_cache_states WHERE snapshot_id = ?",
+                    (snapshot_id,),
+                ).fetchone()
+                if ready:
+                    return True
+                exists = connection.execute(
+                    "SELECT 1 FROM snapshots WHERE id = ?",
+                    (snapshot_id,),
+                ).fetchone()
+                if not exists:
+                    return False
+                relations = self._relation_rows(connection, snapshot_id)
+
+            with self._store.transaction(write=True) as connection:
+                ready = connection.execute(
+                    "SELECT 1 FROM relation_cache_states WHERE snapshot_id = ?",
+                    (snapshot_id,),
+                ).fetchone()
+                if ready:
+                    return True
+                exists = connection.execute(
+                    "SELECT 1 FROM snapshots WHERE id = ?",
+                    (snapshot_id,),
+                ).fetchone()
+                if not exists:
+                    return False
+                connection.executemany(
                     """
-                    INSERT INTO documents(
-                        repo_id, branch, component_id, path, symbol, kind,
-                        text, content_signature
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT OR IGNORE INTO snapshot_relations(
+                        snapshot_id, caller_id, callee_id, kind
+                    ) VALUES (?, ?, ?, ?)
                     """,
                     (
-                        scope.repo,
-                        scope.branch,
-                        component_id,
-                        entry.path,
-                        symbol,
-                        kind,
-                        text,
-                        hashlib.sha256(text.encode()).hexdigest(),
+                        (snapshot_id, caller_id, callee_id, kind)
+                        for caller_id, callee_id, kind in relations
                     ),
                 )
-        return components, names
-
-    def _rebuild_relations(
-        self,
-        connection: sqlite3.Connection,
-        scope: IndexScope,
-        *,
-        affected_names: set[str],
-        changed_components: set[str],
-        removed_components: set[str],
-    ) -> int:
-        affected_callers = set(changed_components)
-        for chunk in _chunks(tuple(affected_names)):
-            placeholders = ",".join("?" for _ in chunk)
-            rows = connection.execute(
-                f"""
-                SELECT caller_id FROM symbol_calls
-                WHERE repo_id = ? AND branch = ? AND call_name IN ({placeholders})
-                """,
-                (scope.repo, scope.branch, *chunk),
-            )
-            affected_callers.update(row["caller_id"] for row in rows)
-
-        for chunk in _chunks(tuple(affected_callers)):
-            placeholders = ",".join("?" for _ in chunk)
-            connection.execute(
-                f"DELETE FROM relations WHERE repo_id = ? AND branch = ? "
-                f"AND caller_id IN ({placeholders})",
-                (scope.repo, scope.branch, *chunk),
-            )
-        for chunk in _chunks(tuple(removed_components)):
-            placeholders = ",".join("?" for _ in chunk)
-            connection.execute(
-                f"DELETE FROM relations WHERE repo_id = ? AND branch = ? "
-                f"AND callee_id IN ({placeholders})",
-                (scope.repo, scope.branch, *chunk),
-            )
-
-        inserted = 0
-        for caller_id in sorted(affected_callers):
-            caller = connection.execute(
-                """
-                SELECT path FROM symbols
-                WHERE repo_id = ? AND branch = ? AND component_id = ?
-                """,
-                (scope.repo, scope.branch, caller_id),
-            ).fetchone()
-            if not caller:
-                continue
-            calls = connection.execute(
-                """
-                SELECT call_name FROM symbol_calls
-                WHERE repo_id = ? AND branch = ? AND caller_id = ?
-                ORDER BY call_name
-                """,
-                (scope.repo, scope.branch, caller_id),
-            )
-            for call in calls:
-                targets = list(connection.execute(
+                connection.execute(
                     """
-                    SELECT component_id, path FROM symbols
-                    WHERE repo_id = ? AND branch = ? AND short_key = ?
-                    ORDER BY component_id
+                    INSERT INTO relation_cache_states(snapshot_id, created_at)
+                    VALUES (?, ?)
                     """,
-                    (scope.repo, scope.branch, _key(call["call_name"])),
-                ))
-                same_file = [target for target in targets if target["path"] == caller["path"]]
-                for target in same_file or targets:
-                    connection.execute(
-                        """
-                        INSERT OR IGNORE INTO relations(
-                            repo_id, branch, caller_id, callee_id, kind
-                        ) VALUES (?, ?, ?, ?, 'call')
-                        """,
-                        (scope.repo, scope.branch, caller_id, target["component_id"]),
+                    (snapshot_id, _timestamp()),
+                )
+            return True
+        except sqlite3.OperationalError as error:
+            if "locked" in str(error).casefold():
+                raise RepositoryIndexError(
+                    "STORE_BUSY",
+                    str(error),
+                    phase="query",
+                    target=f"snapshot:{snapshot_id}",
+                    retryable=True,
+                ) from error
+            raise
+
+    @staticmethod
+    def _relation_rows(
+        connection: sqlite3.Connection,
+        snapshot_id: int,
+    ) -> tuple[tuple[str, str, str], ...]:
+        symbols = list(connection.execute(
+            _RESOLVED_FILES_CTE + """
+            SELECT
+                rf.path,
+                s.local_id,
+                s.short_key,
+                rf.path || '::' || s.local_id AS component_id
+            FROM resolved_files AS rf
+            JOIN artifact_symbols AS s ON s.artifact_id = rf.artifact_id
+            ORDER BY component_id
+            """,
+            (snapshot_id,),
+        ))
+        targets_by_name: dict[str, list[sqlite3.Row]] = {}
+        for symbol in symbols:
+            targets_by_name.setdefault(str(symbol["short_key"]), []).append(symbol)
+        calls = connection.execute(
+            _RESOLVED_FILES_CTE + """
+            SELECT
+                rf.path,
+                rf.path || '::' || c.local_id AS caller_id,
+                c.call_key,
+                caller.imports_json
+            FROM resolved_files AS rf
+            JOIN artifact_calls AS c ON c.artifact_id = rf.artifact_id
+            JOIN artifact_symbols AS caller
+              ON caller.artifact_id = c.artifact_id
+             AND caller.local_id = c.local_id
+            ORDER BY caller_id, c.call_key
+            """,
+            (snapshot_id,),
+        )
+        targets_by_module: dict[tuple[str, str], list[sqlite3.Row]] = {}
+        for symbol in symbols:
+            for module_key in _path_module_keys(str(symbol["path"])):
+                targets_by_module.setdefault(
+                    (str(symbol["short_key"]), module_key),
+                    [],
+                ).append(symbol)
+
+        relations: set[tuple[str, str, str]] = set()
+        import_cache: dict[tuple[str, str], tuple[str, ...]] = {}
+        for call in calls:
+            targets = targets_by_name.get(str(call["call_key"]), [])
+            same_file = [
+                target for target in targets
+                if target["path"] == call["path"]
+            ]
+            caller_id = str(call["caller_id"])
+            call_key = str(call["call_key"])
+            if same_file:
+                resolved_targets = same_file
+            else:
+                cache_key = (caller_id, call_key)
+                module_keys = import_cache.get(cache_key)
+                if module_keys is None:
+                    module_keys = _import_module_keys(
+                        str(call["imports_json"]),
+                        call_key,
                     )
-                    inserted += 1
-        return inserted
+                    import_cache[cache_key] = module_keys
+                imported: dict[str, sqlite3.Row] = {}
+                for module_key in module_keys:
+                    for target in targets_by_module.get(
+                        (call_key, module_key),
+                        (),
+                    ):
+                        imported[str(target["component_id"])] = target
+                resolved_targets = (
+                    list(imported.values())
+                    if imported
+                    else (targets if len(targets) == 1 else [])
+                )
+            for target in resolved_targets:
+                relations.add((
+                    caller_id,
+                    str(target["component_id"]),
+                    "call",
+                ))
+        return tuple(sorted(relations))
 
     def _exact_candidates(
         self,
         connection: sqlite3.Connection,
-        scope: IndexScope,
+        snapshot_id: int,
         query: str,
         limit: int,
     ) -> list[dict]:
         query_key = _key(query)
         rows = connection.execute(
-            """
+            _RESOLVED_FILES_CTE + """
             SELECT
-                s.component_id, s.path, s.symbol, s.kind,
+                rf.path || '::' || s.local_id AS component_id,
+                rf.path AS path,
+                s.symbol,
+                s.kind,
                 s.line_start, s.line_end, s.source,
                 CASE
-                    WHEN s.component_key = ? THEN 100.0
+                    WHEN rf.path_key || '::' || s.symbol_key = ? THEN 100.0
                     WHEN s.symbol_key = ? THEN 90.0
                     WHEN s.short_key = ? THEN 85.0
-                    WHEN s.path_key = ? THEN 80.0
+                    WHEN rf.path_key = ? THEN 80.0
+                    WHEN instr(rf.path_key, ?) > 0 THEN 60.0
                     ELSE 0.0
                 END AS exact_score
-            FROM symbols AS s
-            WHERE s.repo_id = ? AND s.branch = ?
-              AND (
-                  s.component_key = ? OR s.symbol_key = ? OR
-                  s.short_key = ? OR s.path_key = ?
+            FROM resolved_files AS rf
+            JOIN artifact_symbols AS s ON s.artifact_id = rf.artifact_id
+            WHERE (
+                  rf.path_key || '::' || s.symbol_key = ? OR
+                  s.symbol_key = ? OR s.short_key = ? OR rf.path_key = ? OR
+                  instr(rf.path_key, ?) > 0
               )
-            ORDER BY exact_score DESC, s.component_id
+            ORDER BY exact_score DESC, component_id
             LIMIT ?
             """,
             (
+                snapshot_id,
                 query_key,
                 query_key,
                 query_key,
                 query_key,
-                scope.repo,
-                scope.branch,
+                query_key,
+                query_key,
                 query_key,
                 query_key,
                 query_key,
@@ -1976,7 +2674,7 @@ class RepositoryIndex:
     def _lexical_candidates(
         self,
         connection: sqlite3.Connection,
-        scope: IndexScope,
+        snapshot_id: int,
         query: str,
         limit: int,
     ) -> list[dict]:
@@ -1985,23 +2683,26 @@ class RepositoryIndex:
             return []
         try:
             rows = connection.execute(
-                """
+                _RESOLVED_FILES_CTE + """
                 SELECT
-                    s.component_id, s.path, s.symbol, s.kind,
+                    rf.path || '::' || s.local_id AS component_id,
+                    rf.path AS path,
+                    s.symbol,
+                    s.kind,
                     s.line_start, s.line_end, s.source,
-                    bm25(documents_fts, 2.0, 5.0, 1.0) AS lexical_rank
-                FROM documents_fts
-                JOIN documents AS d ON d.id = documents_fts.rowid
-                JOIN symbols AS s
-                  ON s.repo_id = d.repo_id
-                 AND s.branch = d.branch
-                 AND s.component_id = d.component_id
-                WHERE documents_fts MATCH ?
-                  AND d.repo_id = ? AND d.branch = ?
-                ORDER BY lexical_rank, s.component_id
+                    bm25(artifact_documents_fts, 5.0, 1.0) AS lexical_rank
+                FROM artifact_documents_fts
+                JOIN artifact_documents AS d
+                  ON d.id = artifact_documents_fts.rowid
+                JOIN resolved_files AS rf ON rf.artifact_id = d.artifact_id
+                JOIN artifact_symbols AS s
+                  ON s.artifact_id = d.artifact_id
+                 AND s.local_id = d.local_id
+                WHERE artifact_documents_fts MATCH ?
+                ORDER BY lexical_rank, component_id
                 LIMIT ?
                 """,
-                (expression, scope.repo, scope.branch, limit),
+                (snapshot_id, expression, limit),
             )
             result = []
             for row in rows:
@@ -2015,7 +2716,7 @@ class RepositoryIndex:
                     "INVARIANT_VIOLATION",
                     str(error),
                     phase="query",
-                    target=_target(scope),
+                    target=f"snapshot:{snapshot_id}",
                 ) from error
             raise
 
@@ -2064,37 +2765,45 @@ class RepositoryIndex:
     def _related_candidates(
         self,
         connection: sqlite3.Connection,
-        scope: IndexScope,
+        snapshot_id: int,
         matches: tuple[SearchHit, ...],
         limit: int,
     ) -> tuple[SearchHit, ...]:
         if not matches or limit == 0:
             return ()
         direct = {hit.component_id for hit in matches}
+        ranks = {
+            hit.component_id: rank
+            for rank, hit in enumerate(matches, start=1)
+        }
         related_scores: dict[str, float] = {}
-        for rank, hit in enumerate(matches, start=1):
+        for chunk in _chunks(tuple(ranks)):
+            placeholders = ",".join("?" for _ in chunk)
             rows = connection.execute(
-                """
+                f"""
                 SELECT caller_id, callee_id
-                FROM relations
-                WHERE repo_id = ? AND branch = ?
-                  AND (caller_id = ? OR callee_id = ?)
+                FROM snapshot_relations
+                WHERE snapshot_id = ?
+                  AND (
+                    caller_id IN ({placeholders})
+                    OR callee_id IN ({placeholders})
+                  )
                 ORDER BY caller_id, callee_id
                 """,
-                (scope.repo, scope.branch, hit.component_id, hit.component_id),
+                (snapshot_id, *chunk, *chunk),
             )
             for row in rows:
-                neighbor = (
-                    row["callee_id"]
-                    if row["caller_id"] == hit.component_id
-                    else row["caller_id"]
-                )
-                if neighbor in direct:
-                    continue
-                related_scores[neighbor] = max(
-                    related_scores.get(neighbor, 0.0),
-                    1.0 / rank,
-                )
+                for source, neighbor in (
+                    (str(row["caller_id"]), str(row["callee_id"])),
+                    (str(row["callee_id"]), str(row["caller_id"])),
+                ):
+                    rank = ranks.get(source)
+                    if rank is None or neighbor in direct:
+                        continue
+                    related_scores[neighbor] = max(
+                        related_scores.get(neighbor, 0.0),
+                        1.0 / rank,
+                    )
 
         ordered_ids = sorted(related_scores, key=lambda item: (-related_scores[item], item))[:limit]
         if not ordered_ids:
@@ -2103,13 +2812,20 @@ class RepositoryIndex:
         for chunk in _chunks(tuple(ordered_ids)):
             placeholders = ",".join("?" for _ in chunk)
             rows = connection.execute(
-                f"""
-                SELECT component_id, path, symbol, kind, line_start, line_end, source
-                FROM symbols
-                WHERE repo_id = ? AND branch = ?
-                  AND component_id IN ({placeholders})
+                _RESOLVED_FILES_CTE + f"""
+                SELECT
+                    rf.path || '::' || s.local_id AS component_id,
+                    rf.path AS path,
+                    s.symbol,
+                    s.kind,
+                    s.line_start,
+                    s.line_end,
+                    s.source
+                FROM resolved_files AS rf
+                JOIN artifact_symbols AS s ON s.artifact_id = rf.artifact_id
+                WHERE rf.path || '::' || s.local_id IN ({placeholders})
                 """,
-                (scope.repo, scope.branch, *chunk),
+                (snapshot_id, *chunk),
             )
             rows_by_id.update({row["component_id"]: row for row in rows})
 
@@ -2147,7 +2863,7 @@ class RepositoryIndex:
     def _head(connection: sqlite3.Connection, scope: IndexScope) -> _Head | None:
         row = connection.execute(
             """
-            SELECT g.id, g.generation, g.tree_id
+            SELECT g.id, g.generation, g.tree_id, g.snapshot_id
             FROM branch_heads AS h
             JOIN generations AS g ON g.id = h.generation_id
             WHERE h.repo_id = ? AND h.branch = ?
@@ -2160,6 +2876,7 @@ class RepositoryIndex:
             generation_id=int(row["id"]),
             generation=int(row["generation"]),
             tree_id=row["tree_id"],
+            snapshot_id=int(row["snapshot_id"]),
         )
 
     @staticmethod
@@ -2217,6 +2934,32 @@ def _context_hash(path: str) -> str:
     return hashlib.sha256(f"{suffix}\0{PARSER_VERSION}".encode()).hexdigest()[:16]
 
 
+def _path_module_keys(path: str) -> tuple[str, ...]:
+    source_path = PurePosixPath(path)
+    without_suffix = str(source_path.with_suffix(""))
+    parts = [part for part in without_suffix.replace("\\", "/").split("/") if part]
+    if parts and parts[-1] == "__init__":
+        parts.pop()
+    return tuple(dict.fromkeys(
+        _key(".".join(parts[index:]))
+        for index in range(len(parts))
+    ))
+
+
+def _import_module_keys(imports_json: str, call_key: str) -> tuple[str, ...]:
+    result: list[str] = []
+    for value in json.loads(imports_json or "[]"):
+        normalized = _key(str(value)).replace("::", ".").replace("/", ".")
+        parts = [part for part in normalized.split(".") if part]
+        if len(parts) > 1 and parts[-1] == call_key:
+            parts.pop()
+        result.extend(
+            ".".join(parts[index:])
+            for index in range(len(parts))
+        )
+    return tuple(dict.fromkeys(result))
+
+
 def _fts_expression(query: str) -> str:
     tokens = re.findall(r"[^\W_]+(?:_[^\W_]+)*", query.casefold(), flags=re.UNICODE)
     return " OR ".join(f'"{token.replace(chr(34), chr(34) * 2)}"' for token in tokens)
@@ -2244,14 +2987,6 @@ def _search_hit(candidate: dict) -> SearchHit:
     )
 
 
-def _count(connection: sqlite3.Connection, table: str, scope: IndexScope) -> int:
-    row = connection.execute(
-        f"SELECT COUNT(*) FROM {table} WHERE repo_id = ? AND branch = ?",
-        (scope.repo, scope.branch),
-    ).fetchone()
-    return int(row[0])
-
-
 def _chunks(values: Sequence[object], size: int = 400) -> Iterable[tuple[object, ...]]:
     for start in range(0, len(values), size):
         yield tuple(values[start:start + size])
@@ -2259,6 +2994,16 @@ def _chunks(values: Sequence[object], size: int = 400) -> Iterable[tuple[object,
 
 def _head_identity(head: _Head | None) -> tuple[int, str] | None:
     return None if head is None else (head.generation_id, head.tree_id)
+
+
+def _snapshot_ref(row: sqlite3.Row | None) -> _SnapshotRef | None:
+    if row is None:
+        return None
+    return _SnapshotRef(
+        snapshot_id=int(row["id"]),
+        tree_id=str(row["tree_id"]),
+        depth=int(row["depth"]),
+    )
 
 
 def _key(value: str) -> str:
@@ -2328,6 +3073,7 @@ def _elapsed_ms(started: float) -> float:
 
 
 __all__ = [
+    "BranchReconcileReport",
     "EmbeddingProvider",
     "EnrichmentReport",
     "IndexScope",

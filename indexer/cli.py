@@ -125,6 +125,7 @@ def maintain(retain_generations: int):
     click.echo(f"Deleted parse artifacts: {report.deleted_artifacts}")
     click.echo(f"Deleted embeddings:      {report.deleted_embeddings}")
     click.echo(f"Deleted Git objects:     {report.deleted_snapshot_objects}")
+    click.echo(f"Reclaimed SQLite pages:  {report.reclaimed_pages}")
     click.echo(f"SQLite integrity:        {'ok' if report.integrity.ok else 'failed'}")
 
 

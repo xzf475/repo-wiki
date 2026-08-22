@@ -13,29 +13,37 @@ Git tree / staged / worktree snapshot
                  │
                  ▼
 content-addressed parse artifacts
-                 │
-                 ▼
-SQLite generation + branch head ──► Wiki / Skill projection
-                 │
-        ┌────────┼────────┐
-        ▼        ▼        ▼
-      Exact     FTS5    Call graph
-        └────────┼────────┘
+        │                    │
+        ▼                    ▼
+symbols / docs / FTS5   snapshot base + path overlay
+        │                    │
+        └─────────┬──────────┘
+                  ▼
+       generation + branch head ──► Wiki / Skill projection
+                  │
+        ┌─────────┼──────────┐
+        ▼         ▼          ▼
+      Exact      FTS5    lazy call graph
+        └─────────┼──────────┘
                  ▼
             ranked matches
                  │
-          optional embedding revision
+      shared optional embedding revision
 ```
 
 Core invariants:
 
 - Inputs are Git trees, not mutable checkouts. `@staged` and `@worktree` are materialized as deterministic trees.
 - A branch head moves only after a complete transaction commits; parse or store failures preserve the last visible generation.
-- Parse artifacts and embeddings are content-addressed and reusable across branches.
+- Parse artifacts, symbols, search documents, FTS rows, and embeddings are content-addressed and reusable across branches; branch paths are joined only when queried.
+- Identical trees reuse one snapshot. Nearby branches store only changed/deleted paths over a base snapshot; the smaller full or incremental checkpoint is selected at the depth limit, while ordinary increments never rewrite the full path map.
+- Call relations are built lazily per snapshot only after primary retrieval finds matches and related results are requested. Import paths disambiguate same-name symbols instead of creating a global Cartesian product.
 - Local retrieval always works. `preferred` degrades on dense failure; `required` reports an explicit error.
-- Each branch retains its two newest generations; unreachable generations, parse artifacts, and embeddings are collected automatically.
+- Each branch retains its two newest generations. Full-branch sync removes index scopes no longer selected by the Branch Rule and collects unreachable snapshots, artifacts, embeddings, and free SQLite pages.
 
-Runtime state lives in `.indexer/state/repository-index.sqlite3` with SQLite WAL, foreign keys, and FTS5. Synthetic staged/worktree objects live in `.indexer/state/git-objects` and never modify `.git`. Commit-friendly projections live in `wiki/` and `.indexer/skills/codebase.md`.
+All branches of one repository share `.indexer/state/repository-index.sqlite3`; there is no database copy per branch. The database uses SQLite WAL, foreign keys, and FTS5. Synthetic staged/worktree objects live in `.indexer/state/git-objects`, use cross-process leases while synchronization is in flight, and never modify `.git`. Commit-friendly projections live in `wiki/` and `.indexer/skills/codebase.md`.
+
+Schema v4 is a derived-index format. Opening an older schema automatically compacts and recreates an empty v4 structure instead of migrating old index rows. A newer schema is rejected explicitly so an older binary cannot damage it. After upgrading, run `repo-wiki run` for a local repository or `/sync-all` for a managed multi-branch repository to restore it from Git trees.
 
 ## Install
 
@@ -113,7 +121,7 @@ repo-wiki run                 # structural generation + projections
 repo-wiki run --enrich        # publish dense enrichment after the structural generation
 repo-wiki run --staged
 repo-wiki status
-repo-wiki maintain            # recover jobs, collect state, verify SQLite
+repo-wiki maintain            # recover expired jobs, GC, reclaim pages, verify SQLite
 ```
 
 The pre-commit hook installed by `repo-wiki init` runs `repo-wiki run --staged`. It publishes one complete structural generation for the staged tree without calling a remote provider.

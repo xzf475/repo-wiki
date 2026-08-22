@@ -13,29 +13,37 @@ Git tree / staged / worktree snapshot
                  │
                  ▼
 content-addressed parse artifacts
-                 │
-                 ▼
-SQLite generation + branch head ──► Wiki / Skill projection
-                 │
-        ┌────────┼────────┐
-        ▼        ▼        ▼
-      Exact     FTS5    Call graph
-        └────────┼────────┘
+        │                    │
+        ▼                    ▼
+symbols / docs / FTS5   snapshot base + path overlay
+        │                    │
+        └─────────┬──────────┘
+                  ▼
+       generation + branch head ──► Wiki / Skill projection
+                  │
+        ┌─────────┼──────────┐
+        ▼         ▼          ▼
+      Exact      FTS5    lazy call graph
+        └─────────┼──────────┘
                  ▼
             ranked matches
                  │
-          optional embedding revision
+     shared optional embedding revision
 ```
 
 核心约束：
 
 - 输入是 Git tree，而不是可变 checkout；`@staged` 与 `@worktree` 也会先物化为确定性 tree。
 - 分支头只在完整事务成功后切换；解析或写入失败不会破坏最后可用 generation。
-- 解析制品与 embedding 按内容寻址，可跨分支复用。
+- 解析制品、符号、检索文档、FTS 行与 embedding 按内容寻址，可跨分支复用；查询时才与分支路径组合。
+- 相同 tree 直接复用同一个 snapshot；相近分支只保存相对基准 snapshot 的变更/删除路径，overlay 链达到深度上限时选择更小的全量或增量 checkpoint，普通增量不会重写全量路径。
+- 调用关系只在主检索有命中且请求 related 结果时按 snapshot 惰性构建；导入路径用于消解同名符号，避免全局同名调用形成笛卡尔积。
 - 本地检索始终可用；dense 增强失败时 `preferred` 降级，`required` 明确报错。
-- 每个分支自动保留最近两代，并回收不可达 generation、解析制品和 embedding。
+- 每个分支自动保留最近两代；全分支同步会删除不再匹配 Branch Rule 的索引 scope，并回收不可达 snapshot、解析制品、embedding 和 SQLite 空闲页。
 
-状态存储在 `.indexer/state/repository-index.sqlite3`，使用 SQLite WAL、外键与 FTS5；staged/worktree 合成 tree 的对象存储在 `.indexer/state/git-objects`，不会修改 `.git`。可提交的投影是 `wiki/` 和 `.indexer/skills/codebase.md`。
+同一仓库的所有分支共用 `.indexer/state/repository-index.sqlite3`，而不是每个分支创建一份数据库。数据库使用 SQLite WAL、外键与 FTS5；staged/worktree 合成 tree 的对象存储在 `.indexer/state/git-objects`，同步期间使用跨进程 lease 防止维护任务提前回收，不会修改 `.git`。可提交的投影是 `wiki/` 和 `.indexer/skills/codebase.md`。
+
+Schema v4 是派生索引格式：从旧 schema 首次打开时会自动清理、压缩并重建空结构，不迁移旧索引行；高于当前版本的 schema 会被明确拒绝，避免旧程序破坏新格式。升级后运行一次 `repo-wiki run`（单仓库）或 `/sync-all`（托管多分支仓库）即可从 Git tree 恢复。
 
 ## 安装
 
@@ -113,7 +121,7 @@ repo-wiki run                 # 结构 generation + 投影
 repo-wiki run --enrich        # 发布结构 generation 后执行 dense 增强
 repo-wiki run --staged
 repo-wiki status
-repo-wiki maintain            # 恢复中断任务、GC、SQLite 完整性检查
+repo-wiki maintain            # 恢复过期任务、GC、回收 SQLite 空闲页并检查完整性
 ```
 
 `repo-wiki init` 安装的 pre-commit hook 使用 `repo-wiki run --staged`。它会一次性发布暂存 tree 的完整结构 generation，不会调用远程 provider。

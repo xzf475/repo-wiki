@@ -56,7 +56,7 @@ Fetch refs once, then synchronize all registered branches without switching the 
 {"name":"backend","enrich":false}
 ```
 
-The configured first branch is projected to `wiki/` and `.indexer/skills/codebase.md`; every branch retains its own generation and search scope.
+The configured first branch is projected to `wiki/` and `.indexer/skills/codebase.md`; every branch retains its own generation and search scope. All branch scopes share content-addressed artifacts and snapshot overlays in one SQLite database. After successful branch syncs, scopes no longer present in the active Branch Rule are removed and orphaned storage is reclaimed. The asynchronous task result includes `removed_branches` and `storage_reclamation` counters.
 
 ### `POST /api/repo/{name}/sync`
 

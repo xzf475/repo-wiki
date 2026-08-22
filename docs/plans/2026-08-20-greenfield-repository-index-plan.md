@@ -24,7 +24,7 @@ CLI、REST、MCP 只负责协议转换。调用方不得传入候选文件、缓
 
 1. 每次同步先将来源固化为不可变 `tree_id`；后续阶段不得读取变化中的 ref。
 2. `repo + branch` 必须显式存在，不允许空分支表示跨分支搜索。
-3. 文件映射、符号、关系、Exact/FTS 投影和 branch head 在同一个 SQLite 事务中发布。
+3. snapshot overlay、artifact 结构事实、Exact/FTS 投影和 branch head 在同一个 SQLite 事务中发布；可重建的关系缓存按 snapshot 惰性生成。
 4. 读请求只能看到完整旧 generation 或完整新 generation。
 5. AST 解析产物按 `blob_id + parser_version + context_hash` 内容寻址，可跨分支复用。
 6. 无变化 tree 同步不得解析文件、写结构索引或调用远程 provider。
@@ -36,12 +36,13 @@ CLI、REST、MCP 只负责协议转换。调用方不得传入候选文件、缓
 ## 状态模型
 
 - `repositories`：仓库身份。
-- `generations`：`repo/branch/tree_id/parent` 与增量统计。
+- `generations`：`repo/branch/tree_id/snapshot_id/parent` 与逻辑增量统计。
 - `branch_heads`：当前可见 generation 指针。
 - `parse_artifacts`：版本化 AST 解析结果。
-- `files`：当前 branch head 的 `path -> blob/artifact` 物化映射。
-- `symbols` / `relations`：当前 branch head 的符号与调用边物化视图。
-- `documents` / `documents_fts`：事务性本地检索投影。
+- `artifact_symbols` / `artifact_calls`：与路径无关、跨分支共享的结构事实。
+- `artifact_documents` / `artifact_documents_fts`：按 artifact 共享的事务性本地检索投影。
+- `snapshots` / `snapshot_changes`：`tree_id` 唯一 snapshot 及其 `base + path overlay`；查询通过 resolved snapshot 绑定路径和 artifact。
+- `snapshot_relations`：按 snapshot 惰性生成并由相同 tree 共享的调用图缓存。
 - `embeddings`：按内容签名与模型版本复用。
 - `enrichment_revisions` / `jobs`：异步 enrichment 可见性与幂等任务。
 - `.indexer/state/git-objects`：staged/worktree 合成 tree 的持久内容对象，不修改 `.git`。
@@ -89,7 +90,7 @@ CLI、REST、MCP 只负责协议转换。调用方不得传入候选文件、缓
 完成证据：
 
 - `GitSnapshot` 使用 tree/blob OID、`diff-tree`、`ls-tree` 和 `cat-file --batch`，不创建 worktree。
-- `RepositoryStore` 使用 SQLite WAL、外键、FTS5 触发器和短事务；branch head 与结构投影原子提交。
+- `RepositoryStore` 使用 SQLite WAL、外键、FTS5 触发器和短事务；branch head 与 artifact/snapshot 结构投影原子提交。
 - 解析产物按 `blob_id + parser_version + context_hash` 保存；跨分支相同 tree 的第二次同步解析数为 0。
 - 5000 文件三次独立运行中位数中，单文件增量只扫描并解析 1 个文件，耗时 49.503 ms；无变化耗时 11.978 ms。
 
@@ -112,7 +113,7 @@ CLI、REST、MCP 只负责协议转换。调用方不得传入候选文件、缓
 
 完成证据：
 
-- Exact 命中优先，FTS5 使用持久化倒排索引，调用关系按增量 raw-call facts 重建；查询不重算全库 DF。
+- Exact 命中优先，FTS5 使用持久化倒排索引，调用关系按 snapshot 惰性构建并复用；查询不重算全库 DF。
 - Exact 命中存在时不会被仅包含调用文本的词法候选污染，调用者进入 `related`。
 - 5000 文件、30 次查询的本地 P95 三次独立运行中位数为 9.754 ms，低于 100 ms 门槛。
 - 完整基线见 `docs/plans/2026-08-20-repository-index-baseline.json`。
@@ -185,11 +186,45 @@ CLI、REST、MCP 只负责协议转换。调用方不得传入候选文件、缓
 完成证据：
 
 - 10/100/500/5000 文件基线已重跑；5000 文件单文件增量中位数 49.503 ms、无变化 11.978 ms、查询 P95 9.754 ms。
-- 自动发布只回收本次 delta 触达的孤儿 artifact/embedding，避免全库 GC 把增量重新退化为 `O(N)`；每分支自动保留最近两代。
-- 显式 `repo-wiki maintain` 可恢复中断 enrichment、回收旧 generation/revision/artifact/embedding/synthetic Git object，并执行 SQLite 页完整性与外键检查。
+- 自动发布只检查被淘汰 generation 的有界 snapshot 祖先；仅当深度 checkpoint 切断旧链时回收对应 artifact/embedding，避免全库 GC 把增量重新退化为 `O(N)`；每分支自动保留最近两代。
+- 显式 `repo-wiki maintain` 只恢复租约过期的 enrichment，回收旧 generation/revision/artifact/embedding/synthetic Git object，以有界循环释放 SQLite 空闲页，并执行页完整性与外键检查。
 - 两个相同分支副本产生 4 条 file 映射但仅 2 个 parse artifact，存储随唯一 blob 增长。
-- staged/worktree snapshot 使用独立 index 与 `.indexer/state/git-objects`，不修改真实 index/checkout/`.git/objects`；连续运行第二次为 `unchanged`。
+- staged/worktree snapshot 使用独立 index 与 `.indexer/state/git-objects`，in-flight tree 由跨进程 lease 保护，不修改真实 index/checkout/`.git/objects`；连续运行第二次为 `unchanged`。
 - Projection 会删除不再属于当前 generation 的旧 Wiki 页；README、中英文 API/Agent 文档、Skill、Wiki 与发布清单已更新。
+
+### R6：多分支存储共享 P0–P3
+
+状态：已完成
+
+| 阶段 | 实现 | 完成条件 |
+|---|---|---|
+| P0 | 全分支同步后对齐活动 Branch Rule，删除失活 scope，GC 后有界执行 incremental vacuum | Save & Re-sync 后旧分支不再可检索，回收统计可见 |
+| P1 | 将 symbol/call/document/FTS 从 generation 物化行提升为全局 artifact 投影 | 相同 blob 跨分支只有一份结构与全文索引 |
+| P2 | embedding/bucket 按内容签名全局复用；调用图仅在有命中且请求 related 时按 snapshot 惰性缓存，并按 import 消解同名目标 | 相同内容不重复向量化，相同 tree 不重复关系图，同名调用不形成全局笛卡尔积 |
+| P3 | generation 引用 `tree_id` 唯一 snapshot；相近分支只写 base snapshot 上的 path overlay | 单文件分支只新增一条 overlay，链深有上限且保留代可独立解析 |
+
+完成证据：
+
+- 相同 tree 的并发分支发布幂等复用一个 snapshot；相同 blob 的 parse、symbol、document、FTS 与 embedding 均只有一份。
+- 从主分支创建仅一文件变化的分支时，逻辑 generation 仍报告完整 diff，但物理层只新增一个 artifact 和一条 snapshot overlay。
+- 关系缓存初次结构同步为 0；零命中查询不构图，首次有命中图查询后生成；相同 tree 的第二分支查询复用同一缓存。
+- Branch Rule 缩减后，失活 branch head/generation 被删除，不可达 snapshot/artifact/embedding 被回收，并循环释放有界数量的 SQLite 空闲页。
+- overlay 基准只从有界候选中选择，最大深度为 32；达到上限时比较候选 overlay 与全量 source snapshot 成本，选择更小者，随后精确回收已断开的旧链。
+- schema v3 首次打开会压缩并重建为 v4 派生结构；未来版本会被拒绝；tree 回退、初始化并发和相同 tree 的并发发布均有回归覆盖。
+
+### R7：三轮审查与性能收敛
+
+状态：已完成
+
+1. 第 1 轮审查规范与 P0–P3：移除每次发布的全量 flatten/GC，补齐 overlay 深度 checkpoint、relation head 重试与 Branch Rule 零匹配错误契约。
+2. 第 2 轮审查事务、并发与生命周期：修复 A→B→A tree 回退、发布/GC TOCTOU、跨分支 embedding/bucket 竞态、enrichment 单 owner 与租约恢复、synthetic object 无分支泄漏。
+3. 第 3 轮审查查询、GC 与性能：关系构图移出写事务，零命中不构图，import-aware 消歧替代同名全连接，related 邻边改为批量查询；修复弱路径命中误裁剪、checkpoint 成本选择、artifact GC 索引、SQLite 多页回收、未来 schema 降级和 in-flight worktree prune。
+
+完成证据：
+
+- 全仓 `142 passed`；核心索引、REST/Service 适配与性能门槛 `74 passed`。
+- 100/500 文件基线中，单文件增量分别为 41.008/42.009 ms，只扫描并解析 1 个文件；无变化为 6.883/7.069 ms；查询 P95 为 2.415/19.203 ms。
+- 40 个同名目标的 import 消歧回归只生成 1 条关系；30 个主命中的 related 邻边读取由 30 条 SQL 收敛为 1 条。
 
 ## 实施原则
 

@@ -145,6 +145,9 @@ class RepositoryService:
             self.scope,
         ))
 
+    def reconcile_branches(self, active_branches: list[str]) -> dict:
+        return asdict(self.index.reconcile_branches(self.repo, active_branches))
+
     def inspect(self, *, revision: str | None = None) -> dict:
         status = self.index.inspect(self.scope)
         snapshot = GitSnapshot(self.root)

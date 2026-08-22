@@ -39,7 +39,7 @@ def write_repository_projection(
     scope: IndexScope,
 ) -> ProjectionReport:
     """Render Wiki and Skill files from one already-published generation."""
-    status = index.inspect(scope)
+    status = index.inspect(scope, resolve_relations=False)
     if not status.exists or status.generation is None:
         raise ValueError(f"index scope {scope.repo}:{scope.branch} has no published generation")
 
