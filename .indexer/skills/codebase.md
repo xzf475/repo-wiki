@@ -26,7 +26,7 @@ The wiki captures structure, relationships, and constraints in a fraction of the
 
 ## System Overview
 
-repo-wiki:jame/artifact-branch-index generation 3 at tree 3b9d23732ec22a3698c22cab765f4d12e5c33725
+repo-wiki:main generation 1 at tree 3b9d23732ec22a3698c22cab765f4d12e5c33725
 
 ## Wiki Pages
 
